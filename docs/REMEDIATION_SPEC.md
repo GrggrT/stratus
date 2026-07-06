@@ -146,13 +146,12 @@ All eight roadmap items landed in the follow-up pass:
 7. **Fail-closed runtime control.** A missing `runtime_control` row (seeded
    by migration 0009, so always abnormal) now reads as kill switch ON with
    `halted_reason="runtime_control row missing"`.
-8. **Type checking.** `mypy` (with `check_untyped_defs`) is clean over the
-   whole tree and runs in CI. The 29 findings it surfaced — including two
-   real `str | None` argument bugs in `bootstrap_iem` — were fixed.
+8. **Type checking.** `mypy --strict` is clean over the whole tree and
+   runs in CI. The findings it surfaced on the way — including two real
+   `str | None` argument bugs in `bootstrap_iem` — were fixed.
 
 ## Remaining recommendations
 
-- Move `mypy` towards `--strict` module-by-module.
 - Before live trading: re-read the live-readiness checklist in
   `AUSTRIA_LIVE_READINESS.md`.
 

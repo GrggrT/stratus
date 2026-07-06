@@ -20,6 +20,7 @@ from stratus.db.models import (
     MarketStatus,
     ModelProb,
     Station,
+    WeatherKind,
 )
 from stratus.db.session import session_factory_scope
 from stratus.repositories.model_probs import ModelProbabilityValue, upsert_model_probs
@@ -179,7 +180,7 @@ async def recompute_probs(
                 )
             ).all()
 
-        latest: dict[tuple, Forecast] = {}
+        latest: dict[tuple[int, str, date, WeatherKind], Forecast] = {}
         for forecast in forecasts:
             key = (
                 forecast.station_id,
@@ -198,7 +199,9 @@ async def recompute_probs(
             ): row
             for row in calibration_rows
         }
-        actuals_by_station_kind: dict[tuple, list[DailyActual]] = defaultdict(list)
+        actuals_by_station_kind: dict[tuple[int, WeatherKind], list[DailyActual]] = (
+            defaultdict(list)
+        )
         for actual in actual_rows:
             actuals_by_station_kind[(actual.station_id, actual.kind)].append(actual)
         component_scores = component_brier_scores(
