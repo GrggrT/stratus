@@ -131,9 +131,9 @@ All eight roadmap items landed in the follow-up pass:
    (`services/execution.py::usable_ask_depth_usd`); a thin executed book
    leaves the signal pending until its TTL.
 3. **Loss-limit day boundaries.** The accounting timezone is now the
-   `RISK_TIMEZONE` setting (`services/risk.py::period_starts`). Default
-   stays UTC (behaviour unchanged); set `America/New_York` to align the
-   daily reset with the venue day — this remains the recommended value.
+   `RISK_TIMEZONE` setting (`services/risk.py::period_starts`). Per the
+   operator's decision (2026-07-06) the default is `America/New_York`,
+   aligning the daily reset with the venue day.
 4. **Signals table retention.** `stratus-prune-signals` (scheduled daily at
    03:30 UTC) deletes SKIPPED/EXPIRED signals older than
    `SIGNAL_RETENTION_DAYS` (default 30) that never produced an order.
@@ -153,8 +153,7 @@ All eight roadmap items landed in the follow-up pass:
 ## Remaining recommendations
 
 - Move `mypy` towards `--strict` module-by-module.
-- Before live trading: revisit `RISK_TIMEZONE` (recommend
-  `America/New_York`), and re-read the live-readiness checklist in
+- Before live trading: re-read the live-readiness checklist in
   `AUSTRIA_LIVE_READINESS.md`.
 
 ## Acceptance criteria

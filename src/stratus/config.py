@@ -44,9 +44,9 @@ class Settings(BaseSettings):
     calibration_window_days: int = Field(default=180, ge=30, le=730)
     calibration_min_samples: int = Field(default=60, ge=20, le=500)
     initial_bankroll_usd: float = Field(default=1080.0, gt=0)
-    # Accounting timezone for daily/weekly loss limits. UTC keeps historical
-    # behaviour; America/New_York aligns the reset with the venue day.
-    risk_timezone: str = "UTC"
+    # Accounting timezone for daily/weekly loss limits. America/New_York
+    # aligns the reset with the venue day (operator decision, 2026-07-06).
+    risk_timezone: str = "America/New_York"
     signal_retention_days: int = Field(default=30, ge=7, le=365)
     trading_mode: str = "paper"
     telegram_bot_token: str | None = None
