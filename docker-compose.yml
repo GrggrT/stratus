@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: stratus
+      POSTGRES_USER: stratus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stratus}
+    ports:
+      # Loopback only: the database stores the kill switch and execution
+      # mode, so it must never be reachable from outside the host.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - stratus-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stratus -d stratus"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    image: stratus:local
+    command: ["alembic", "upgrade", "head"]
+    environment: &stratus-environment
+      DATABASE_URL: postgresql+asyncpg://stratus:${POSTGRES_PASSWORD:-stratus}@postgres:5432/stratus
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  worker:
+    image: stratus:local
+    build: .
+    command: ["stratus-run"]
+    environment: *stratus-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  api:
+    image: stratus:local
+    command: ["stratus-api"]
+    environment: *stratus-environment
+    ports:
+      - "127.0.0.1:${STRATUS_API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  backup:
+    image: postgres:16-alpine
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: stratus
+      PGPASSWORD: ${POSTGRES_PASSWORD:-stratus}
+      PGDATABASE: stratus
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        mkdir -p /backups
+        while true; do
+          target="/backups/stratus_$$(date -u +%Y%m%dT%H%M%SZ).dump"
+          pg_dump --format=custom --compress=6 --file="$$target"
+          pg_restore --list "$$target" >/dev/null
+          find /backups -type f -name 'stratus_*.dump' -mtime +14 -delete
+          sleep 86400
+        done
+    volumes:
+      - ./backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  telegram:
+    image: stratus:local
+    command: ["stratus-telegram"]
+    environment:
+      <<: *stratus-environment
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ADMIN_USER_ID: ${TELEGRAM_ADMIN_USER_ID:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    profiles: ["telegram"]
+
+volumes:
+  stratus-postgres:

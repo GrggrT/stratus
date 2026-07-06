@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stratus"
+version = "0.1.0"
+description = "Polymarket weather forecast collector"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "apscheduler>=3.11,<4",
+  "alembic>=1.14,<2",
+  "aiogram>=3.15,<4",
+  "asyncpg>=0.30,<1",
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "pillow>=11.1,<12",
+  "pydantic-settings>=2.7,<3",
+  "sqlalchemy[asyncio]>=2.0.36,<3",
+  "tzdata>=2025.2",
+  "uvicorn>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+stratus-fetch-forecasts = "stratus.jobs.fetch_forecasts:main"
+stratus-discover-markets = "stratus.jobs.discover_markets:main"
+stratus-fetch-observations = "stratus.jobs.fetch_observations:main"
+stratus-finalize-daily-actuals = "stratus.jobs.finalize_daily_actuals:main"
+stratus-fetch-prices = "stratus.jobs.fetch_prices:main"
+stratus-fetch-ensemble = "stratus.jobs.fetch_ensemble:main"
+stratus-bootstrap-iem = "stratus.jobs.bootstrap_iem:main"
+stratus-bootstrap-previous-runs = "stratus.jobs.bootstrap_previous_runs:main"
+stratus-recalibrate-emos = "stratus.jobs.recalibrate_emos:main"
+stratus-recompute-probs = "stratus.jobs.recompute_probs:main"
+stratus-generate-signals = "stratus.jobs.generate_signals:main"
+stratus-execute-signals = "stratus.jobs.execute_signals:main"
+stratus-settle-markets = "stratus.jobs.settle_markets:main"
+stratus-run = "stratus.runtime:main"
+stratus-telegram = "stratus.telegram_bot:main"
+stratus-audit-gate = "stratus.jobs.audit_gate:main"
+stratus-audit-health = "stratus.jobs.audit_health:main"
+stratus-backfill-fees = "stratus.jobs.backfill_fees:main"
+stratus-api = "stratus.api:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stratus"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]

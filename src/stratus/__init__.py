@@ -1,0 +1,2 @@
+"""STRATUS weather trading system."""
+
