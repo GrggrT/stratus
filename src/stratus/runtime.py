@@ -16,6 +16,7 @@ from apscheduler.events import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.config import Settings, get_settings
 from stratus.db.session import create_engine, create_session_factory
@@ -29,6 +30,7 @@ from stratus.jobs.fetch_observations import fetch_observations
 from stratus.jobs.fetch_prices import fetch_prices
 from stratus.jobs.finalize_daily_actuals import finalize_daily_actuals
 from stratus.jobs.generate_signals import generate_signals
+from stratus.jobs.prune_signals import prune_signals
 from stratus.jobs.recalibrate_emos import recalibrate_emos
 from stratus.jobs.recompute_probs import recompute_probs
 from stratus.jobs.settle_markets import settle_markets
@@ -38,50 +40,64 @@ from stratus.repositories.telegram import enqueue_notification
 logger = logging.getLogger(__name__)
 _PROBABILITY_PIPELINE_LOCK = asyncio.Lock()
 
+SessionFactory = async_sessionmaker[AsyncSession]
 
-async def _probability_pipeline(settings: Settings) -> None:
+
+async def _probability_pipeline(
+    settings: Settings, sessions: SessionFactory | None = None
+) -> None:
     async with _PROBABILITY_PIPELINE_LOCK:
-        written, _ = await recompute_probs(settings)
+        written, _ = await recompute_probs(settings, sessions)
         if written:
-            await generate_signals(settings)
+            await generate_signals(settings, sessions)
 
 
-async def forecast_cycle(settings: Settings) -> None:
-    if await fetch_forecasts(settings):
-        await _probability_pipeline(settings)
+async def forecast_cycle(
+    settings: Settings, sessions: SessionFactory | None = None
+) -> None:
+    if await fetch_forecasts(settings, sessions):
+        await _probability_pipeline(settings, sessions)
 
 
-async def ensemble_cycle(settings: Settings) -> None:
-    if await fetch_ensemble(settings):
-        await _probability_pipeline(settings)
+async def ensemble_cycle(
+    settings: Settings, sessions: SessionFactory | None = None
+) -> None:
+    if await fetch_ensemble(settings, sessions):
+        await _probability_pipeline(settings, sessions)
 
 
-async def price_cycle(settings: Settings) -> None:
-    written, _ = await fetch_prices(settings)
+async def price_cycle(
+    settings: Settings, sessions: SessionFactory | None = None
+) -> None:
+    written, _ = await fetch_prices(settings, sessions)
     if written:
-        await _probability_pipeline(settings)
+        await _probability_pipeline(settings, sessions)
 
 
-async def startup_refresh(settings: Settings) -> None:
-    await discover_markets(settings)
+async def startup_refresh(
+    settings: Settings, sessions: SessionFactory | None = None
+) -> None:
+    await discover_markets(settings, sessions)
     forecasts, ensemble, _observations = await asyncio.gather(
-        fetch_forecasts(settings),
-        fetch_ensemble(settings),
-        fetch_observations(settings),
+        fetch_forecasts(settings, sessions),
+        fetch_ensemble(settings, sessions),
+        fetch_observations(settings, sessions),
     )
-    await finalize_daily_actuals(settings)
-    prices, _ = await fetch_prices(settings)
+    await finalize_daily_actuals(settings, sessions)
+    prices, _ = await fetch_prices(settings, sessions)
     if forecasts or ensemble or prices:
-        await _probability_pipeline(settings)
-    await execute_signals(settings)
-    await settle_markets(settings)
+        await _probability_pipeline(settings, sessions)
+    await execute_signals(settings, sessions)
+    await settle_markets(settings, sessions)
 
 
-def build_scheduler(settings: Settings) -> AsyncIOScheduler:
+def build_scheduler(
+    settings: Settings, sessions: SessionFactory | None = None
+) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=UTC)
-    common = {"args": [settings], "coalesce": True, "max_instances": 1}
+    common = {"args": [settings, sessions], "coalesce": True, "max_instances": 1}
     jobs: list[
-        tuple[Callable[[Settings], Awaitable[object]], object, str]
+        tuple[Callable[..., Awaitable[object]], object, str]
     ] = [
         (forecast_cycle, IntervalTrigger(hours=1), "forecasts"),
         (ensemble_cycle, IntervalTrigger(hours=6), "ensemble"),
@@ -102,6 +118,11 @@ def build_scheduler(settings: Settings) -> AsyncIOScheduler:
             CronTrigger(hour=8, minute=0, timezone=ZoneInfo("Europe/Berlin")),
             "validation-gate",
         ),
+        (
+            prune_signals,
+            CronTrigger(hour=3, minute=30, timezone=UTC),
+            "signal-retention",
+        ),
     ]
     for function, trigger, job_id in jobs:
         scheduler.add_job(function, trigger, id=job_id, **common)
@@ -110,11 +131,13 @@ def build_scheduler(settings: Settings) -> AsyncIOScheduler:
 
 async def run(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
-    scheduler = build_scheduler(settings)
     stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
-    health_engine = create_engine(settings)
-    health_sessions = create_session_factory(health_engine)
+    # One engine for the whole scheduler process: jobs share its pool instead
+    # of building and disposing their own engine on every invocation.
+    engine = create_engine(settings)
+    sessions = create_session_factory(engine)
+    scheduler = build_scheduler(settings, sessions)
 
     def request_stop() -> None:
         stopped.set()
@@ -127,7 +150,7 @@ async def run(settings: Settings | None = None) -> None:
             status = "missed"
         error = str(event.exception)[:4000] if event.exception is not None else None
         try:
-            async with health_sessions.begin() as session:
+            async with sessions.begin() as session:
                 await record_job_run(
                     session,
                     job_id=event.job_id,
@@ -168,13 +191,13 @@ async def run(settings: Settings | None = None) -> None:
     scheduler.start()
     logger.info("STRATUS scheduler started with %d jobs", len(scheduler.get_jobs()))
     try:
-        await startup_refresh(settings)
+        await startup_refresh(settings, sessions)
         await stopped.wait()
     finally:
         scheduler.shutdown(wait=False)
         if listener_tasks:
             await asyncio.gather(*listener_tasks, return_exceptions=True)
-        await health_engine.dispose()
+        await engine.dispose()
         logger.info("STRATUS scheduler stopped at %s", datetime.now(UTC).isoformat())
 
 

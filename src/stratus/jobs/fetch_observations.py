@@ -4,21 +4,23 @@ import asyncio
 import logging
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.collectors.aviation_weather import AviationWeatherClient
 from stratus.config import Settings, get_settings
 from stratus.db.models import Station
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import session_factory_scope
 from stratus.repositories.observations import upsert_observations
 
 logger = logging.getLogger(__name__)
 
 
-async def fetch_observations(settings: Settings | None = None) -> int:
+async def fetch_observations(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> int:
     settings = settings or get_settings()
-    engine = create_engine(settings)
-    session_factory = create_session_factory(engine)
-    try:
+    async with session_factory_scope(settings, session_factory) as session_factory:
         async with session_factory() as session:
             stations = (
                 await session.execute(select(Station).where(Station.active.is_(True)))
@@ -42,8 +44,6 @@ async def fetch_observations(settings: Settings | None = None) -> int:
             written,
         )
         return written
-    finally:
-        await engine.dispose()
 
 
 def main() -> None:

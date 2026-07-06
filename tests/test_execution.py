@@ -2,7 +2,32 @@ from decimal import Decimal
 
 import pytest
 
-from stratus.services.execution import PaperExecutionError, taker_fee, walk_ask_book
+from stratus.services.execution import (
+    PaperExecutionError,
+    taker_fee,
+    usable_ask_depth_usd,
+    walk_ask_book,
+)
+
+
+def test_usable_ask_depth_counts_only_executable_levels() -> None:
+    depth = usable_ask_depth_usd(
+        {
+            "asks": [
+                {"price": "0.50", "size": "20"},
+                {"price": "0.51", "size": "10"},
+                {"price": "0.60", "size": "1000"},
+            ]
+        },
+        max_price=Decimal("0.51"),
+    )
+
+    assert depth == Decimal("15.10")
+
+
+def test_usable_ask_depth_rejects_malformed_books() -> None:
+    with pytest.raises(PaperExecutionError):
+        usable_ask_depth_usd({"asks": "invalid"}, max_price=Decimal("0.51"))
 
 
 def test_walk_ask_book_fills_across_levels_in_price_order() -> None:

@@ -24,6 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "mypy>=1.14,<2",
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.25,<1",
   "ruff>=0.9,<1",
@@ -48,6 +49,7 @@ stratus-telegram = "stratus.telegram_bot:main"
 stratus-audit-gate = "stratus.jobs.audit_gate:main"
 stratus-audit-health = "stratus.jobs.audit_health:main"
 stratus-backfill-fees = "stratus.jobs.backfill_fees:main"
+stratus-prune-signals = "stratus.jobs.prune_signals:main"
 stratus-api = "stratus.api:main"
 
 [tool.hatch.build.targets.wheel]
@@ -56,6 +58,13 @@ packages = ["src/stratus"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
 
 [tool.ruff]
 line-length = 100

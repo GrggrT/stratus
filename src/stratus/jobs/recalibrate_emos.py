@@ -7,12 +7,19 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import and_, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.config import Settings, get_settings
-from stratus.db.models import DailyActual, HistoricalForecast
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.models import DailyActual, HistoricalForecast, WeatherKind
+from stratus.db.session import session_factory_scope
 from stratus.repositories.calibration import CalibrationValue, upsert_calibrations
-from stratus.services.emos import fit_emos, fit_horizon_sigma, horizon_bucket
+from stratus.services.emos import (
+    EmosFit,
+    HorizonSigmaFit,
+    fit_emos,
+    fit_horizon_sigma,
+    horizon_bucket,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +28,14 @@ def _decimal(value: float) -> Decimal:
     return Decimal(str(value)).quantize(Decimal("0.00000001"))
 
 
-async def recalibrate_emos(settings: Settings | None = None) -> int:
+async def recalibrate_emos(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> int:
     settings = settings or get_settings()
-    engine = create_engine(settings)
-    session_factory = create_session_factory(engine)
     now = datetime.now(UTC)
     cutoff = now.date() - timedelta(days=settings.calibration_window_days)
-    try:
+    async with session_factory_scope(settings, session_factory) as session_factory:
         async with session_factory() as session:
             rows = (
                 await session.execute(
@@ -43,7 +51,9 @@ async def recalibrate_emos(settings: Settings | None = None) -> int:
                     .where(HistoricalForecast.valid_date >= cutoff)
                 )
             ).all()
-        grouped: dict[tuple, list[tuple[float, float, int]]] = defaultdict(list)
+        grouped: dict[
+            tuple[int, str, str, WeatherKind], list[tuple[float, float, int]]
+        ] = defaultdict(list)
         for forecast, actual_temp in rows:
             key = (
                 forecast.station_id,
@@ -55,7 +65,7 @@ async def recalibrate_emos(settings: Settings | None = None) -> int:
                 (float(forecast.temp_c), float(actual_temp), forecast.horizon_h)
             )
 
-        fitted = {}
+        fitted: dict[tuple[int, str, str, WeatherKind], tuple[EmosFit, float]] = {}
         skipped = 0
         for (station_id, model, bucket, kind), samples in grouped.items():
             if len(samples) < settings.calibration_min_samples:
@@ -69,15 +79,17 @@ async def recalibrate_emos(settings: Settings | None = None) -> int:
             mean_horizon = sum(horizon for _, _, horizon in samples) / len(samples)
             fitted[(station_id, model, bucket, kind)] = (fit, mean_horizon)
 
-        sigma_points: dict[tuple, list[tuple[float, float, int]]] = defaultdict(list)
+        sigma_points: dict[
+            tuple[int, str, WeatherKind], list[tuple[float, float, int]]
+        ] = defaultdict(list)
         for (station_id, model, _bucket, kind), (fit, mean_horizon) in fitted.items():
             sigma_points[(station_id, model, kind)].append(
                 (mean_horizon, fit.sigma_c, fit.sample_n)
             )
-        sigma_curves = {}
-        for key, points in sigma_points.items():
+        sigma_curves: dict[tuple[int, str, WeatherKind], HorizonSigmaFit] = {}
+        for sigma_key, points in sigma_points.items():
             try:
-                sigma_curves[key] = fit_horizon_sigma(points)
+                sigma_curves[sigma_key] = fit_horizon_sigma(points)
             except ValueError:
                 continue
 
@@ -112,8 +124,6 @@ async def recalibrate_emos(settings: Settings | None = None) -> int:
             skipped,
         )
         return written
-    finally:
-        await engine.dispose()
 
 
 def main() -> None:

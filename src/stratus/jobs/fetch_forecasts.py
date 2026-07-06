@@ -5,12 +5,13 @@ import logging
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.collectors.nws import NwsForecastClient
 from stratus.collectors.open_meteo import OpenMeteoClient, StationTarget
 from stratus.config import Settings, get_settings
 from stratus.db.models import Station
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import session_factory_scope
 from stratus.repositories.forecasts import upsert_forecasts
 
 logger = logging.getLogger(__name__)
@@ -20,14 +21,14 @@ class ForecastCollectionError(RuntimeError):
     pass
 
 
-async def fetch_forecasts(settings: Settings | None = None) -> int:
+async def fetch_forecasts(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> int:
     settings = settings or get_settings()
     snapshot_time = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     fetched_at = datetime.now(UTC)
-    engine = create_engine(settings)
-    session_factory = create_session_factory(engine)
-
-    try:
+    async with session_factory_scope(settings, session_factory) as session_factory:
         async with session_factory() as session:
             station_rows = (
                 await session.execute(select(Station).where(Station.active.is_(True)))
@@ -103,8 +104,6 @@ async def fetch_forecasts(settings: Settings | None = None) -> int:
                 "partial forecast collection failure: " + "; ".join(failures)
             )
         return written
-    finally:
-        await engine.dispose()
 
 
 def main() -> None:

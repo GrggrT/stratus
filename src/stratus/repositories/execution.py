@@ -16,6 +16,7 @@ from stratus.db.models import (
     SignalStatus,
     TradeSide,
 )
+from stratus.db.session import dml_rowcount
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +41,7 @@ async def expire_pending_signals(session: AsyncSession, signal_ids: list[int]) -
         .where(Signal.id.in_(signal_ids), Signal.status == SignalStatus.PENDING)
         .values(status=SignalStatus.EXPIRED, skip_reason="paper_execution_timeout")
     )
-    return result.rowcount or 0
+    return dml_rowcount(result)
 
 
 async def persist_paper_executions(

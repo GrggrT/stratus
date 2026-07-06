@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.collectors.iem import IemClient, IemStation, year_chunks
 from stratus.config import Settings, get_settings
@@ -32,8 +34,8 @@ def _subtract_years(value: date, years: int) -> date:
 
 
 async def _backfill_daily_actuals(
-    session_factory,
-    stations: list[Station],
+    session_factory: async_sessionmaker[AsyncSession],
+    stations: Sequence[Station],
     *,
     start: date,
     end: date,
@@ -120,13 +122,16 @@ async def bootstrap_iem(settings: Settings | None = None) -> tuple[int, int]:
                 IemStation(
                     station_id=station.id,
                     icao=station.icao,
-                    network=station.iem_network,
-                    source_station_id=station.iem_station_id,
+                    network=network,
+                    source_station_id=source_station_id,
                 ),
                 chunk_start,
                 chunk_end,
             )
             for station in stations
+            # The missing_source guard above already raised; the walrus
+            # filter only narrows str | None to str for the type checker.
+            if (network := station.iem_network) and (source_station_id := station.iem_station_id)
             for chunk_start, chunk_end in year_chunks(download_start, download_end)
         ]
         imported = 0

@@ -6,11 +6,12 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.collectors.clob import ClobClient
 from stratus.config import Settings, get_settings
 from stratus.db.models import ExecutionMode, Market, Signal, SignalStatus, TradeSide
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import session_factory_scope
 from stratus.repositories.execution import (
     PaperExecutionValue,
     expire_pending_signals,
@@ -18,18 +19,23 @@ from stratus.repositories.execution import (
 )
 from stratus.repositories.risk import enforce_loss_limits
 from stratus.repositories.runtime_control import get_runtime_control
-from stratus.services.execution import PaperExecutionError, walk_ask_book
+from stratus.services.execution import (
+    PaperExecutionError,
+    usable_ask_depth_usd,
+    walk_ask_book,
+)
 
 logger = logging.getLogger(__name__)
 PAPER_ORDER_TTL = timedelta(minutes=10)
 
 
-async def execute_signals(settings: Settings | None = None) -> tuple[int, int, int]:
+async def execute_signals(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> tuple[int, int, int]:
     settings = settings or get_settings()
-    engine = create_engine(settings)
-    session_factory = create_session_factory(engine)
     now = datetime.now(UTC)
-    try:
+    async with session_factory_scope(settings, session_factory) as session_factory:
         async with session_factory.begin() as session:
             control = await get_runtime_control(session)
             if control.kill_switch or control.halted_reason:
@@ -43,6 +49,7 @@ async def execute_signals(settings: Settings | None = None) -> tuple[int, int, i
                 session,
                 mode=ExecutionMode.PAPER,
                 initial_bankroll_usd=settings.initial_bankroll_usd,
+                timezone=settings.risk_timezone,
                 now=now,
             )
             if loss_limits.daily_breached or loss_limits.weekly_breached:
@@ -105,6 +112,19 @@ async def execute_signals(settings: Settings | None = None) -> tuple[int, int, i
                     raise PaperExecutionError(
                         f"unsupported fee exponent {market.fee_exponent}"
                     )
+                # The generation-side depth gate uses the YES snapshot as a
+                # proxy; re-check 3x depth against the book this order would
+                # actually execute on. The signal stays pending until TTL.
+                executed_depth = usable_ask_depth_usd(book, max_price=max_price)
+                if executed_depth < 3 * signal.size_usd:
+                    logger.info(
+                        "insufficient executed-book depth for signal %d: $%s < 3x $%s",
+                        signal.id,
+                        executed_depth,
+                        signal.size_usd,
+                    )
+                    unfilled += 1
+                    continue
                 fill = walk_ask_book(
                     book,
                     target_usd=signal.size_usd,
@@ -144,8 +164,6 @@ async def execute_signals(settings: Settings | None = None) -> tuple[int, int, i
             unfilled,
         )
         return executed, expired, unfilled
-    finally:
-        await engine.dispose()
 
 
 def main() -> None:

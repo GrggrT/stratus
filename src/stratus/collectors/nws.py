@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -50,7 +50,7 @@ def parse_nws_hourly_forecast(
         raise NwsForecastError("NWS updateTime must include a timezone")
 
     timezone = ZoneInfo(station.tz)
-    grouped: dict[object, list[tuple[datetime, datetime, Decimal]]] = defaultdict(list)
+    grouped: dict[date, list[tuple[datetime, datetime, Decimal]]] = defaultdict(list)
     for period in periods:
         if not isinstance(period, dict):
             raise NwsForecastError("NWS periods contain a non-object value")
@@ -72,7 +72,7 @@ def parse_nws_hourly_forecast(
             )
         )
 
-    values = []
+    values: list[ForecastValue] = []
     for valid_date, entries in sorted(grouped.items()):
         entries.sort(key=lambda entry: entry[0])
         day_start = datetime.combine(valid_date, datetime.min.time(), tzinfo=timezone)

@@ -121,10 +121,10 @@ class IemClient:
             ("report_type", "3"),
             ("report_type", "4"),
         ]
-        content = await self._get_text(params)
+        content = await self._get_text(tuple(params))
         return parse_iem_csv(content, station_id=station.station_id, start=start, end=end)
 
-    async def _get_text(self, params: list[tuple[str, str]]) -> str:
+    async def _get_text(self, params: tuple[tuple[str, str], ...]) -> str:
         assert self._client is not None
         last_error: Exception | None = None
         for attempt in range(4):

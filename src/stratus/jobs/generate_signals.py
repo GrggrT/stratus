@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.config import Settings, get_settings
 from stratus.db.models import (
@@ -22,7 +23,7 @@ from stratus.db.models import (
     Station,
     TradeSide,
 )
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import session_factory_scope
 from stratus.repositories.risk import enforce_loss_limits
 from stratus.repositories.runtime_control import get_runtime_control
 from stratus.repositories.signals import SignalValue, insert_signals
@@ -35,12 +36,13 @@ def _decimal(value: float, precision: str) -> Decimal:
     return Decimal(str(value)).quantize(Decimal(precision))
 
 
-async def generate_signals(settings: Settings | None = None) -> tuple[int, int]:
+async def generate_signals(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> tuple[int, int]:
     settings = settings or get_settings()
-    engine = create_engine(settings)
-    session_factory = create_session_factory(engine)
     now = datetime.now(UTC)
-    try:
+    async with session_factory_scope(settings, session_factory) as session_factory:
         async with session_factory.begin() as session:
             control = await get_runtime_control(session)
             mode = control.mode
@@ -48,6 +50,7 @@ async def generate_signals(settings: Settings | None = None) -> tuple[int, int]:
                 session,
                 mode=mode,
                 initial_bankroll_usd=settings.initial_bankroll_usd,
+                timezone=settings.risk_timezone,
                 now=now,
             )
             control = await get_runtime_control(session)
@@ -219,8 +222,6 @@ async def generate_signals(settings: Settings | None = None) -> tuple[int, int]:
             len(candidates) - accepted,
         )
         return accepted, len(candidates) - accepted
-    finally:
-        await engine.dispose()
 
 
 def main() -> None:

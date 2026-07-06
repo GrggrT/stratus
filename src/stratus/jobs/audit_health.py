@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.config import Settings, get_settings
 from stratus.db.models import (
@@ -23,7 +24,7 @@ from stratus.db.models import (
     SignalStatus,
     Station,
 )
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import session_factory_scope
 from stratus.repositories.job_runs import collector_uptime
 from stratus.repositories.risk import enforce_loss_limits
 from stratus.repositories.runtime_control import set_kill_switch
@@ -42,14 +43,15 @@ def invalid_event_probability_sums(
     )
 
 
-async def audit_health(settings: Settings | None = None) -> tuple[str, int]:
+async def audit_health(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> tuple[str, int]:
     settings = settings or get_settings()
-    engine = create_engine(settings)
-    sessions = create_session_factory(engine)
     now = datetime.now(UTC)
     issues: list[dict[str, str]] = []
     critical = False
-    try:
+    async with session_factory_scope(settings, session_factory) as sessions:
         async with sessions.begin() as session:
             uptime = await collector_uptime(session, now=now)
             if uptime.mature and not uptime.passed:
@@ -64,6 +66,7 @@ async def audit_health(settings: Settings | None = None) -> tuple[str, int]:
                 session,
                 mode=ExecutionMode.PAPER,
                 initial_bankroll_usd=settings.initial_bankroll_usd,
+                timezone=settings.risk_timezone,
                 now=now,
             )
             if loss_limits.daily_breached:
@@ -121,6 +124,25 @@ async def audit_health(settings: Settings | None = None) -> tuple[str, int]:
                     {
                         "code": "near_price_stale",
                         "detail": f"{len(stale_prices)} market(s)",
+                    }
+                )
+
+            # Settlement escalation: a market this far past resolution that is
+            # still unresolved needs a human (Gamma dropped it, or the outcome
+            # never reached exact 1/0 prices).
+            stale_settlements = await session.scalar(
+                select(func.count())
+                .select_from(Market)
+                .where(
+                    Market.status != MarketStatus.RESOLVED,
+                    Market.resolves_at < now - timedelta(hours=12),
+                )
+            )
+            if stale_settlements:
+                issues.append(
+                    {
+                        "code": "settlement_stale",
+                        "detail": f"{stale_settlements} market(s) >12h past resolution",
                     }
                 )
 
@@ -236,8 +258,6 @@ async def audit_health(settings: Settings | None = None) -> tuple[str, int]:
                 )
         logger.info("health audit complete: status=%s issues=%d", status, len(issues))
         return status, len(issues)
-    finally:
-        await engine.dispose()
 
 
 def main() -> None:

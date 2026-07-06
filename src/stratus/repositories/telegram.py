@@ -19,6 +19,7 @@ from stratus.db.models import (
     Station,
     TelegramDelivery,
 )
+from stratus.db.session import dml_rowcount
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +43,7 @@ async def enqueue_notification(
         .values(event_key=event_key, payload=payload)
         .on_conflict_do_nothing(index_elements=[TelegramDelivery.event_key])
     )
-    return bool(result.rowcount)
+    return bool(dml_rowcount(result))
 
 
 def _bucket(market: Market) -> str:
@@ -152,7 +153,7 @@ async def enqueue_recent_notifications(
         .values(values)
         .on_conflict_do_nothing(index_elements=[TelegramDelivery.event_key])
     )
-    return result.rowcount or 0
+    return dml_rowcount(result)
 
 
 async def pending_deliveries(

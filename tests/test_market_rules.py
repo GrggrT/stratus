@@ -25,6 +25,14 @@ def test_extract_station_cross_checks_rules_and_resolution_source() -> None:
     ) == {"KLGA"}
 
 
+def test_extract_station_ignores_lowercase_path_segments() -> None:
+    rules = (
+        "See https://forecast.weather.gov/data/obhistory/KLGA.html "
+        "and https://example.com/wrh1/page"
+    )
+    assert extract_station_candidates(rules, None) == {"KLGA"}
+
+
 def test_extract_station_exposes_conflicting_sources() -> None:
     rules = "Source: https://www.wunderground.com/history/daily/gb/london/EGLC."
     assert extract_station_candidates(

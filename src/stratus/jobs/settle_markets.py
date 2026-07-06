@@ -6,22 +6,24 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.collectors.gamma import GammaClient, parse_market_resolutions
 from stratus.config import Settings, get_settings
 from stratus.db.models import Market, MarketStatus
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import session_factory_scope
 from stratus.repositories.settlement import settle_paper_markets
 
 logger = logging.getLogger(__name__)
 
 
-async def settle_markets(settings: Settings | None = None) -> tuple[int, int]:
+async def settle_markets(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> tuple[int, int]:
     settings = settings or get_settings()
-    engine = create_engine(settings)
-    session_factory = create_session_factory(engine)
     now = datetime.now(UTC)
-    try:
+    async with session_factory_scope(settings, session_factory) as session_factory:
         async with session_factory() as session:
             candidates = (
                 await session.execute(
@@ -71,8 +73,6 @@ async def settle_markets(settings: Settings | None = None) -> tuple[int, int]:
             pnl,
         )
         return resolved, positions
-    finally:
-        await engine.dispose()
 
 
 def main() -> None:

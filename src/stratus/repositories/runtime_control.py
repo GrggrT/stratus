@@ -13,6 +13,7 @@ from stratus.db.models import (
     Signal,
     SignalStatus,
 )
+from stratus.db.session import dml_rowcount
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +27,11 @@ class RuntimeSnapshot:
 async def get_runtime_control(session: AsyncSession) -> RuntimeSnapshot:
     control = await session.scalar(select(RuntimeControl).where(RuntimeControl.id == 1))
     if control is None:
-        return RuntimeSnapshot(False, ExecutionMode.PAPER, None, None)
+        # Migration 0009 seeds this row; a missing row is an abnormal state,
+        # so fail closed instead of defaulting to "trading allowed".
+        return RuntimeSnapshot(
+            True, ExecutionMode.PAPER, None, "runtime_control row missing"
+        )
     return RuntimeSnapshot(
         kill_switch=control.kill_switch,
         mode=control.mode,
@@ -61,7 +66,7 @@ async def set_kill_switch(
         .where(Order.mode == ExecutionMode.LIVE, Order.status.in_(["open", "pending"]))
         .values(status="cancel_requested")
     )
-    return result.rowcount or 0
+    return dml_rowcount(result)
 
 
 async def set_mode(session: AsyncSession, mode: ExecutionMode) -> None:

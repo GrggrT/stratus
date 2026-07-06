@@ -9,7 +9,7 @@ async def test_probability_pipeline_is_serialized(monkeypatch) -> None:
     max_active = 0
     events: list[str] = []
 
-    async def fake_recompute(_settings: Settings) -> tuple[int, int]:
+    async def fake_recompute(_settings: Settings, _sessions=None) -> tuple[int, int]:
         nonlocal active, max_active
         active += 1
         max_active = max(max_active, active)
@@ -17,7 +17,7 @@ async def test_probability_pipeline_is_serialized(monkeypatch) -> None:
         await asyncio.sleep(0.01)
         return 1, 0
 
-    async def fake_generate(_settings: Settings) -> tuple[int, int]:
+    async def fake_generate(_settings: Settings, _sessions=None) -> tuple[int, int]:
         nonlocal active
         events.append("signals")
         active -= 1

@@ -25,6 +25,7 @@ uv run stratus-settle-markets
 uv run stratus-audit-gate
 uv run stratus-audit-health
 uv run stratus-backfill-fees
+uv run stratus-prune-signals
 uv run stratus-api
 uv run stratus-run
 uv run stratus-telegram

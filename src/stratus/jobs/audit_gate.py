@@ -5,6 +5,7 @@ import logging
 from datetime import UTC, datetime
 
 from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.config import Settings, get_settings
 from stratus.db.models import (
@@ -13,7 +14,7 @@ from stratus.db.models import (
     RuntimeControl,
     ValidationCheckpoint,
 )
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import session_factory_scope
 from stratus.repositories.telegram import enqueue_notification
 from stratus.services.telegram_reports import calculate_live_gate
 
@@ -28,12 +29,13 @@ def due_checkpoint(elapsed_days: int, completed: set[int]) -> int | None:
     )
 
 
-async def audit_gate(settings: Settings | None = None) -> int | None:
+async def audit_gate(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> int | None:
     settings = settings or get_settings()
-    engine = create_engine(settings)
-    sessions = create_session_factory(engine)
     now = datetime.now(UTC)
-    try:
+    async with session_factory_scope(settings, session_factory) as sessions:
         async with sessions.begin() as session:
             paper_started_at = await session.scalar(
                 select(Order.created_at)
@@ -125,8 +127,6 @@ async def audit_gate(settings: Settings | None = None) -> int | None:
                 gate.passed,
             )
             return checkpoint_day
-    finally:
-        await engine.dispose()
 
 
 def main() -> None:

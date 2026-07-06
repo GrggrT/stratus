@@ -153,7 +153,7 @@ class OpenMeteoClient:
         if self._client is None:
             raise RuntimeError("OpenMeteoClient must be used as an async context manager")
 
-        params = {
+        params: dict[str, str | int | float] = {
             "latitude": station.lat,
             "longitude": station.lon,
             "hourly": "temperature_2m",
@@ -172,7 +172,7 @@ class OpenMeteoClient:
             fetched_at=fetched_at,
         )
 
-    async def _get_json(self, params: dict[str, object]) -> dict[str, Any]:
+    async def _get_json(self, params: dict[str, str | int | float]) -> dict[str, Any]:
         assert self._client is not None
         last_error: Exception | None = None
         for attempt in range(3):

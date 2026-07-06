@@ -28,15 +28,9 @@ def taker_fee(
     )
 
 
-def walk_ask_book(
-    book: dict[str, Any],
-    *,
-    target_usd: Decimal,
-    max_price: Decimal,
-    fee_rate: Decimal = Decimal(0),
-) -> PaperFill | None:
-    if target_usd <= 0:
-        raise PaperExecutionError("target_usd must be positive")
+def _executable_ask_levels(
+    book: dict[str, Any], *, max_price: Decimal
+) -> list[tuple[Decimal, Decimal]]:
     if not Decimal(0) < max_price < Decimal(1):
         raise PaperExecutionError("max_price must be between zero and one")
     raw_asks = book.get("asks")
@@ -56,6 +50,31 @@ def walk_ask_book(
             raise PaperExecutionError("ask level is out of range")
         if price <= max_price:
             levels.append((price, shares))
+    return levels
+
+
+def usable_ask_depth_usd(book: dict[str, Any], *, max_price: Decimal) -> Decimal:
+    """Notional (price x size) purchasable at or below max_price.
+
+    Depth measured on the book the order actually executes against, unlike the
+    generation-side proxy derived from the YES snapshot.
+    """
+    return sum(
+        (price * shares for price, shares in _executable_ask_levels(book, max_price=max_price)),
+        start=Decimal(0),
+    )
+
+
+def walk_ask_book(
+    book: dict[str, Any],
+    *,
+    target_usd: Decimal,
+    max_price: Decimal,
+    fee_rate: Decimal = Decimal(0),
+) -> PaperFill | None:
+    if target_usd <= 0:
+        raise PaperExecutionError("target_usd must be positive")
+    levels = _executable_ask_levels(book, max_price=max_price)
 
     remaining = target_usd
     filled_usd = Decimal(0)

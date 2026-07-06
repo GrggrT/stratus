@@ -16,12 +16,13 @@ _CITY_ALIASES = {
     "new york": "New York City",
     "new york city": "New York City",
 }
+# ICAO codes are uppercase; matching case-sensitively keeps ordinary lowercase
+# path segments ("/data", "/wrh1") from becoming false station candidates.
 _STATION_URL_PATTERN = re.compile(
-    r"https?://[^\s)]+?/([A-Z][A-Z0-9]{3})(?:[/?#.)]|$)", re.IGNORECASE
+    r"(?i:https?)://[^\s)]+?/([A-Z][A-Z0-9]{3})(?:[/?#.)]|$)"
 )
 _EXPLICIT_STATION_PATTERN = re.compile(
-    r"\b(?:station|airport)\s+(?:id|code)\s*[:#-]?\s*([A-Z][A-Z0-9]{3})\b",
-    re.IGNORECASE,
+    r"\b(?i:station|airport)\s+(?i:id|code)\s*[:#-]?\s*([A-Z][A-Z0-9]{3})\b"
 )
 _EVENT_PATTERN = re.compile(
     r"^(highest|lowest)\s+temperature\s+in\s+(.+?)\s+on\s+", re.IGNORECASE

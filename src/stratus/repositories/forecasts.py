@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.dialects.postgresql import Insert, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stratus.collectors.open_meteo import ForecastValue
 from stratus.db.models import Forecast
 
 
-def build_forecast_upsert(values: Sequence[ForecastValue]):
+def build_forecast_upsert(values: Sequence[ForecastValue]) -> Insert:
     rows = [
         {
             "station_id": value.station_id,

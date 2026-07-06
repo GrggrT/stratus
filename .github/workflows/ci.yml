@@ -22,6 +22,9 @@ jobs:
       - name: Lint
         run: uv run ruff check src tests migrations
 
+      - name: Type check
+        run: uv run mypy src/stratus
+
       - name: Test
         run: uv run pytest -q
 

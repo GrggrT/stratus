@@ -117,39 +117,45 @@ image contains exactly the locked versions that were reviewed and tested.
 `.github/workflows/ci.yml` runs `ruff check` and `pytest` with uv on every
 push and pull request.
 
-## Roadmap (recommended, not implemented here)
+## Roadmap follow-up (implemented 2026-07-06)
 
-1. **Shared engine in the scheduler process.** Every job invocation builds
-   and disposes its own `AsyncEngine` (~3-4 pools/minute at steady state).
-   Refactor jobs to accept an optional `session_factory`, defaulting to a
-   process-wide engine in `runtime.py`; CLI entry points keep building
-   their own. Pure plumbing, touches all 15 jobs — do it in one dedicated
-   change.
-2. **Depth checks against the executed book.** BUY_NO signals are priced
-   and depth-checked from the YES book (`1 - best_bid`, `bid_depth`) but
-   executed against the NO token's ask book. Fine for paper; before live,
-   fetch the executed token's book for the 3x-depth check.
-3. **Loss-limit day boundaries.** Daily/weekly loss limits reset at 00:00
-   UTC, which splits a bad New York evening across two "days". Decide
-   whether the accounting day should follow the venue day (ET) and encode
-   the decision in `services/risk.py`.
-4. **Signals table retention.** ~1 row/market/minute (mostly `SKIPPED`).
-   Add a retention job (e.g. delete `SKIPPED` older than 30 days) or
-   partition by month before the table gets expensive.
-5. **Settlement escalation.** A market that Gamma stops returning, or that
-   resolves without exact 1/0 outcome prices, is retried every 10 minutes
-   forever without an alert. Alert on markets more than N hours past
-   `resolves_at` that are still unresolved.
-6. **ICAO extraction tightening.** `_STATION_URL_PATTERN` is
-   case-insensitive and matches any 4-char path segment (`/data` ->
-   candidate `DATA`), producing avoidable `station_conflict` blocks and
-   `/verify` toil. Drop `IGNORECASE` and/or validate candidates against the
-   known station table before conflict counting.
-7. **Fail-closed runtime control.** `get_runtime_control` returns
-   permissive defaults when the `runtime_control` row is missing. Paper-safe
-   today; before live, make a missing row equivalent to kill switch ON.
-8. **Type checking.** The codebase is fully typed; adding `mypy --strict`
-   (or pyright) to CI is cheap now and expensive later.
+All eight roadmap items landed in the follow-up pass:
+
+1. **Shared engine in the scheduler process.** All 13 scheduled jobs accept
+   an optional `session_factory`; `runtime.py` creates one engine and hands
+   its factory to every job (and to the event listener). CLI entry points
+   keep the engine-per-invocation behaviour via
+   `db/session.py::session_factory_scope`.
+2. **Depth checks against the executed book.** `execute_signals` re-checks
+   the 3x-depth rule against the book the order actually walks
+   (`services/execution.py::usable_ask_depth_usd`); a thin executed book
+   leaves the signal pending until its TTL.
+3. **Loss-limit day boundaries.** The accounting timezone is now the
+   `RISK_TIMEZONE` setting (`services/risk.py::period_starts`). Default
+   stays UTC (behaviour unchanged); set `America/New_York` to align the
+   daily reset with the venue day — this remains the recommended value.
+4. **Signals table retention.** `stratus-prune-signals` (scheduled daily at
+   03:30 UTC) deletes SKIPPED/EXPIRED signals older than
+   `SIGNAL_RETENTION_DAYS` (default 30) that never produced an order.
+5. **Settlement escalation.** The health audit raises `settlement_stale`
+   for markets more than 12 hours past `resolves_at` that are still
+   unresolved.
+6. **ICAO extraction tightening.** Station patterns are case-sensitive for
+   the code itself; lowercase path segments (`/data`, `/wrh1`) no longer
+   become candidates.
+7. **Fail-closed runtime control.** A missing `runtime_control` row (seeded
+   by migration 0009, so always abnormal) now reads as kill switch ON with
+   `halted_reason="runtime_control row missing"`.
+8. **Type checking.** `mypy` (with `check_untyped_defs`) is clean over the
+   whole tree and runs in CI. The 29 findings it surfaced — including two
+   real `str | None` argument bugs in `bootstrap_iem` — were fixed.
+
+## Remaining recommendations
+
+- Move `mypy` towards `--strict` module-by-module.
+- Before live trading: revisit `RISK_TIMEZONE` (recommend
+  `America/New_York`), and re-read the live-readiness checklist in
+  `AUSTRIA_LIVE_READINESS.md`.
 
 ## Acceptance criteria
 

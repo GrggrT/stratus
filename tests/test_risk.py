@@ -2,7 +2,44 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from stratus.services.risk import assess_loss_limits
+from stratus.services.risk import assess_loss_limits, period_starts
+
+
+def test_period_starts_follow_the_accounting_timezone() -> None:
+    # 01:00 UTC on Wed Jul 8 is still Tue Jul 7 evening in New York (EDT),
+    # so the accounting day starts at Jul 7 00:00 EDT = Jul 7 04:00 UTC.
+    now = datetime(2026, 7, 8, 1, tzinfo=UTC)
+
+    utc_day, utc_week = period_starts(now, "UTC")
+    ny_day, ny_week = period_starts(now, "America/New_York")
+
+    assert utc_day == datetime(2026, 7, 8, tzinfo=UTC)
+    assert utc_week == datetime(2026, 7, 6, tzinfo=UTC)
+    assert ny_day == datetime(2026, 7, 7, 4, tzinfo=UTC)
+    assert ny_week == datetime(2026, 7, 6, 4, tzinfo=UTC)
+
+
+def test_loss_limits_respect_the_accounting_timezone() -> None:
+    now = datetime(2026, 7, 8, 1, tzinfo=UTC)
+    late_evening_loss = [(datetime(2026, 7, 8, 0, 30, tzinfo=UTC), -61.0)]
+
+    utc_result = assess_loss_limits(
+        late_evening_loss,
+        now=now,
+        daily_start_bankroll=1_000.0,
+        weekly_start_bankroll=1_000.0,
+    )
+    ny_result = assess_loss_limits(
+        late_evening_loss,
+        now=now,
+        daily_start_bankroll=1_000.0,
+        weekly_start_bankroll=1_000.0,
+        timezone="America/New_York",
+    )
+
+    assert utc_result.daily_breached is True
+    assert ny_result.daily_breached is True
+    assert ny_result.day_start < utc_result.day_start
 
 
 def test_loss_limits_use_period_starting_bankrolls() -> None:

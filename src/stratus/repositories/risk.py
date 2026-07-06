@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,9 +13,10 @@ from stratus.db.models import (
     Signal,
     SignalStatus,
 )
+from stratus.db.session import dml_rowcount
 from stratus.repositories.runtime_control import set_kill_switch
 from stratus.repositories.telegram import enqueue_notification
-from stratus.services.risk import LossLimitStatus, assess_loss_limits
+from stratus.services.risk import LossLimitStatus, assess_loss_limits, period_starts
 
 
 async def _starting_bankroll(
@@ -38,11 +39,11 @@ async def get_loss_limit_status(
     *,
     mode: ExecutionMode,
     initial_bankroll_usd: float,
+    timezone: str = "UTC",
     now: datetime | None = None,
 ) -> LossLimitStatus:
     now = now or datetime.now(UTC)
-    day_start = now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = day_start - timedelta(days=day_start.weekday())
+    day_start, week_start = period_starts(now, timezone)
     daily_start_bankroll = await _starting_bankroll(
         session, mode, day_start, initial_bankroll_usd
     )
@@ -68,6 +69,7 @@ async def get_loss_limit_status(
         now=now,
         daily_start_bankroll=daily_start_bankroll,
         weekly_start_bankroll=weekly_start_bankroll,
+        timezone=timezone,
     )
 
 
@@ -76,12 +78,14 @@ async def enforce_loss_limits(
     *,
     mode: ExecutionMode,
     initial_bankroll_usd: float,
+    timezone: str = "UTC",
     now: datetime | None = None,
 ) -> tuple[LossLimitStatus, int]:
     status = await get_loss_limit_status(
         session,
         mode=mode,
         initial_bankroll_usd=initial_bankroll_usd,
+        timezone=timezone,
         now=now,
     )
     expired = 0
@@ -102,7 +106,7 @@ async def enforce_loss_limits(
             .where(Signal.status == SignalStatus.PENDING)
             .values(status=SignalStatus.EXPIRED, skip_reason="daily_loss_limit")
         )
-        expired = result.rowcount or 0
+        expired = dml_rowcount(result)
         await enqueue_notification(
             session,
             f"risk:daily:{mode.value}:{status.day_start.date()}",

@@ -7,11 +7,12 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.collectors.gamma import GammaClient
 from stratus.config import Settings, get_settings
 from stratus.db.models import Station
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import session_factory_scope
 from stratus.parsers.market_rules import (
     MarketRulesError,
     extract_station_candidates,
@@ -40,11 +41,12 @@ def _parse_timestamp(value: Any, field: str) -> datetime:
         raise MarketRulesError(f"market has invalid {field}: {value}") from exc
 
 
-async def discover_markets(settings: Settings | None = None) -> tuple[int, int]:
+async def discover_markets(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> tuple[int, int]:
     settings = settings or get_settings()
-    engine = create_engine(settings)
-    session_factory = create_session_factory(engine)
-    try:
+    async with session_factory_scope(settings, session_factory) as session_factory:
         async with GammaClient(
             events_url=settings.gamma_events_url,
             weather_tag_id=settings.gamma_weather_tag_id,
@@ -198,8 +200,6 @@ async def discover_markets(settings: Settings | None = None) -> tuple[int, int]:
             unparseable,
         )
         return written, blocked
-    finally:
-        await engine.dispose()
 
 
 def main() -> None:

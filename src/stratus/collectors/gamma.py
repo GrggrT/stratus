@@ -85,7 +85,7 @@ class GammaClient:
 
     async def _get_page(self, offset: int) -> list[dict[str, Any]]:
         assert self._client is not None
-        params = {
+        params: dict[str, str | int] = {
             "tag_id": self.weather_tag_id,
             "active": "true",
             "closed": "false",

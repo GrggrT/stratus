@@ -13,6 +13,7 @@ from stratus.repositories.markets import (
     upsert_market,
 )
 from stratus.repositories.model_probs import ModelProbabilityValue, upsert_model_probs
+from stratus.repositories.signals import prune_signals
 
 
 def test_forecast_upsert_targets_identity_constraint() -> None:
@@ -178,6 +179,24 @@ async def test_upsert_market_new_market_uses_parser_verdict() -> None:
     assert revoked is False
     assert market.station_verified is True
     assert market.status is MarketStatus.ACTIVE
+
+
+async def test_prune_signals_spares_executed_and_order_backed_rows() -> None:
+    session = AsyncMock()
+    result = MagicMock()
+    result.rowcount = 7
+    session.execute.return_value = result
+
+    deleted = await prune_signals(
+        session, older_than=datetime(2026, 6, 6, tzinfo=UTC)
+    )
+
+    assert deleted == 7
+    statement = session.execute.await_args.args[0]
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+    assert "DELETE FROM signals" in sql
+    assert "signals.status IN" in sql
+    assert "NOT (EXISTS" in sql
 
 
 async def test_station_lineage_ignores_unverified_markets() -> None:

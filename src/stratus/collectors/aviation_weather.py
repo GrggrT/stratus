@@ -86,7 +86,7 @@ class AviationWeatherClient:
             raise RuntimeError("AviationWeatherClient must be used as an async context manager")
         if not station_ids_by_icao:
             return []
-        params = {
+        params: dict[str, str | int] = {
             "ids": ",".join(sorted(station_ids_by_icao)),
             "format": "json",
             "hours": self.lookback_hours,
@@ -94,7 +94,7 @@ class AviationWeatherClient:
         payload = await self._get_json(params)
         return parse_metar_observations(payload, station_ids_by_icao)
 
-    async def _get_json(self, params: dict[str, object]) -> list[Any]:
+    async def _get_json(self, params: dict[str, str | int]) -> list[Any]:
         assert self._client is not None
         last_error: Exception | None = None
         for attempt in range(3):

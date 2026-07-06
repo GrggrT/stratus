@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.config import Settings, get_settings
 from stratus.db.models import (
@@ -20,7 +21,7 @@ from stratus.db.models import (
     ModelProb,
     Station,
 )
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import session_factory_scope
 from stratus.repositories.model_probs import ModelProbabilityValue, upsert_model_probs
 from stratus.services.emos import horizon_bucket
 from stratus.services.probability import (
@@ -118,13 +119,14 @@ def _component_json(component: ProbabilityComponent) -> dict[str, Any]:
     }
 
 
-async def recompute_probs(settings: Settings | None = None) -> tuple[int, int]:
+async def recompute_probs(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> tuple[int, int]:
     settings = settings or get_settings()
-    engine = create_engine(settings)
-    session_factory = create_session_factory(engine)
     now = datetime.now(UTC)
     calculation_time = now.replace(second=0, microsecond=0)
-    try:
+    async with session_factory_scope(settings, session_factory) as session_factory:
         async with session_factory() as session:
             market_rows = (
                 await session.execute(
@@ -395,8 +397,6 @@ async def recompute_probs(settings: Settings | None = None) -> tuple[int, int]:
             skipped,
         )
         return written, skipped
-    finally:
-        await engine.dispose()
 
 
 def main() -> None:

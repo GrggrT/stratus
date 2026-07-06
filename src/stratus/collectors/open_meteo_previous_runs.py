@@ -57,22 +57,20 @@ def parse_previous_runs(
             if not daily_temperatures or any(value is None for value in daily_temperatures):
                 continue
             complete = [value for value in daily_temperatures if value is not None]
-            common = {
-                "station_id": station_id,
-                "model": model,
-                "valid_date": valid_date,
-                "horizon_h": horizon_day * 24,
-                "source": "open_meteo_previous_runs",
-                "fetched_at": fetched_at,
-            }
             values.extend(
-                (
-                    HistoricalForecastValue(
-                        **common, kind=WeatherKind.HIGH, temp_c=max(complete)
-                    ),
-                    HistoricalForecastValue(
-                        **common, kind=WeatherKind.LOW, temp_c=min(complete)
-                    ),
+                HistoricalForecastValue(
+                    station_id=station_id,
+                    model=model,
+                    valid_date=valid_date,
+                    kind=kind,
+                    horizon_h=horizon_day * 24,
+                    temp_c=temp_c,
+                    source="open_meteo_previous_runs",
+                    fetched_at=fetched_at,
+                )
+                for kind, temp_c in (
+                    (WeatherKind.HIGH, max(complete)),
+                    (WeatherKind.LOW, min(complete)),
                 )
             )
     return values
@@ -119,7 +117,7 @@ class OpenMeteoPreviousRunsClient:
         fields = ",".join(
             f"temperature_2m_previous_day{day}" for day in horizon_days
         )
-        params = {
+        params: dict[str, str | int | float] = {
             "latitude": station.lat,
             "longitude": station.lon,
             "hourly": fields,
@@ -139,7 +137,7 @@ class OpenMeteoPreviousRunsClient:
             fetched_at=fetched_at,
         )
 
-    async def _get_json(self, params: dict[str, object]) -> dict[str, Any]:
+    async def _get_json(self, params: dict[str, str | int | float]) -> dict[str, Any]:
         assert self._client is not None
         last_error: Exception | None = None
         for attempt in range(4):

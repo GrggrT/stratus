@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     calibration_window_days: int = Field(default=180, ge=30, le=730)
     calibration_min_samples: int = Field(default=60, ge=20, le=500)
     initial_bankroll_usd: float = Field(default=1080.0, gt=0)
+    # Accounting timezone for daily/weekly loss limits. UTC keeps historical
+    # behaviour; America/New_York aligns the reset with the venue day.
+    risk_timezone: str = "UTC"
+    signal_retention_days: int = Field(default=30, ge=7, le=365)
     trading_mode: str = "paper"
     telegram_bot_token: str | None = None
     telegram_admin_user_id: int | None = None
@@ -116,6 +120,17 @@ class Settings(BaseSettings):
             raise ValueError("previous-run horizons must be between 1 and 7 days")
         if len(set(value)) != len(value):
             raise ValueError("previous-run horizons must be unique")
+        return value
+
+    @field_validator("risk_timezone")
+    @classmethod
+    def validate_risk_timezone(cls, value: str) -> str:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"unknown risk timezone: {value}") from exc
         return value
 
     @field_validator("trading_mode")

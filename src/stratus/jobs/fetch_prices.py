@@ -4,9 +4,11 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from stratus.collectors.clob import ClobClient, ClobError, parse_price_snapshot
 from stratus.config import Settings, get_settings
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import session_factory_scope
 from stratus.repositories.market_prices import (
     mark_prices_fetched,
     markets_due_for_price_fetch,
@@ -16,11 +18,12 @@ from stratus.repositories.market_prices import (
 logger = logging.getLogger(__name__)
 
 
-async def fetch_prices(settings: Settings | None = None) -> tuple[int, int]:
+async def fetch_prices(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> tuple[int, int]:
     settings = settings or get_settings()
-    engine = create_engine(settings)
-    session_factory = create_session_factory(engine)
-    try:
+    async with session_factory_scope(settings, session_factory) as session_factory:
         async with session_factory() as session:
             targets = await markets_due_for_price_fetch(session, datetime.now(UTC))
         if not targets:
@@ -67,8 +70,6 @@ async def fetch_prices(settings: Settings | None = None) -> tuple[int, int]:
             skipped,
         )
         return written, skipped
-    finally:
-        await engine.dispose()
 
 
 def main() -> None:
