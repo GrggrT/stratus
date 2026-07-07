@@ -22,4 +22,9 @@ jobs:
           dotnet-version: "10.0.x"
 
       - name: Build
-        run: dotnet build apps/StratusConsole/StratusConsole.csproj -c Release -p:Platform=x64
+        # Compilation check only: trimming and R2R belong to the publish
+        # step and require a self-contained app (NETSDK1102 otherwise).
+        run: >-
+          dotnet build apps/StratusConsole/StratusConsole.csproj
+          -c Release -p:Platform=x64
+          -p:PublishTrimmed=false -p:PublishReadyToRun=false
