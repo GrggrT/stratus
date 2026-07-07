@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     live_tax_approved: bool = False
     api_host: str = "0.0.0.0"
     api_port: int = Field(default=8000, ge=1, le=65535)
+    # When set, every /api/v1 monitoring endpoint requires this value in the
+    # X-API-Key header. Mandatory before the API is ever exposed beyond
+    # loopback; optional while it stays on 127.0.0.1.
+    operator_api_key: str | None = None
     log_level: str = "INFO"
 
     @field_validator("forecast_models", mode="before")
@@ -141,9 +145,11 @@ class Settings(BaseSettings):
             raise ValueError("trading_mode must be paper or live")
         return normalized
 
-    @field_validator("telegram_admin_user_id", "telegram_chat_id", mode="before")
+    @field_validator(
+        "telegram_admin_user_id", "telegram_chat_id", "operator_api_key", mode="before"
+    )
     @classmethod
-    def parse_optional_telegram_id(cls, value: object) -> object:
+    def parse_optional_value(cls, value: object) -> object:
         return None if value == "" else value
 
 

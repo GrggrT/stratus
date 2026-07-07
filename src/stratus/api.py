@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Annotated, cast
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
@@ -49,6 +51,21 @@ def evaluate_readiness(
     return ReadinessState(not reasons, tuple(reasons))
 
 
+async def require_operator_api_key(
+    request: Request,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+) -> None:
+    """Enforce OPERATOR_API_KEY on monitoring endpoints when configured.
+
+    The health probes stay open; they carry no market or bankroll data.
+    """
+    expected = cast(Settings, request.app.state.settings).operator_api_key
+    if expected is None:
+        return
+    if x_api_key is None or not secrets.compare_digest(x_api_key, expected):
+        raise HTTPException(status_code=401, detail="invalid or missing API key")
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
 
@@ -68,7 +85,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=None,
         lifespan=lifespan,
     )
-    app.include_router(operator_router)
+    app.state.settings = settings
+    app.include_router(operator_router, dependencies=[Depends(require_operator_api_key)])
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

@@ -8,13 +8,17 @@ public sealed class StratusApiClient : IDisposable
 {
     private readonly HttpClient _httpClient;
 
-    public StratusApiClient(Uri baseAddress)
+    public StratusApiClient(Uri baseAddress, string? apiKey = null)
     {
         _httpClient = new HttpClient
         {
             BaseAddress = baseAddress,
             Timeout = TimeSpan.FromSeconds(3),
         };
+        if (!string.IsNullOrWhiteSpace(apiKey))
+        {
+            _httpClient.DefaultRequestHeaders.Add("X-API-Key", apiKey);
+        }
     }
 
     public async Task<HealthSnapshot> GetHealthSnapshotAsync(CancellationToken cancellationToken = default)

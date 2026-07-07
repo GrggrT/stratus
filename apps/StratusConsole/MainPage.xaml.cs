@@ -8,7 +8,9 @@ namespace StratusConsole;
 
 public sealed partial class MainPage : Page
 {
-    private readonly StratusApiClient _apiClient = new(new Uri("http://127.0.0.1:8000"));
+    private readonly StratusApiClient _apiClient = new(
+        new Uri("http://127.0.0.1:8000"),
+        Environment.GetEnvironmentVariable("STRATUS_OPERATOR_API_KEY"));
     private readonly DispatcherTimer _refreshTimer = new() { Interval = TimeSpan.FromSeconds(10) };
     private readonly CancellationTokenSource _lifetime = new();
     private string _selectedDestination = "Dashboard";
