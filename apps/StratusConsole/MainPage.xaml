@@ -97,6 +97,34 @@
                     DefaultLabelPosition="Right"
                     IsDynamicOverflowEnabled="True">
                     <AppBarButton
+                        x:Name="StopButton"
+                        Click="StopButton_Click"
+                        Label="Stop">
+                        <AppBarButton.Icon><FontIcon Glyph="&#xE71A;" /></AppBarButton.Icon>
+                    </AppBarButton>
+                    <AppBarButton
+                        x:Name="ResumeButton"
+                        Click="ResumeButton_Click"
+                        Label="Resume"
+                        Visibility="Collapsed">
+                        <AppBarButton.Icon><FontIcon Glyph="&#xE768;" /></AppBarButton.Icon>
+                    </AppBarButton>
+                    <AppBarButton
+                        x:Name="VerifyMarketButton"
+                        Click="VerifyMarketButton_Click"
+                        Label="Verify market"
+                        Visibility="Collapsed">
+                        <AppBarButton.Icon><FontIcon Glyph="&#xE73E;" /></AppBarButton.Icon>
+                    </AppBarButton>
+                    <AppBarButton
+                        x:Name="RunJobButton"
+                        Click="RunJobButton_Click"
+                        Label="Run job"
+                        Visibility="Collapsed">
+                        <AppBarButton.Icon><FontIcon Glyph="&#xE9F5;" /></AppBarButton.Icon>
+                    </AppBarButton>
+                    <AppBarSeparator />
+                    <AppBarButton
                         x:Name="RefreshButton"
                         Click="RefreshButton_Click"
                         Icon="Refresh"

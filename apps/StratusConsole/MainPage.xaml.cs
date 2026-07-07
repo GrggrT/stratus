@@ -16,6 +16,8 @@ public sealed partial class MainPage : Page
     private string _selectedDestination = "Dashboard";
     private bool _isRefreshing;
     private bool _refreshPending;
+    private bool _isSubmittingCommand;
+    private RuntimeDto? _lastRuntime;
 
     public MainPage()
     {
@@ -120,7 +122,11 @@ public sealed partial class MainPage : Page
                     RenderJobs((await _apiClient.GetJobsAsync(_lifetime.Token)).Items);
                     break;
                 case "Operations":
-                    RenderOperations(await _apiClient.GetOverviewAsync(_lifetime.Token));
+                    OverviewResponse operationsOverview =
+                        await _apiClient.GetOverviewAsync(_lifetime.Token);
+                    CollectionResponse<CommandItem> commandLog =
+                        await _apiClient.GetCommandsAsync(_lifetime.Token);
+                    RenderOperations(operationsOverview, commandLog.Items);
                     break;
                 case "Settings":
                     RenderSettings();
@@ -158,6 +164,7 @@ public sealed partial class MainPage : Page
 
     private void RenderOverview(OverviewResponse overview)
     {
+        _lastRuntime = overview.Runtime;
         RuntimeStatusText.Text = overview.Runtime.Mode.ToUpperInvariant();
         RuntimeDetailText.Text = overview.Runtime.KillSwitch
             ? $"Kill switch active{ReasonSuffix(overview.Runtime.HaltedReason)}"
@@ -193,7 +200,7 @@ public sealed partial class MainPage : Page
             market.StationVerified
                 ? "Station rules verified"
                 : $"Verification blocked{ReasonSuffix(HumanizeReasons(market.VerificationReason))}",
-            $"Resolves {LocalTime(market.ResolvesAt)} · {market.PolymarketId}",
+            $"Resolves {LocalTime(market.ResolvesAt)} · #{market.Id} · {market.PolymarketId}",
             Pretty(market.Status))));
     }
 
@@ -240,8 +247,11 @@ public sealed partial class MainPage : Page
             Pretty(job.Status))));
     }
 
-    private void RenderOperations(OverviewResponse overview)
+    private void RenderOperations(
+        OverviewResponse overview,
+        IReadOnlyList<CommandItem> commands)
     {
+        _lastRuntime = overview.Runtime;
         List<MonitoringListItem> items =
         [
             new(
@@ -269,7 +279,229 @@ public sealed partial class MainPage : Page
                 "Live execution remains unavailable in this console",
                 overview.Validation?.Passed is true ? "Passed" : "Locked"),
         ];
+        items.AddRange(commands.Select(command => new MonitoringListItem(
+            $"{Pretty(command.Command)} · {command.RequestId}",
+            command.Reason,
+            command.Detail ?? "Queued; the worker polls every 20 seconds",
+            $"{LocalTime(command.CreatedAt)} · {command.Actor}"
+                + (command.ExecutedAt is null
+                    ? string.Empty
+                    : $" · executed {LocalTime(command.ExecutedAt.Value)}"),
+            Pretty(command.Status))));
         SetCollection(items);
+    }
+
+    private async void StopButton_Click(object sender, RoutedEventArgs e)
+    {
+        string? reason = await ConfirmWithReasonAsync(
+            "Stop trading",
+            "Enables the kill switch and expires all pending signals. "
+                + "Collectors and monitoring keep running.",
+            "Stop trading");
+        if (reason is not null)
+        {
+            await SubmitCommandAsync("stop", reason);
+        }
+    }
+
+    private async void ResumeButton_Click(object sender, RoutedEventArgs e)
+    {
+        string killState = _lastRuntime is null
+            ? "The current runtime state is unknown."
+            : _lastRuntime.KillSwitch
+                ? $"Kill switch is active{ReasonSuffix(_lastRuntime.HaltedReason)}."
+                : "Kill switch is currently off.";
+        string? reason = await ConfirmWithReasonAsync(
+            "Resume trading",
+            $"{killState} Resuming re-enables signal execution; "
+                + "a project halt cannot be resumed from this console.",
+            "Resume trading");
+        if (reason is not null)
+        {
+            await SubmitCommandAsync("resume", reason);
+        }
+    }
+
+    private async void VerifyMarketButton_Click(object sender, RoutedEventArgs e)
+    {
+        TextBox idBox = new() { PlaceholderText = "Internal market id (the # number in the list)" };
+        TextBox reasonBox = new() { PlaceholderText = "Reason (at least 4 characters)" };
+        StackPanel panel = new() { Spacing = 12 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Approve the parsed station for a blocked market after "
+                + "re-checking its rules text against the resolution source.",
+            TextWrapping = TextWrapping.Wrap,
+        });
+        panel.Children.Add(idBox);
+        panel.Children.Add(reasonBox);
+        ContentDialog dialog = new()
+        {
+            Title = "Verify market station",
+            Content = panel,
+            PrimaryButtonText = "Verify",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        if (!int.TryParse(idBox.Text.Trim(), out int marketId) || marketId < 1)
+        {
+            ShowCommandWarning("A positive internal market id is required.");
+            return;
+        }
+
+        string reason = reasonBox.Text.Trim();
+        if (reason.Length < 4)
+        {
+            ShowCommandWarning("A reason of at least 4 characters is required.");
+            return;
+        }
+
+        await SubmitCommandAsync(
+            "verify_market",
+            reason,
+            new Dictionary<string, object> { ["market_id"] = marketId });
+    }
+
+    private async void RunJobButton_Click(object sender, RoutedEventArgs e)
+    {
+        ComboBox jobBox = new()
+        {
+            ItemsSource = new[] { "discover-markets", "backfill-fees", "prune-signals" },
+            SelectedIndex = 0,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        TextBox reasonBox = new() { PlaceholderText = "Reason (at least 4 characters)" };
+        StackPanel panel = new() { Spacing = 12 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Queue one allowlisted maintenance job. The worker runs it "
+                + "with the backend's own limits; this console never starts processes.",
+            TextWrapping = TextWrapping.Wrap,
+        });
+        panel.Children.Add(jobBox);
+        panel.Children.Add(reasonBox);
+        ContentDialog dialog = new()
+        {
+            Title = "Run maintenance job",
+            Content = panel,
+            PrimaryButtonText = "Queue job",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        string reason = reasonBox.Text.Trim();
+        if (reason.Length < 4)
+        {
+            ShowCommandWarning("A reason of at least 4 characters is required.");
+            return;
+        }
+
+        await SubmitCommandAsync(
+            "run_job",
+            reason,
+            new Dictionary<string, object> { ["job"] = (string)jobBox.SelectedItem! });
+    }
+
+    private async Task<string?> ConfirmWithReasonAsync(
+        string title,
+        string body,
+        string primaryText)
+    {
+        TextBox reasonBox = new() { PlaceholderText = "Reason (at least 4 characters)" };
+        StackPanel panel = new() { Spacing = 12 };
+        panel.Children.Add(new TextBlock { Text = body, TextWrapping = TextWrapping.Wrap });
+        panel.Children.Add(reasonBox);
+        ContentDialog dialog = new()
+        {
+            Title = title,
+            Content = panel,
+            PrimaryButtonText = primaryText,
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return null;
+        }
+
+        string reason = reasonBox.Text.Trim();
+        if (reason.Length < 4)
+        {
+            ShowCommandWarning("A reason of at least 4 characters is required.");
+            return null;
+        }
+
+        return reason;
+    }
+
+    private async Task SubmitCommandAsync(
+        string command,
+        string reason,
+        IReadOnlyDictionary<string, object>? payload = null)
+    {
+        if (_isSubmittingCommand)
+        {
+            return;
+        }
+
+        _isSubmittingCommand = true;
+        try
+        {
+            string actor = string.IsNullOrEmpty(Environment.UserName)
+                ? "console"
+                : $"console:{Environment.UserName}";
+            CommandRequest request = new(
+                $"con-{Guid.NewGuid():N}",
+                command,
+                reason,
+                actor.Length > 64 ? actor[..64] : actor,
+                payload);
+            CommandAccepted accepted = await _apiClient.PostCommandAsync(request, _lifetime.Token);
+            SystemInfoBar.Severity = InfoBarSeverity.Success;
+            SystemInfoBar.Title = accepted.Created ? "Command queued" : "Command was already queued";
+            SystemInfoBar.Message =
+                $"{Pretty(command)} · status {accepted.Item.Status} · request {accepted.Item.RequestId}";
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception exception)
+        {
+            SystemInfoBar.Severity = InfoBarSeverity.Error;
+            SystemInfoBar.Title = "Command rejected";
+            SystemInfoBar.Message =
+                exception.Message.Contains("403") || exception.Message.Contains("401")
+                    ? "Authentication failed: set OPERATOR_API_KEY on the API and "
+                        + "STRATUS_OPERATOR_API_KEY for this console."
+                    : exception.Message;
+            return;
+        }
+        finally
+        {
+            _isSubmittingCommand = false;
+        }
+
+        await RefreshAsync();
+    }
+
+    private void ShowCommandWarning(string message)
+    {
+        SystemInfoBar.Severity = InfoBarSeverity.Warning;
+        SystemInfoBar.Title = "Command not sent";
+        SystemInfoBar.Message = message;
     }
 
     private void RenderSettings()
@@ -358,6 +590,12 @@ public sealed partial class MainPage : Page
         DashboardView.Visibility = dashboard ? Visibility.Visible : Visibility.Collapsed;
         CollectionView.Visibility = dashboard ? Visibility.Collapsed : Visibility.Visible;
         SetPageHeading(_selectedDestination);
+        VerifyMarketButton.Visibility =
+            _selectedDestination == "Markets" ? Visibility.Visible : Visibility.Collapsed;
+        RunJobButton.Visibility =
+            _selectedDestination == "Jobs" ? Visibility.Visible : Visibility.Collapsed;
+        ResumeButton.Visibility =
+            _selectedDestination == "Operations" ? Visibility.Visible : Visibility.Collapsed;
 
         if (IsLoaded)
         {
@@ -376,7 +614,7 @@ public sealed partial class MainPage : Page
             "Positions" => "Paper positions, P&L, fees, and closing-line value",
             "Calibration" => "Station and horizon calibration evidence",
             "Jobs" => "Recent scheduler outcomes and execution durations",
-            "Operations" => "Read-only runtime, audit, and validation state",
+            "Operations" => "Runtime control, operator command audit, and validation state",
             "Settings" => "Local client configuration",
             _ => "STRATUS monitoring",
         };

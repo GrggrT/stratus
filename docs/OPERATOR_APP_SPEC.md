@@ -85,9 +85,21 @@ Implemented (backend):
   executes one command per transaction (a crashing command is marked failed
   instead of wedging the queue), and shares the `/verify` logic with the
   Telegram bot.
-- `StratusApiClient` gained `PostCommandAsync`/`GetCommandsAsync`; the
-  Operations/Markets UI wiring (confirmation dialogs, request-id generation)
-  is the remaining desktop work.
+- `StratusApiClient` gained `PostCommandAsync`/`GetCommandsAsync`.
+
+Implemented (desktop):
+
+- Command bar: `Stop` is always visible; `Resume` appears on Operations,
+  `Verify market` on Markets, `Run job` on Jobs. Every action opens a
+  confirmation dialog whose default button is Cancel and requires a
+  free-text reason (>= 4 characters); the request id is a client-generated
+  GUID and the actor is `console:<username>`.
+- The Operations page appends the command audit log (status, reason,
+  detail, executed time) under the runtime/audit/gate cards.
+- Markets list items show the internal `#id` used by verify_market.
+- A 401/403 response surfaces an explicit hint to configure
+  `OPERATOR_API_KEY` / `STRATUS_OPERATOR_API_KEY`; commands are never
+  retried automatically and a submit guard prevents double sends.
 
 ## Safety invariants
 
