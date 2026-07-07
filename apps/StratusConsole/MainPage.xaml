@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="StratusConsole.MainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:models="using:StratusConsole.Models"
+    mc:Ignorable="d">
+
+    <Page.Resources>
+        <Style x:Key="StatusCardStyle" TargetType="Border">
+            <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="20" />
+            <Setter Property="MinHeight" Value="142" />
+        </Style>
+    </Page.Resources>
+
+    <NavigationView
+        x:Name="RootNavigation"
+        IsBackButtonVisible="Collapsed"
+        IsSettingsVisible="True"
+        PaneDisplayMode="Auto"
+        PaneTitle="STRATUS"
+        SelectionChanged="RootNavigation_SelectionChanged">
+        <NavigationView.MenuItems>
+            <NavigationViewItem Content="Dashboard" Tag="Dashboard">
+                <NavigationViewItem.Icon><FontIcon Glyph="&#xE80F;" /></NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Markets" Tag="Markets">
+                <NavigationViewItem.Icon><FontIcon Glyph="&#xE8EF;" /></NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Signals" Tag="Signals">
+                <NavigationViewItem.Icon><FontIcon Glyph="&#xE9D2;" /></NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Positions" Tag="Positions">
+                <NavigationViewItem.Icon><FontIcon Glyph="&#xE8C7;" /></NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Calibration" Tag="Calibration">
+                <NavigationViewItem.Icon><FontIcon Glyph="&#xE9D9;" /></NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Jobs" Tag="Jobs">
+                <NavigationViewItem.Icon><FontIcon Glyph="&#xE9F5;" /></NavigationViewItem.Icon>
+            </NavigationViewItem>
+            <NavigationViewItem Content="Operations" Tag="Operations">
+                <NavigationViewItem.Icon><FontIcon Glyph="&#xE713;" /></NavigationViewItem.Icon>
+            </NavigationViewItem>
+        </NavigationView.MenuItems>
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Grid x:Name="HeaderGrid" Padding="32,24,24,12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <VisualStateManager.VisualStateGroups>
+                    <VisualStateGroup>
+                        <VisualState x:Name="CompactHeader" />
+                        <VisualState x:Name="WideHeader">
+                            <VisualState.StateTriggers>
+                                <AdaptiveTrigger MinWindowWidth="760" />
+                            </VisualState.StateTriggers>
+                            <VisualState.Setters>
+                                <Setter Target="PageCommandBar.(Grid.Row)" Value="0" />
+                                <Setter Target="PageCommandBar.(Grid.Column)" Value="1" />
+                                <Setter Target="PageCommandBar.(Grid.ColumnSpan)" Value="1" />
+                            </VisualState.Setters>
+                        </VisualState>
+                    </VisualStateGroup>
+                </VisualStateManager.VisualStateGroups>
+                <StackPanel Spacing="4">
+                    <TextBlock x:Name="PageTitle" FontSize="28" FontWeight="SemiBold" Text="System overview" />
+                    <TextBlock
+                        x:Name="PageSubtitle"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="Live read-only monitoring from the local STRATUS API"
+                        TextWrapping="Wrap" />
+                </StackPanel>
+                <CommandBar
+                    x:Name="PageCommandBar"
+                    Grid.Row="1"
+                    Grid.ColumnSpan="2"
+                    Background="Transparent"
+                    DefaultLabelPosition="Right"
+                    IsDynamicOverflowEnabled="True">
+                    <AppBarButton
+                        x:Name="RefreshButton"
+                        Click="RefreshButton_Click"
+                        Icon="Refresh"
+                        Label="Refresh" />
+                    <AppBarToggleButton
+                        x:Name="AutoRefreshButton"
+                        Icon="Sync"
+                        IsChecked="True"
+                        Label="Auto refresh" />
+                </CommandBar>
+            </Grid>
+
+            <InfoBar
+                x:Name="SystemInfoBar"
+                Grid.Row="1"
+                Margin="32,0,32,16"
+                IsClosable="False"
+                IsOpen="True"
+                Message="Contacting http://127.0.0.1:8000"
+                Severity="Informational"
+                Title="Connecting" />
+
+            <ScrollViewer x:Name="DashboardView" Grid.Row="2">
+                <StackPanel
+                    MaxWidth="1200"
+                    Padding="32,0,32,40"
+                    HorizontalAlignment="Stretch"
+                    Spacing="20">
+                    <Grid x:Name="StatusCardGrid" ColumnSpacing="16" RowSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup>
+                                <VisualState x:Name="NarrowCards" />
+                                <VisualState x:Name="WideCards">
+                                    <VisualState.StateTriggers>
+                                        <AdaptiveTrigger MinWindowWidth="900" />
+                                    </VisualState.StateTriggers>
+                                    <VisualState.Setters>
+                                        <Setter Target="RuntimeCard.(Grid.Column)" Value="1" />
+                                        <Setter Target="RuntimeCard.(Grid.Row)" Value="0" />
+                                        <Setter Target="PortfolioCard.(Grid.Column)" Value="0" />
+                                        <Setter Target="PortfolioCard.(Grid.Row)" Value="1" />
+                                        <Setter Target="GateCard.(Grid.Column)" Value="1" />
+                                        <Setter Target="GateCard.(Grid.Row)" Value="1" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+
+                        <Border x:Name="ApiCard" Grid.Row="0" Style="{StaticResource StatusCardStyle}">
+                            <StackPanel Spacing="10">
+                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="API and dependencies" />
+                                <TextBlock x:Name="ApiStatusText" FontSize="24" FontWeight="SemiBold" Text="Connecting" />
+                                <TextBlock x:Name="ApiDetailText" Text="Waiting for health checks" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                        <Border x:Name="RuntimeCard" Grid.Row="1" Style="{StaticResource StatusCardStyle}">
+                            <StackPanel Spacing="10">
+                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Runtime control" />
+                                <TextBlock x:Name="RuntimeStatusText" FontSize="24" FontWeight="SemiBold" Text="Unknown" />
+                                <TextBlock x:Name="RuntimeDetailText" Text="Waiting for /api/v1/overview" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                        <Border x:Name="PortfolioCard" Grid.Row="2" Style="{StaticResource StatusCardStyle}">
+                            <StackPanel Spacing="10">
+                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Paper portfolio" />
+                                <TextBlock x:Name="PortfolioStatusText" FontSize="24" FontWeight="SemiBold" Text="—" />
+                                <TextBlock x:Name="PortfolioDetailText" Text="Balance and exposure unavailable" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                        <Border x:Name="GateCard" Grid.Row="3" Style="{StaticResource StatusCardStyle}">
+                            <StackPanel Spacing="10">
+                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Validation gate" />
+                                <TextBlock x:Name="GateStatusText" FontSize="24" FontWeight="SemiBold" Text="Not evaluated" />
+                                <TextBlock x:Name="GateDetailText" Text="Waiting for a validation checkpoint" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <Border Style="{StaticResource StatusCardStyle}">
+                        <StackPanel Spacing="8">
+                            <TextBlock FontSize="18" FontWeight="SemiBold" Text="Current activity" />
+                            <TextBlock x:Name="ActivityText" Text="Waiting for monitoring data" TextWrapping="Wrap" />
+                            <TextBlock
+                                x:Name="UpdatedStatusText"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="No successful refresh yet" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+
+            <Grid x:Name="CollectionView" Grid.Row="2" Visibility="Collapsed">
+                <ListView
+                    x:Name="CollectionList"
+                    Padding="32,0,32,32"
+                    IsItemClickEnabled="False"
+                    SelectionMode="None"
+                    ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                    ScrollViewer.HorizontalScrollMode="Disabled">
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem">
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Setter Property="Padding" Value="0" />
+                            <Setter Property="Margin" Value="0,0,0,8" />
+                        </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="models:MonitoringListItem">
+                            <Border
+                                Padding="16"
+                                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <Grid ColumnSpacing="16" RowSpacing="6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <TextBlock FontSize="17" FontWeight="SemiBold" Text="{x:Bind Title}" TextWrapping="Wrap" />
+                                    <Border
+                                        Grid.Column="1"
+                                        Padding="8,3"
+                                        Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                        CornerRadius="10">
+                                        <TextBlock FontSize="12" Text="{x:Bind Status}" />
+                                    </Border>
+                                    <TextBlock Grid.Row="1" Grid.ColumnSpan="2" Text="{x:Bind Subtitle}" TextWrapping="Wrap" />
+                                    <TextBlock
+                                        Grid.Row="2"
+                                        Grid.ColumnSpan="2"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="{x:Bind Detail}"
+                                        TextWrapping="Wrap" />
+                                    <TextBlock
+                                        Grid.Row="3"
+                                        Grid.ColumnSpan="2"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                        Text="{x:Bind Meta}"
+                                        TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+                <StackPanel
+                    x:Name="CollectionEmptyState"
+                    MaxWidth="520"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Spacing="10">
+                    <FontIcon FontSize="36" Glyph="&#xE90F;" />
+                    <TextBlock
+                        x:Name="CollectionEmptyText"
+                        FontSize="18"
+                        Text="No records yet"
+                        TextAlignment="Center"
+                        TextWrapping="Wrap" />
+                </StackPanel>
+            </Grid>
+        </Grid>
+    </NavigationView>
+</Page>

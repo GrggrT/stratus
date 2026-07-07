@@ -5,12 +5,13 @@ import logging
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.config import Settings, get_settings
 from stratus.db.models import (
     BankrollLog,
+    DailyActual,
     ExecutionMode,
     Forecast,
     HealthAudit,
@@ -29,6 +30,7 @@ from stratus.repositories.job_runs import collector_uptime
 from stratus.repositories.risk import enforce_loss_limits
 from stratus.repositories.runtime_control import set_kill_switch
 from stratus.repositories.telegram import enqueue_notification
+from stratus.services.reconciliation import clear_mismatches, find_resolution_mismatches
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +145,54 @@ async def audit_health(
                     {
                         "code": "settlement_stale",
                         "detail": f"{stale_settlements} market(s) >12h past resolution",
+                    }
+                )
+
+            # Reconcile METAR-derived daily actuals with how markets actually
+            # resolved: a clear disagreement means the observation pipeline
+            # diverges from the official resolution source that Polymarket
+            # uses — the model is being calibrated against the wrong truth.
+            reconciliation_rows = (
+                await session.execute(
+                    select(
+                        Market.id,
+                        DailyActual.temp_c,
+                        Market.bucket_low_c,
+                        Market.bucket_high_c,
+                        Market.resolved_outcome,
+                    )
+                    .join(
+                        DailyActual,
+                        and_(
+                            DailyActual.station_id == Market.station_id,
+                            DailyActual.date == Market.market_date,
+                            DailyActual.kind == Market.kind,
+                        ),
+                    )
+                    .where(
+                        Market.resolved_outcome.is_not(None),
+                        Market.resolves_at >= now - timedelta(days=30),
+                        or_(
+                            Market.bucket_low_c.is_not(None),
+                            Market.bucket_high_c.is_not(None),
+                        ),
+                    )
+                )
+            ).all()
+            mismatches = find_resolution_mismatches(
+                (market_id, temp_c, low_c, high_c, bool(resolved))
+                for market_id, temp_c, low_c, high_c, resolved in reconciliation_rows
+            )
+            clearly_wrong = clear_mismatches(mismatches)
+            if clearly_wrong:
+                worst = max(item.margin_c for item in clearly_wrong)
+                issues.append(
+                    {
+                        "code": "actuals_resolution_mismatch",
+                        "detail": (
+                            f"{len(clearly_wrong)} market(s) resolved against our "
+                            f"observations (worst margin {worst}°C)"
+                        ),
                     }
                 )
 

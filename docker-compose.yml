@@ -81,6 +81,34 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Off-site copy of the daily dumps. Opt-in: configure an rclone remote in
+  # ./rclone.conf (gitignored), set OFFSITE_REMOTE in .env, then run with
+  # `docker compose --profile offsite up -d`.
+  backup-offsite:
+    image: rclone/rclone:1.68
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ -z "$${OFFSITE_REMOTE:-}" ]; then
+          echo "OFFSITE_REMOTE is not set; refusing to start" >&2
+          exit 1
+        fi
+        while true; do
+          rclone copy /backups "$$OFFSITE_REMOTE" \
+            --include 'stratus_*.dump' --min-age 5m --transfers 2
+          sleep 3600
+        done
+    environment:
+      OFFSITE_REMOTE: ${OFFSITE_REMOTE:-}
+    volumes:
+      - ./backups:/backups:ro
+      - ${RCLONE_CONFIG_FILE:-./rclone.conf}:/config/rclone/rclone.conf:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["offsite"]
+
   telegram:
     image: stratus:local
     command: ["stratus-telegram"]

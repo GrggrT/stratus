@@ -150,6 +150,27 @@ All eight roadmap items landed in the follow-up pass:
    runs in CI. The findings it surfaced on the way — including two real
    `str | None` argument bugs in `bootstrap_iem` — were fixed.
 
+## Hardening follow-up, part 2 (implemented 2026-07-06)
+
+1. **Postgres integration tests.** `tests/integration/` runs the real
+   Alembic chain against a live Postgres and round-trips every
+   ON CONFLICT constraint target, DISTINCT ON, the model-probs advisory
+   lock, and the retention delete — the SQL the mock-based unit tests can
+   only compile, never execute. Activated by `STRATUS_TEST_DATABASE_URL`;
+   CI provides a `postgres:16` service container, locally use
+   `docker compose up -d postgres` plus a `stratus_test` database.
+2. **Actuals-vs-resolution reconciliation.** The health audit joins
+   resolved markets to our METAR-derived `daily_actuals` and raises
+   `actuals_resolution_mismatch` when a market resolved against what our
+   own observations imply by more than 0.25°C from the nearest bucket
+   boundary (`services/reconciliation.py`). This watches the key epistemic
+   risk: calibrating on METAR while Polymarket resolves on official
+   climate reports.
+3. **Off-site backups.** Opt-in `backup-offsite` compose service
+   (`--profile offsite`) copies verified dumps to any rclone remote
+   (`OFFSITE_REMOTE`, config in gitignored `rclone.conf`), so a dead host
+   disk no longer takes the backups with it.
+
 ## Remaining recommendations
 
 - Before live trading: re-read the live-readiness checklist in

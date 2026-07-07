@@ -14,6 +14,7 @@ from sqlalchemy import select
 from stratus.config import Settings, get_settings
 from stratus.db.models import HealthAudit
 from stratus.db.session import create_engine, create_session_factory
+from stratus.operator_api import router as operator_router
 from stratus.repositories.runtime_control import get_runtime_control
 
 logger = logging.getLogger(__name__)
@@ -61,12 +62,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await engine.dispose()
 
     app = FastAPI(
-        title="STRATUS health API",
+        title="STRATUS local API",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
         lifespan=lifespan,
     )
+    app.include_router(operator_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

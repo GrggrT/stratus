@@ -7,6 +7,20 @@ on:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: stratus_test
+          POSTGRES_USER: stratus
+          POSTGRES_PASSWORD: stratus
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U stratus -d stratus_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -25,7 +39,9 @@ jobs:
       - name: Type check
         run: uv run mypy src/stratus
 
-      - name: Test
+      - name: Test (unit + Postgres integration)
+        env:
+          STRATUS_TEST_DATABASE_URL: postgresql+asyncpg://stratus:stratus@localhost:5432/stratus_test
         run: uv run pytest -q
 
       - name: Docker build

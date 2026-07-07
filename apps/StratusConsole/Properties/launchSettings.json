@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "StratusConsole (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "StratusConsole (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
