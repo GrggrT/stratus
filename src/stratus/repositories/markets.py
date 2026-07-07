@@ -34,6 +34,28 @@ class DiscoveredMarket:
     fee_taker_only: bool
 
 
+async def verify_market_station(
+    session: AsyncSession, market_id: int
+) -> tuple[bool, str]:
+    """Manually approve a market's parsed station; shared by Telegram /verify
+    and the operator command queue. Returns (unblocked, human message)."""
+    market = (
+        await session.execute(
+            select(Market).where(Market.id == market_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if market is None:
+        return False, "Market not found."
+    if market.station_id is None:
+        return False, "Cannot verify: station parser did not identify a station."
+    if market.status is MarketStatus.RESOLVED:
+        return False, "Market is already resolved."
+    market.station_verified = True
+    market.station_verification_reason = None
+    market.status = MarketStatus.ACTIVE
+    return True, f"Market {market_id} station verified; trading unblocked."
+
+
 async def latest_station_before(
     session: AsyncSession, city: str, market_date: date
 ) -> Station | None:

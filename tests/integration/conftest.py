@@ -45,6 +45,7 @@ _TRUNCATE_TABLES = (
     "job_runs",
     "validation_checkpoints",
     "health_audits",
+    "operator_commands",
 )
 
 

@@ -56,6 +56,23 @@ public sealed class StratusApiClient : IDisposable
         CancellationToken cancellationToken = default) =>
         GetRequiredAsync<CollectionResponse<JobDto>>("api/v1/jobs?limit=100", cancellationToken);
 
+    public Task<CollectionResponse<CommandItem>> GetCommandsAsync(
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<CollectionResponse<CommandItem>>("api/v1/commands?limit=100", cancellationToken);
+
+    public async Task<CommandAccepted> PostCommandAsync(
+        CommandRequest command,
+        CancellationToken cancellationToken = default)
+    {
+        using HttpResponseMessage response =
+            await _httpClient.PostAsJsonAsync("api/v1/commands", command, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        CommandAccepted? payload =
+            await response.Content.ReadFromJsonAsync<CommandAccepted>(cancellationToken);
+        return payload
+            ?? throw new InvalidDataException("/api/v1/commands returned an invalid response.");
+    }
+
     private async Task<T> GetRequiredAsync<T>(string path, CancellationToken cancellationToken)
     {
         using HttpResponseMessage response = await _httpClient.GetAsync(path, cancellationToken);
@@ -92,3 +109,27 @@ public sealed class StratusApiClient : IDisposable
         [property: JsonPropertyName("status")] string Status,
         [property: JsonPropertyName("reasons")] IReadOnlyList<string>? Reasons);
 }
+
+public sealed record CommandRequest(
+    [property: JsonPropertyName("request_id")] string RequestId,
+    [property: JsonPropertyName("command")] string Command,
+    [property: JsonPropertyName("reason")] string Reason,
+    [property: JsonPropertyName("actor")] string Actor = "console",
+    [property: JsonPropertyName("payload"),
+     property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyDictionary<string, object>? Payload = null);
+
+public sealed record CommandItem(
+    [property: JsonPropertyName("id")] long Id,
+    [property: JsonPropertyName("request_id")] string RequestId,
+    [property: JsonPropertyName("command")] string Command,
+    [property: JsonPropertyName("actor")] string Actor,
+    [property: JsonPropertyName("reason")] string Reason,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("detail")] string? Detail,
+    [property: JsonPropertyName("created_at")] DateTimeOffset CreatedAt,
+    [property: JsonPropertyName("executed_at")] DateTimeOffset? ExecutedAt);
+
+public sealed record CommandAccepted(
+    [property: JsonPropertyName("created")] bool Created,
+    [property: JsonPropertyName("item")] CommandItem Item);

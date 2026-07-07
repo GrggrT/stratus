@@ -9,11 +9,11 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command
 from aiogram.types import BotCommand, BufferedInputFile, Message
-from sqlalchemy import select
 
 from stratus.config import Settings, get_settings
-from stratus.db.models import ExecutionMode, Market, MarketStatus
+from stratus.db.models import ExecutionMode
 from stratus.db.session import create_engine, create_session_factory
+from stratus.repositories.markets import verify_market_station
 from stratus.repositories.runtime_control import (
     get_runtime_control,
     request_live_confirmation,
@@ -131,20 +131,7 @@ def build_router(settings: Settings, session_factory: object) -> Router:
             return
         market_id = int(parts[1])
         async with session_factory.begin() as session:  # type: ignore[attr-defined]
-            market = await session.scalar(
-                select(Market).where(Market.id == market_id).with_for_update()
-            )
-            if market is None:
-                response = "Market not found."
-            elif market.station_id is None:
-                response = "Cannot verify: station parser did not identify a station."
-            elif market.status is MarketStatus.RESOLVED:
-                response = "Market is already resolved."
-            else:
-                market.station_verified = True
-                market.station_verification_reason = None
-                market.status = MarketStatus.ACTIVE
-                response = f"Market {market_id} station verified; trading unblocked."
+            _, response = await verify_market_station(session, market_id)
         await message.answer(response)
 
     @router.message(Command("mode"))

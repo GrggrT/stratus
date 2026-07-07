@@ -381,6 +381,30 @@ class ValidationCheckpoint(Base):
     )
 
 
+class OperatorCommand(Base):
+    """Immutable audit queue for console-initiated operations.
+
+    Rows are only ever inserted and status-transitioned (pending ->
+    succeeded/rejected/failed); nothing deletes them.
+    """
+
+    __tablename__ = "operator_commands"
+    __table_args__ = (Index("ix_operator_commands_status", "status", "id"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(64), unique=True)
+    command: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), server_default=text("'{}'::jsonb")
+    )
+    actor: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), server_default="pending")
+    detail: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class HealthAudit(Base):
     __tablename__ = "health_audits"
     __table_args__ = (Index("ix_health_audits_ts", "ts"),)

@@ -50,6 +50,7 @@ stratus-audit-gate = "stratus.jobs.audit_gate:main"
 stratus-audit-health = "stratus.jobs.audit_health:main"
 stratus-backfill-fees = "stratus.jobs.backfill_fees:main"
 stratus-prune-signals = "stratus.jobs.prune_signals:main"
+stratus-process-commands = "stratus.jobs.process_operator_commands:main"
 stratus-api = "stratus.api:main"
 
 [tool.hatch.build.targets.wheel]

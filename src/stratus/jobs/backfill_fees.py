@@ -5,20 +5,22 @@ import logging
 from decimal import Decimal
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.config import Settings, get_settings
 from stratus.db.models import ExecutionMode, Market, Order, Position, Signal
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import session_factory_scope
 from stratus.services.execution import taker_fee
 
 logger = logging.getLogger(__name__)
 
 
-async def backfill_fees(settings: Settings | None = None) -> tuple[int, int]:
+async def backfill_fees(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> tuple[int, int]:
     settings = settings or get_settings()
-    engine = create_engine(settings)
-    sessions = create_session_factory(engine)
-    try:
+    async with session_factory_scope(settings, session_factory) as sessions:
         async with sessions.begin() as session:
             order_rows = (
                 await session.execute(
@@ -71,8 +73,6 @@ async def backfill_fees(settings: Settings | None = None) -> tuple[int, int]:
             len(position_rows),
         )
         return len(order_rows), len(position_rows)
-    finally:
-        await engine.dispose()
 
 
 def main() -> None:

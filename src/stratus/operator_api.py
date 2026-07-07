@@ -4,11 +4,12 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, Query, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from stratus.config import Settings
 from stratus.db.models import (
     BankrollLog,
     Calibration,
@@ -23,10 +24,26 @@ from stratus.db.models import (
     Station,
     ValidationCheckpoint,
 )
+from stratus.repositories.operator_commands import enqueue_command, recent_commands
 from stratus.repositories.runtime_control import get_runtime_control
+from stratus.services.operator_commands import validate_command
 
 router = APIRouter(prefix="/api/v1", tags=["operator-monitoring"])
 SessionFactory = async_sessionmaker[AsyncSession]
+
+
+def require_configured_operator_key(request: Request) -> None:
+    """Mutations are refused outright until an API key is configured.
+
+    Read-only monitoring may run keyless on loopback, but anything that can
+    stop or resume trading must never be an unauthenticated HTTP call.
+    """
+    settings = cast(Settings, request.app.state.settings)
+    if settings.operator_api_key is None:
+        raise HTTPException(
+            status_code=403,
+            detail="mutations are disabled until OPERATOR_API_KEY is configured",
+        )
 
 
 class RuntimeDto(BaseModel):
@@ -152,6 +169,37 @@ class JobItem(BaseModel):
 class JobsResponse(BaseModel):
     generated_at: datetime
     items: list[JobItem]
+
+
+class CommandRequest(BaseModel):
+    request_id: str = Field(min_length=8, max_length=64)
+    command: str = Field(max_length=32)
+    reason: str = Field(min_length=4, max_length=2000)
+    actor: str = Field(default="console", min_length=1, max_length=64)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class CommandItem(BaseModel):
+    id: int
+    request_id: str
+    command: str
+    payload: dict[str, Any]
+    actor: str
+    reason: str
+    status: str
+    detail: str | None
+    created_at: datetime
+    executed_at: datetime | None
+
+
+class CommandAccepted(BaseModel):
+    created: bool
+    item: CommandItem
+
+
+class CommandsResponse(BaseModel):
+    generated_at: datetime
+    items: list[CommandItem]
 
 
 def _sessions(request: Request) -> SessionFactory:
@@ -381,6 +429,57 @@ async def calibrations(
             )
             for calibration, icao in rows
         ],
+    )
+
+
+def _command_item(row: Any) -> CommandItem:
+    return CommandItem(
+        id=row.id,
+        request_id=row.request_id,
+        command=row.command,
+        payload=row.payload,
+        actor=row.actor,
+        reason=row.reason,
+        status=row.status,
+        detail=row.detail,
+        created_at=row.created_at,
+        executed_at=row.executed_at,
+    )
+
+
+@router.post(
+    "/commands",
+    response_model=CommandAccepted,
+    status_code=202,
+    dependencies=[Depends(require_configured_operator_key)],
+)
+async def submit_command(request: Request, body: CommandRequest) -> CommandAccepted:
+    error = validate_command(body.command, body.payload)
+    if error is not None:
+        raise HTTPException(status_code=422, detail=error)
+    async with _sessions(request).begin() as session:
+        row, created = await enqueue_command(
+            session,
+            request_id=body.request_id,
+            command=body.command,
+            payload=body.payload,
+            actor=body.actor,
+            reason=body.reason,
+        )
+        item = _command_item(row)
+    return CommandAccepted(created=created, item=item)
+
+
+@router.get("/commands", response_model=CommandsResponse)
+async def commands(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> CommandsResponse:
+    async with _sessions(request)() as session:
+        rows = await recent_commands(session, limit=limit)
+    return CommandsResponse(
+        generated_at=datetime.now(UTC),
+        items=[_command_item(row) for row in rows],
     )
 
 

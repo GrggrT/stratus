@@ -70,6 +70,25 @@ HTTP every 10 seconds and clears stale collection data after a failed refresh.
 - Live mode remains unavailable until all existing quantitative, legal, tax, and executor
   gates pass.
 
+Implemented (backend):
+
+- `POST /api/v1/commands` — enqueue an allowlisted command
+  (`stop`, `resume`, `verify_market {market_id}`,
+  `run_job {job: discover-markets|backfill-fees|prune-signals}`) with a
+  client-generated `request_id` (idempotent), `actor`, and `reason`. Requires
+  `OPERATOR_API_KEY`; returns 403 when no key is configured, so mutations can
+  never be an unauthenticated call.
+- `GET /api/v1/commands` — the immutable audit log (status, detail,
+  executed_at). Rows are never deleted, only status-transitioned
+  (`pending -> succeeded | rejected | failed`).
+- The worker polls the queue every 20 seconds (`operator-commands` job),
+  executes one command per transaction (a crashing command is marked failed
+  instead of wedging the queue), and shares the `/verify` logic with the
+  Telegram bot.
+- `StratusApiClient` gained `PostCommandAsync`/`GetCommandsAsync`; the
+  Operations/Markets UI wiring (confirmation dialogs, request-id generation)
+  is the remaining desktop work.
+
 ## Safety invariants
 
 - The app treats unreachable API, stale audit, missing runtime control, and unknown response

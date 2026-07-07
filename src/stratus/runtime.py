@@ -30,6 +30,7 @@ from stratus.jobs.fetch_observations import fetch_observations
 from stratus.jobs.fetch_prices import fetch_prices
 from stratus.jobs.finalize_daily_actuals import finalize_daily_actuals
 from stratus.jobs.generate_signals import generate_signals
+from stratus.jobs.process_operator_commands import process_operator_commands
 from stratus.jobs.prune_signals import prune_signals
 from stratus.jobs.recalibrate_emos import recalibrate_emos
 from stratus.jobs.recompute_probs import recompute_probs
@@ -123,6 +124,11 @@ def build_scheduler(
             CronTrigger(hour=3, minute=30, timezone=UTC),
             "signal-retention",
         ),
+        (
+            process_operator_commands,
+            IntervalTrigger(seconds=20),
+            "operator-commands",
+        ),
     ]
     for function, trigger, job_id in jobs:
         scheduler.add_job(function, trigger, id=job_id, **common)
@@ -148,6 +154,11 @@ async def run(settings: Settings | None = None) -> None:
             status = "error"
         elif event.code == EVENT_JOB_MISSED:
             status = "missed"
+        # The command poller fires every 20s; recording each success would
+        # flood job_runs. The queue itself is the audit trail; failures are
+        # still persisted and alerted below.
+        if event.job_id == "operator-commands" and status == "success":
+            return
         error = str(event.exception)[:4000] if event.exception is not None else None
         try:
             async with sessions.begin() as session:
