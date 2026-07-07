@@ -115,8 +115,8 @@ public sealed record CommandRequest(
     [property: JsonPropertyName("command")] string Command,
     [property: JsonPropertyName("reason")] string Reason,
     [property: JsonPropertyName("actor")] string Actor = "console",
-    [property: JsonPropertyName("payload"),
-     property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [property: JsonPropertyName("payload")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     IReadOnlyDictionary<string, object>? Payload = null);
 
 public sealed record CommandItem(
