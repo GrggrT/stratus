@@ -323,6 +323,64 @@ async def test_poll_builds_position_from_partial_then_full_fill(
     assert {b.balance_usd for b in balances} == {Decimal("980.0000"), Decimal("975.0000")}
 
 
+async def test_execute_signals_dispatches_by_runtime_mode(
+    db_sessions: SessionFactory, migrated_database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stratus.jobs import execute_signals as dispatch_module
+
+    calls: list[str] = []
+
+    async def fake_live(settings: object, sf: object = None, **_: object) -> tuple[int, int, int]:
+        calls.append("live")
+        return (1, 0, 0)
+
+    async def fake_paper(settings: object, sf: object = None) -> tuple[int, int, int]:
+        calls.append("paper")
+        return (0, 0, 0)
+
+    monkeypatch.setattr(
+        "stratus.jobs.execute_live_signals.execute_live_signals", fake_live
+    )
+    monkeypatch.setattr(dispatch_module, "execute_paper_signals", fake_paper)
+
+    await _set_runtime(db_sessions, mode=ExecutionMode.PAPER)
+    await dispatch_module.execute_signals(_settings(migrated_database_url), db_sessions)
+    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await dispatch_module.execute_signals(_settings(migrated_database_url), db_sessions)
+
+    assert calls == ["paper", "live"]
+
+
+async def test_audit_health_flags_unconfirmed_live_orders(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    from stratus.jobs.audit_health import audit_health
+
+    signal_id = await _pending_signal(db_sessions)
+    async with db_sessions.begin() as session:
+        session.add(
+            Order(
+                signal_id=signal_id,
+                mode=ExecutionMode.LIVE,
+                clob_order_id=None,
+                side=TradeSide.BUY_YES,
+                price=Decimal("0.530000"),
+                size_usd=Decimal("20.0000"),
+                filled_usd=Decimal("0"),
+                status="submit_unconfirmed",
+            )
+        )
+
+    status, _issue_count = await audit_health(
+        _settings(migrated_database_url), db_sessions
+    )
+    assert status == "critical"
+    async with db_sessions() as session:
+        latest = await session.get(RuntimeControl, 1)
+    # Critical audit engages the kill switch.
+    assert latest is not None and latest.kill_switch is True
+
+
 async def test_cancel_requested_live_orders_are_canceled(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:

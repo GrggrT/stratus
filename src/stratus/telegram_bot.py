@@ -28,6 +28,7 @@ from stratus.repositories.telegram import (
     mark_delivery_sent,
     pending_deliveries,
 )
+from stratus.services.live_execution import live_executor_configured
 from stratus.services.telegram_reports import (
     calculate_live_gate,
     calibration_report,
@@ -173,9 +174,17 @@ def build_router(settings: Settings, session_factory: object) -> Router:
                                 "Gate passed. Repeat /mode live before "
                                 f"{deadline:%H:%M:%S} UTC to confirm."
                             )
-                        else:
+                        elif not live_executor_configured(settings.polygon_private_key):
                             response = (
-                                "Live mode remains blocked: the live CLOB executor is not deployed."
+                                "Live mode remains blocked: no trading wallet is "
+                                "configured (POLYGON_PRIVATE_KEY)."
+                            )
+                        else:
+                            await set_mode(session, ExecutionMode.LIVE)
+                            response = (
+                                "LIVE mode enabled. The executor will place real "
+                                "orders on the next cycle. Use /stop to halt "
+                                "immediately."
                             )
         await message.answer(response)
 

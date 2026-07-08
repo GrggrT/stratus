@@ -19,6 +19,7 @@ from stratus.db.models import (
     MarketStatus,
     ModelProb,
     Observation,
+    Order,
     Position,
     PositionStatus,
     Signal,
@@ -26,6 +27,7 @@ from stratus.db.models import (
     Station,
 )
 from stratus.db.session import session_factory_scope
+from stratus.repositories.execution import LIVE_STATUS_UNCONFIRMED
 from stratus.repositories.job_runs import collector_uptime
 from stratus.repositories.risk import enforce_loss_limits
 from stratus.repositories.runtime_control import set_kill_switch
@@ -147,6 +149,26 @@ async def audit_health(
                         "detail": f"{stale_settlements} market(s) >12h past resolution",
                     }
                 )
+
+            # A live order whose outcome could not be confirmed may be resting
+            # on the book unaccounted for: the executor already engaged the
+            # kill switch, but surface it as critical for the operator.
+            unconfirmed_live = await session.scalar(
+                select(func.count())
+                .select_from(Order)
+                .where(
+                    Order.mode == ExecutionMode.LIVE,
+                    Order.status == LIVE_STATUS_UNCONFIRMED,
+                )
+            )
+            if unconfirmed_live:
+                issues.append(
+                    {
+                        "code": "live_orders_unconfirmed",
+                        "detail": f"{unconfirmed_live} live order(s) need manual reconciliation",
+                    }
+                )
+                critical = True
 
             # Reconcile METAR-derived daily actuals with how markets actually
             # resolved: a clear disagreement means the observation pipeline

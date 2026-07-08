@@ -23,6 +23,7 @@ from stratus.db.session import create_engine, create_session_factory
 from stratus.jobs.audit_gate import audit_gate
 from stratus.jobs.audit_health import audit_health
 from stratus.jobs.discover_markets import discover_markets
+from stratus.jobs.execute_live_signals import cancel_live_orders, poll_live_fills
 from stratus.jobs.execute_signals import execute_signals
 from stratus.jobs.fetch_ensemble import fetch_ensemble
 from stratus.jobs.fetch_forecasts import fetch_forecasts
@@ -118,7 +119,9 @@ def build_scheduler(
         (finalize_daily_actuals, IntervalTrigger(hours=1), "daily-actuals"),
         (discover_markets, IntervalTrigger(minutes=30), "market-discovery"),
         (price_cycle, IntervalTrigger(minutes=1), "prices-and-signals"),
-        (execute_signals, IntervalTrigger(minutes=1), "paper-execution"),
+        (execute_signals, IntervalTrigger(minutes=1), "execution"),
+        (poll_live_fills, IntervalTrigger(minutes=1), "live-fills"),
+        (cancel_live_orders, IntervalTrigger(minutes=1), "live-cancellations"),
         (settle_markets, IntervalTrigger(minutes=10), "settlement"),
         (audit_health, IntervalTrigger(minutes=10), "data-quality"),
         (

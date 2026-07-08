@@ -108,11 +108,32 @@ readiness-gated manual entry point in the meantime.
   the shares to redeem manually via the Polymarket UI. Losing live
   positions settle silently.
 
-### L3c — go live (last)
+### L3c — go live (implemented)
 
-- Dispatch paper vs live in `execute_signals`; schedule `poll_live_fills`
-  and `cancel_live_orders`; unlock `/mode live`; live-specific health
-  checks (unconfirmed orders, open-order age, balance drift).
+- `execute_signals` now dispatches by runtime mode: LIVE ->
+  `execute_live_signals`, else `execute_paper_signals`. The scheduler runs
+  the single `execution` job plus `live-fills` and `live-cancellations`
+  every minute (both no-op without a configured wallet).
+- `/mode live` is unlocked: after the legal/tax flags, the paper gate, and
+  the two-message confirmation, a configured `POLYGON_PRIVATE_KEY` flips
+  the runtime to LIVE; without a wallet it stays blocked.
+- Health audit flags `live_orders_unconfirmed` as critical (engaging the
+  kill switch) so an order the executor could not confirm cannot be
+  silently forgotten.
+
+### Operator runbook: going live
+
+1. Set `LIVE_LEGAL_APPROVED=true`, `LIVE_TAX_APPROVED=true`,
+   `POLYGON_PRIVATE_KEY`, and (proxy wallets) `POLYMARKET_FUNDER` /
+   `POLYMARKET_SIGNATURE_TYPE` in `.env`. Keep `LIVE_MAX_ORDER_USD` small.
+2. Confirm the day-30/60 validation gate has passed (`/calib`).
+3. `/mode live`, then `/mode live` again within the confirmation window.
+4. Watch `/status`; the executor places GTC BUYs capped at
+   `LIVE_MAX_ORDER_USD`. `/stop` halts immediately and marks resting
+   orders `cancel_requested` for the cancellation job.
+5. **Redemption is manual.** On resolution STRATUS records live PnL and
+   sends a `live-redeem` reminder; redeem winning tokens yourself in the
+   Polymarket UI. The bot never moves funds on-chain.
 
 ## Evidence retention (per the readiness memo)
 

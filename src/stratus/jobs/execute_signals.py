@@ -33,6 +33,24 @@ async def execute_signals(
     settings: Settings | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[int, int, int]:
+    """Dispatch execution by the runtime mode. LIVE places real orders on the
+    CLOB; PAPER runs the simulator. Mode is only reachable through the
+    validation gate and the /mode confirmation flow."""
+    settings = settings or get_settings()
+    async with session_factory_scope(settings, session_factory) as sessions:
+        async with sessions.begin() as session:
+            mode = (await get_runtime_control(session)).mode
+        if mode is ExecutionMode.LIVE:
+            from stratus.jobs.execute_live_signals import execute_live_signals
+
+            return await execute_live_signals(settings, sessions)
+        return await execute_paper_signals(settings, sessions)
+
+
+async def execute_paper_signals(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+) -> tuple[int, int, int]:
     settings = settings or get_settings()
     now = datetime.now(UTC)
     async with session_factory_scope(settings, session_factory) as session_factory:
@@ -41,10 +59,6 @@ async def execute_signals(
             if control.kill_switch or control.halted_reason:
                 logger.info("paper execution blocked by runtime control")
                 return 0, 0, 0
-            if control.mode is not ExecutionMode.PAPER:
-                raise RuntimeError(
-                    "live execution is disabled until the validation gate passes"
-                )
             loss_limits, risk_expired = await enforce_loss_limits(
                 session,
                 mode=ExecutionMode.PAPER,
