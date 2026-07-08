@@ -60,8 +60,10 @@ Implemented resources:
 - `GET /api/v1/jobs?limit=...`
 
 The **Live** page renders live orders and positions from `/orders` and
-`/positions` and flags winning closed live positions as awaiting a manual
-on-chain redemption (the bot never redeems).
+`/positions`, flags winning closed live positions as awaiting a manual
+on-chain redemption (the bot never redeems), shows the CLV/PnL retrospective
+cards from `/live-summary`, and draws a realised-equity curve (a WinUI
+`Polyline` on a `Canvas`) from `/live-equity`.
 
 All collection limits are bounded to 1–200 records. The desktop refreshes through loopback
 HTTP every 10 seconds and clears stale collection data after a failed refresh.

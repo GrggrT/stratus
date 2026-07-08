@@ -154,8 +154,15 @@ turns the live positions into realised stats: PnL, ROI over deployed cost
 (not bankroll, so partial deployment is not flattered), win rate, average
 CLV, and the CLV beat-rate — the share of closed positions that entered
 better than the closing line, the core skill signal independent of
-individual outcomes. Surfaced by the Telegram `/live` command and the
-`GET /api/v1/live-summary` endpoint.
+individual outcomes.
+
+Surfaces:
+- Telegram `/live`: the summary text with a server-rendered realised-equity
+  PNG attached (same PIL path as the `/calib` reliability chart).
+- `GET /api/v1/live-summary`: the retrospective as JSON.
+- `GET /api/v1/live-equity`: the cumulative realised-PnL series
+  (`cumulative_equity`, ordered by close time).
+- Console **Live** page: summary cards plus a `Polyline` equity curve.
 
 ## Evidence retention (per the readiness memo)
 

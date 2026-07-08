@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,25 @@ class LivePerformance:
     @property
     def win_rate(self) -> float | None:
         return self.wins / self.closed if self.closed else None
+
+
+@dataclass(frozen=True, slots=True)
+class EquityPoint:
+    ts: datetime
+    cumulative_pnl_usd: float
+
+
+def cumulative_equity(
+    realized: list[tuple[datetime, float]],
+) -> list[EquityPoint]:
+    """Running realised PnL over closed live positions, ordered by close time.
+    Each point is the cumulative PnL after that position settled."""
+    running = 0.0
+    points = []
+    for ts, pnl in sorted(realized, key=lambda item: item[0]):
+        running += pnl
+        points.append(EquityPoint(ts=ts, cumulative_pnl_usd=round(running, 4)))
+    return points
 
 
 def summarize_live_performance(positions: list[PositionStat]) -> LivePerformance:

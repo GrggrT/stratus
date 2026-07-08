@@ -96,6 +96,27 @@ public sealed record JobDto(
     [property: JsonPropertyName("status")] string Status,
     [property: JsonPropertyName("error")] string? Error);
 
+public sealed record EquityPointDto(
+    [property: JsonPropertyName("t")] DateTimeOffset T,
+    [property: JsonPropertyName("cumulative_pnl_usd")] double CumulativePnlUsd);
+
+public sealed record EquityResponse(
+    [property: JsonPropertyName("generated_at")] DateTimeOffset GeneratedAt,
+    [property: JsonPropertyName("points")] IReadOnlyList<EquityPointDto> Points);
+
+public sealed record LiveSummaryDto(
+    [property: JsonPropertyName("positions")] int Positions,
+    [property: JsonPropertyName("closed")] int Closed,
+    [property: JsonPropertyName("open")] int Open,
+    [property: JsonPropertyName("wins")] int Wins,
+    [property: JsonPropertyName("win_rate")] double? WinRate,
+    [property: JsonPropertyName("total_pnl_usd")] double TotalPnlUsd,
+    [property: JsonPropertyName("total_cost_usd")] double TotalCostUsd,
+    [property: JsonPropertyName("total_fees_usd")] double TotalFeesUsd,
+    [property: JsonPropertyName("roi")] double? Roi,
+    [property: JsonPropertyName("avg_clv")] double? AvgClv,
+    [property: JsonPropertyName("clv_beat_rate")] double? ClvBeatRate);
+
 public sealed record OrderDto(
     [property: JsonPropertyName("id")] long Id,
     [property: JsonPropertyName("polymarket_id")] string PolymarketId,

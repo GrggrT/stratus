@@ -60,6 +60,14 @@ public sealed class StratusApiClient : IDisposable
         CancellationToken cancellationToken = default) =>
         GetRequiredAsync<CollectionResponse<OrderDto>>("api/v1/orders?limit=100", cancellationToken);
 
+    public Task<LiveSummaryDto> GetLiveSummaryAsync(
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<LiveSummaryDto>("api/v1/live-summary", cancellationToken);
+
+    public Task<EquityResponse> GetLiveEquityAsync(
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<EquityResponse>("api/v1/live-equity", cancellationToken);
+
     public Task<CollectionResponse<CommandItem>> GetCommandsAsync(
         CancellationToken cancellationToken = default) =>
         GetRequiredAsync<CollectionResponse<CommandItem>>("api/v1/commands?limit=100", cancellationToken);

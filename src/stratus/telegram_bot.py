@@ -33,6 +33,7 @@ from stratus.services.telegram_reports import (
     calculate_live_gate,
     calibration_report,
     daily_report,
+    live_equity_chart,
     live_report,
     reliability_chart,
     status_report,
@@ -110,7 +111,14 @@ def build_router(settings: Settings, session_factory: object) -> Router:
             return
         async with session_factory() as session:  # type: ignore[operator]
             report = await live_report(session)
-        await message.answer(report)
+            chart = await live_equity_chart(session)
+        if chart is None:
+            await message.answer(report)
+        else:
+            await message.answer_photo(
+                BufferedInputFile(chart, filename="live-equity.png"),
+                caption=report,
+            )
 
     @router.message(Command("stop"))
     async def stop_handler(message: Message) -> None:

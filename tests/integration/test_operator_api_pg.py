@@ -17,6 +17,8 @@ from stratus.db.models import (
     Market,
     MarketStatus,
     Order,
+    Position,
+    PositionStatus,
     Signal,
     SignalConfidence,
     SignalStatus,
@@ -84,3 +86,42 @@ async def test_orders_endpoint_joins_order_signal_market_station(
     assert item["clob_order_id"] == "0xlive"
     assert item["station_icao"] == "KLGA"
     assert item["polymarket_id"] == "pm-orders-1"
+
+
+async def test_live_equity_endpoint_returns_cumulative_series(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    async with db_sessions.begin() as session:
+        station = Station(
+            icao="KLGA", name="LaGuardia", city="New York City",
+            lat=Decimal("40.77"), lon=Decimal("-73.87"), tz="America/New_York",
+        )
+        session.add(station)
+        await session.flush()
+        market = Market(
+            polymarket_id="pm-eq-1", event_id="ev-1", station_id=station.id,
+            market_date=NOW.date(), kind=WeatherKind.HIGH, rules_raw="rules",
+            resolves_at=NOW, status=MarketStatus.RESOLVED, station_verified=True,
+        )
+        session.add(market)
+        await session.flush()
+        for offset, pnl in ((1, "20.0"), (2, "-5.0")):
+            session.add(
+                Position(
+                    market_id=market.id, mode=ExecutionMode.LIVE, side=TradeSide.BUY_YES,
+                    avg_price=Decimal("0.5"), size_shares=Decimal("40"), size_usd=Decimal("20"),
+                    status=PositionStatus.CLOSED, pnl_usd=Decimal(pnl),
+                    closed_at=NOW + timedelta(hours=offset),
+                )
+            )
+
+    app = create_app(Settings(database_url=migrated_database_url))
+    app.state.sessions = db_sessions
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/api/v1/live-equity")
+
+    assert response.status_code == 200
+    points = response.json()["points"]
+    assert [p["cumulative_pnl_usd"] for p in points] == [20.0, 15.0]

@@ -1,4 +1,28 @@
-from stratus.services.live_analytics import PositionStat, summarize_live_performance
+from datetime import UTC, datetime
+
+from stratus.services.live_analytics import (
+    PositionStat,
+    cumulative_equity,
+    summarize_live_performance,
+)
+
+
+def test_cumulative_equity_runs_in_time_order() -> None:
+    t1 = datetime(2026, 7, 1, tzinfo=UTC)
+    t2 = datetime(2026, 7, 2, tzinfo=UTC)
+    t3 = datetime(2026, 7, 3, tzinfo=UTC)
+    # Deliberately out of order to prove it sorts by time.
+    points = cumulative_equity([(t2, -5.0), (t1, 20.0), (t3, 10.0)])
+
+    assert [(p.ts, p.cumulative_pnl_usd) for p in points] == [
+        (t1, 20.0),
+        (t2, 15.0),
+        (t3, 25.0),
+    ]
+
+
+def test_cumulative_equity_empty() -> None:
+    assert cumulative_equity([]) == []
 
 
 def test_summary_over_mixed_open_and_closed_positions() -> None:

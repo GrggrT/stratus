@@ -1,8 +1,12 @@
 using System.Globalization;
+using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Shapes;
 using StratusConsole.Models;
 using StratusConsole.Services;
+using Windows.Foundation;
 
 namespace StratusConsole;
 
@@ -133,11 +137,13 @@ public sealed partial class MainPage : Page
                     RenderJobs((await _apiClient.GetJobsAsync(_lifetime.Token)).Items);
                     break;
                 case "Live":
+                    LiveSummaryDto liveSummary = await _apiClient.GetLiveSummaryAsync(_lifetime.Token);
+                    EquityResponse liveEquity = await _apiClient.GetLiveEquityAsync(_lifetime.Token);
                     CollectionResponse<OrderDto> liveOrders =
                         await _apiClient.GetOrdersAsync(_lifetime.Token);
                     CollectionResponse<PositionDto> livePositions =
                         await _apiClient.GetPositionsAsync(_lifetime.Token);
-                    RenderLive(liveOrders.Items, livePositions.Items);
+                    RenderLive(liveSummary, liveEquity.Points, liveOrders.Items, livePositions.Items);
                     break;
                 case "Operations":
                     OverviewResponse operationsOverview =
@@ -603,6 +609,8 @@ public sealed partial class MainPage : Page
     }
 
     private void RenderLive(
+        LiveSummaryDto summary,
+        IReadOnlyList<EquityPointDto> equity,
         IReadOnlyList<OrderDto> orders,
         IReadOnlyList<PositionDto> positions)
     {
@@ -620,6 +628,15 @@ public sealed partial class MainPage : Page
 
         List<MonitoringListItem> items =
         [
+            new(
+                "Live performance",
+                summary.Positions == 0
+                    ? "No live positions yet"
+                    : $"{summary.Positions} positions · {summary.Open} open · {summary.Closed} closed",
+                $"P&L {Usd(summary.TotalPnlUsd)} · ROI {Percent(summary.Roi)} · win {Percent(summary.WinRate)}",
+                $"Avg CLV {Number(summary.AvgClv)} · beat line {Percent(summary.ClvBeatRate)} · "
+                    + $"fees {Usd(summary.TotalFeesUsd)}",
+                summary.ClvBeatRate is > 0.5 ? "Edge" : "Watch"),
             new(
                 "Live executor",
                 live.Count == 0 ? "No live orders" : $"{live.Count} live order(s)",
@@ -644,6 +661,72 @@ public sealed partial class MainPage : Page
             position.ClosedAt is null ? position.PolymarketId : $"Closed · {position.PolymarketId}",
             Pretty(position.Status))));
         SetCollection(items);
+
+        _equityPoints = equity;
+        if (equity.Count >= 2)
+        {
+            EquityChartCard.Visibility = Visibility.Visible;
+            DrawEquity();
+        }
+    }
+
+    private IReadOnlyList<EquityPointDto> _equityPoints = [];
+
+    private void EquityCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (EquityChartCard.Visibility == Visibility.Visible)
+        {
+            DrawEquity();
+        }
+    }
+
+    private void DrawEquity()
+    {
+        EquityCanvas.Children.Clear();
+        double width = EquityCanvas.ActualWidth;
+        double height = EquityCanvas.ActualHeight;
+        if (_equityPoints.Count < 2 || width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        double[] values = _equityPoints.Select(p => p.CumulativePnlUsd).ToArray();
+        double lo = Math.Min(0, values.Min());
+        double hi = Math.Max(0, values.Max());
+        double span = hi - lo <= 0 ? 1 : hi - lo;
+        double X(int i) => i * (width / (values.Length - 1));
+        double Y(double v) => height - ((v - lo) / span * height);
+
+        // Zero baseline.
+        var zero = new Line
+        {
+            X1 = 0,
+            X2 = width,
+            Y1 = Y(0),
+            Y2 = Y(0),
+            Stroke = new SolidColorBrush(Color.FromArgb(0x66, 0x99, 0x99, 0x99)),
+            StrokeThickness = 1,
+        };
+        EquityCanvas.Children.Add(zero);
+
+        bool positive = values[^1] >= 0;
+        var brush = new SolidColorBrush(positive
+            ? Color.FromArgb(0xFF, 0x23, 0x86, 0x36)
+            : Color.FromArgb(0xFF, 0xD1, 0x49, 0x5B));
+        var line = new Polyline { Stroke = brush, StrokeThickness = 2 };
+        for (int i = 0; i < values.Length; i++)
+        {
+            line.Points.Add(new Point(X(i), Y(values[i])));
+        }
+        EquityCanvas.Children.Add(line);
+
+        var dot = new Ellipse { Width = 8, Height = 8, Fill = brush };
+        Canvas.SetLeft(dot, X(values.Length - 1) - 4);
+        Canvas.SetTop(dot, Y(values[^1]) - 4);
+        EquityCanvas.Children.Add(dot);
+
+        EquityChartTitle.Text =
+            $"Live realised equity — {Usd(values[^1])} over {values.Length} trades";
     }
 
     private void RenderSettings()
@@ -673,6 +756,8 @@ public sealed partial class MainPage : Page
 
     private void SetCollection(IEnumerable<MonitoringListItem> items)
     {
+        // Only the Live page shows the equity chart; every other list hides it.
+        EquityChartCard.Visibility = Visibility.Collapsed;
         List<MonitoringListItem> materialized = items.ToList();
         CollectionList.ItemsSource = materialized;
         CollectionEmptyText.Text = "No records yet";

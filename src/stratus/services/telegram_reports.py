@@ -25,7 +25,12 @@ from stratus.db.models import (
 )
 from stratus.repositories.job_runs import collector_uptime
 from stratus.repositories.runtime_control import get_runtime_control
-from stratus.services.live_analytics import PositionStat, summarize_live_performance
+from stratus.services.live_analytics import (
+    EquityPoint,
+    PositionStat,
+    cumulative_equity,
+    summarize_live_performance,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +243,82 @@ def render_reliability_chart(rows: list[tuple[str, bool, float]]) -> bytes | Non
 
 async def reliability_chart(session: AsyncSession) -> bytes | None:
     return render_reliability_chart(await _resolved_probability_rows(session))
+
+
+async def _live_equity_points(session: AsyncSession) -> list[EquityPoint]:
+    rows = (
+        await session.execute(
+            select(Position.closed_at, Position.pnl_usd).where(
+                Position.mode == ExecutionMode.LIVE,
+                Position.status == PositionStatus.CLOSED,
+                Position.closed_at.is_not(None),
+            )
+        )
+    ).all()
+    return cumulative_equity(
+        [(ts, float(pnl or 0)) for ts, pnl in rows if ts is not None]
+    )
+
+
+def render_equity_chart(points: list[EquityPoint]) -> bytes | None:
+    if len(points) < 2:
+        return None
+
+    width, height = 900, 520
+    left, top, right, bottom = 95, 60, 45, 80
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default(size=18)
+    small_font = ImageFont.load_default(size=15)
+
+    values = [p.cumulative_pnl_usd for p in points]
+    lo = min(0.0, min(values))
+    hi = max(0.0, max(values))
+    span = hi - lo or 1.0
+    n = len(points)
+
+    def coord(index: int, value: float) -> tuple[int, int]:
+        x = left + (index / (n - 1)) * plot_width
+        y = top + (1 - (value - lo) / span) * plot_height
+        return round(x), round(y)
+
+    # Zero line.
+    zero_y = coord(0, 0.0)[1]
+    draw.line((left, zero_y, left + plot_width, zero_y), fill="#c8ccd0", width=2)
+    for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+        value = lo + frac * span
+        y = round(top + (1 - frac) * plot_height)
+        draw.text((left - 78, y - 8), f"${value:+.0f}", fill="#333333", font=small_font)
+
+    line = [coord(i, v) for i, v in enumerate(values)]
+    final_positive = values[-1] >= 0
+    draw.line(line, fill="#238636" if final_positive else "#d1495b", width=3)
+    draw.ellipse(
+        (line[-1][0] - 6, line[-1][1] - 6, line[-1][0] + 6, line[-1][1] + 6),
+        fill="#238636" if final_positive else "#d1495b",
+        outline="white",
+        width=2,
+    )
+    draw.rectangle(
+        (left, top, left + plot_width, top + plot_height), outline="#333333", width=2
+    )
+    draw.text((left, 22), "Live realised equity", fill="#111111", font=font)
+    draw.text(
+        (left + plot_width - 150, 24),
+        f"${values[-1]:+.2f} ({n} trades)",
+        fill="#238636" if final_positive else "#d1495b",
+        font=small_font,
+    )
+
+    output = BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+async def live_equity_chart(session: AsyncSession) -> bytes | None:
+    return render_equity_chart(await _live_equity_points(session))
 
 
 async def calculate_live_gate(

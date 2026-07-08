@@ -28,7 +28,11 @@ from stratus.db.models import (
 )
 from stratus.repositories.operator_commands import enqueue_command, recent_commands
 from stratus.repositories.runtime_control import get_runtime_control
-from stratus.services.live_analytics import PositionStat, summarize_live_performance
+from stratus.services.live_analytics import (
+    PositionStat,
+    cumulative_equity,
+    summarize_live_performance,
+)
 from stratus.services.operator_commands import validate_command
 
 router = APIRouter(prefix="/api/v1", tags=["operator-monitoring"])
@@ -173,6 +177,16 @@ class LiveSummaryResponse(BaseModel):
     roi: float | None
     avg_clv: float | None
     clv_beat_rate: float | None
+
+
+class EquityPointItem(BaseModel):
+    t: datetime
+    cumulative_pnl_usd: float
+
+
+class EquityResponse(BaseModel):
+    generated_at: datetime
+    points: list[EquityPointItem]
 
 
 class OrderItem(BaseModel):
@@ -564,6 +578,30 @@ async def live_summary(request: Request) -> LiveSummaryResponse:
         roi=perf.roi,
         avg_clv=perf.avg_clv,
         clv_beat_rate=perf.clv_beat_rate,
+    )
+
+
+@router.get("/live-equity", response_model=EquityResponse)
+async def live_equity(request: Request) -> EquityResponse:
+    async with _sessions(request)() as session:
+        rows = (
+            await session.execute(
+                select(Position.closed_at, Position.pnl_usd).where(
+                    Position.mode == ExecutionMode.LIVE,
+                    Position.status == PositionStatus.CLOSED,
+                    Position.closed_at.is_not(None),
+                )
+            )
+        ).all()
+    points = cumulative_equity(
+        [(ts, float(pnl or 0)) for ts, pnl in rows if ts is not None]
+    )
+    return EquityResponse(
+        generated_at=datetime.now(UTC),
+        points=[
+            EquityPointItem(t=p.ts, cumulative_pnl_usd=p.cumulative_pnl_usd)
+            for p in points
+        ],
     )
 
 

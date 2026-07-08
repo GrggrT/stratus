@@ -237,8 +237,28 @@
             </ScrollViewer>
 
             <Grid x:Name="CollectionView" Grid.Row="2" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Border
+                    x:Name="EquityChartCard"
+                    Grid.Row="0"
+                    Margin="32,0,32,12"
+                    Padding="16"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Visibility="Collapsed">
+                    <StackPanel Spacing="8">
+                        <TextBlock x:Name="EquityChartTitle" FontWeight="SemiBold" Text="Live realised equity" />
+                        <Canvas x:Name="EquityCanvas" Height="200" SizeChanged="EquityCanvas_SizeChanged" />
+                    </StackPanel>
+                </Border>
                 <ListView
                     x:Name="CollectionList"
+                    Grid.Row="1"
                     Padding="32,0,32,32"
                     IsItemClickEnabled="False"
                     SelectionMode="None"
@@ -299,6 +319,7 @@
                 </ListView>
                 <StackPanel
                     x:Name="CollectionEmptyState"
+                    Grid.Row="1"
                     MaxWidth="520"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Center"

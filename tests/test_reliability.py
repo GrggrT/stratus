@@ -1,9 +1,33 @@
+from datetime import UTC, datetime
 from io import BytesIO
 
 import pytest
 from PIL import Image
 
-from stratus.services.telegram_reports import reliability_bins, render_reliability_chart
+from stratus.services.live_analytics import EquityPoint
+from stratus.services.telegram_reports import (
+    reliability_bins,
+    render_equity_chart,
+    render_reliability_chart,
+)
+
+
+def test_render_equity_chart_produces_valid_png() -> None:
+    points = [
+        EquityPoint(ts=datetime(2026, 7, d, tzinfo=UTC), cumulative_pnl_usd=v)
+        for d, v in [(1, 10.0), (2, -5.0), (3, 8.0), (4, 22.0)]
+    ]
+    chart = render_equity_chart(points)
+    assert chart is not None
+    with Image.open(BytesIO(chart)) as image:
+        assert image.format == "PNG"
+
+
+def test_render_equity_chart_needs_two_points() -> None:
+    assert render_equity_chart([]) is None
+    assert render_equity_chart(
+        [EquityPoint(ts=datetime(2026, 7, 1, tzinfo=UTC), cumulative_pnl_usd=1.0)]
+    ) is None
 
 
 def test_reliability_bins_are_per_station_and_probability_decile() -> None:
