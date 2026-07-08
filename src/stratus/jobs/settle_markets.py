@@ -12,7 +12,7 @@ from stratus.collectors.gamma import GammaClient, parse_market_resolutions
 from stratus.config import Settings, get_settings
 from stratus.db.models import Market, MarketStatus
 from stratus.db.session import session_factory_scope
-from stratus.repositories.settlement import settle_paper_markets
+from stratus.repositories.settlement import settle_resolved_markets
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ async def settle_markets(
         }
 
         async with session_factory.begin() as session:
-            resolved, positions, pnl = await settle_paper_markets(
+            result = await settle_resolved_markets(
                 session,
                 resolutions=resolutions,
                 closing_times=closing_times,
@@ -66,13 +66,16 @@ async def settle_markets(
                 initial_bankroll_usd=Decimal(str(settings.initial_bankroll_usd)),
             )
         logger.info(
-            "market settlement complete: candidates=%d resolved=%d positions=%d pnl=%s",
+            "market settlement complete: candidates=%d resolved=%d "
+            "paper_positions=%d paper_pnl=%s live_positions=%d live_pnl=%s",
             len(candidates),
-            resolved,
-            positions,
-            pnl,
+            result.resolved,
+            result.paper_positions,
+            result.paper_pnl,
+            result.live_positions,
+            result.live_pnl,
         )
-        return resolved, positions
+        return result.resolved, result.paper_positions + result.live_positions
 
 
 def main() -> None:

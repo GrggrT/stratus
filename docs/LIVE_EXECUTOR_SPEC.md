@@ -96,11 +96,17 @@ readiness-gated manual entry point in the meantime.
   snapshot only when the collateral balance changed.
 - `stratus-poll-live-fills` is a manual entry point; not scheduled yet.
 
-### L3b — live settlement (next)
+### L3b — live settlement (implemented)
 
-- Resolution detection reuses the Gamma path; settlement records live
-  position PnL at resolution. On-chain redemption of winning tokens stays
-  MANUAL via the Polymarket UI (documented operator runbook step).
+- `repositories/settlement.py::settle_resolved_markets` replaces the
+  paper-only function: it resolves each market once and closes ALL open
+  positions (both modes) in one transaction. Paper positions still
+  synthesise a bankroll balance from realised PnL; live positions record
+  PnL and CLV only — the real USDC balance does not move until the operator
+  redeems on-chain, so no synthetic live bankroll row is written.
+- Winning live positions enqueue one `live-redeem:<ts>` reminder listing
+  the shares to redeem manually via the Polymarket UI. Losing live
+  positions settle silently.
 
 ### L3c — go live (last)
 
