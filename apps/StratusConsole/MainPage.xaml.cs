@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Shapes;
 using StratusConsole.Models;
 using StratusConsole.Services;
 using Windows.Foundation;
+using Windows.UI;
 
 namespace StratusConsole;
 
