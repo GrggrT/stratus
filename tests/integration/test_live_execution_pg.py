@@ -16,10 +16,13 @@ from stratus.collectors.clob_trader import ClobTradeError, PlacedOrder
 from stratus.collectors.geoblock import GeoblockStatus
 from stratus.config import Settings
 from stratus.db.models import (
+    BankrollLog,
     ExecutionMode,
     Market,
     MarketStatus,
     Order,
+    Position,
+    PositionStatus,
     RuntimeControl,
     Signal,
     SignalConfidence,
@@ -28,7 +31,11 @@ from stratus.db.models import (
     TradeSide,
     WeatherKind,
 )
-from stratus.jobs.execute_live_signals import cancel_live_orders, execute_live_signals
+from stratus.jobs.execute_live_signals import (
+    cancel_live_orders,
+    execute_live_signals,
+    poll_live_fills,
+)
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("STRATUS_TEST_DATABASE_URL"),
@@ -56,9 +63,13 @@ class FakeTrader:
         *,
         result: PlacedOrder | None = None,
         place_error: Exception | None = None,
+        order_payloads: dict[str, dict[str, object]] | None = None,
+        balance: Decimal = Decimal("1000"),
     ) -> None:
         self.result = result or PlacedOrder(order_id="0xdead", status="live")
         self.place_error = place_error
+        self.order_payloads = order_payloads or {}
+        self.balance = balance
         self.placed: list[dict[str, object]] = []
         self.canceled: list[str] = []
 
@@ -76,6 +87,12 @@ class FakeTrader:
 
     async def cancel(self, order_ids: list[str]) -> None:
         self.canceled.extend(order_ids)
+
+    async def order(self, order_id: str) -> dict[str, object]:
+        return self.order_payloads[order_id]
+
+    async def collateral_balance(self) -> Decimal:
+        return self.balance
 
 
 async def _set_runtime(
@@ -249,6 +266,61 @@ async def test_orphaned_submitting_order_is_escalated_not_resent(
         control = await session.get(RuntimeControl, 1)
     assert order.status == "submit_unconfirmed"
     assert control is not None and control.kill_switch is True
+
+
+async def _place_one(
+    db_sessions: SessionFactory, url: str
+) -> tuple[int, str]:
+    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await _pending_signal(db_sessions)
+    trader = FakeTrader(result=PlacedOrder(order_id="0xfill", status="live"))
+    await execute_live_signals(_settings(url), db_sessions, trader=trader, geoblock=NOT_BLOCKED)
+    async with db_sessions() as session:
+        order = (await session.execute(select(Order))).scalar_one()
+    return order.id, order.clob_order_id or ""
+
+
+async def test_poll_builds_position_from_partial_then_full_fill(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    order_id, clob_id = await _place_one(db_sessions, migrated_database_url)
+
+    # First poll: partial fill of 20 shares, order still live.
+    partial = FakeTrader(
+        order_payloads={clob_id: {"size_matched": "20", "price": "0.53", "status": "LIVE"}},
+        balance=Decimal("980"),
+    )
+    updated, logged = await poll_live_fills(
+        _settings(migrated_database_url), db_sessions, trader=partial
+    )
+    assert (updated, logged) == (1, 1)
+    async with db_sessions() as session:
+        position = (await session.execute(select(Position))).scalar_one()
+    assert position.order_id == order_id
+    assert position.size_shares == Decimal("20.000000")
+    assert position.status is PositionStatus.OPEN
+
+    # Second poll: fully matched. Position recomputed (not doubled), order filled.
+    full = FakeTrader(
+        order_payloads={
+            clob_id: {"size_matched": "47.16", "price": "0.53", "status": "MATCHED"}
+        },
+        balance=Decimal("975"),
+    )
+    await poll_live_fills(_settings(migrated_database_url), db_sessions, trader=full)
+    async with db_sessions() as session:
+        positions = (await session.execute(select(Position))).scalars().all()
+        order = await session.get(Order, order_id)
+        balances = (
+            (await session.execute(
+                select(BankrollLog).where(BankrollLog.mode == ExecutionMode.LIVE)
+            )).scalars().all()
+        )
+    assert len(positions) == 1  # recomputed, not appended
+    assert positions[0].size_shares == Decimal("47.160000")
+    assert order is not None and order.status == "filled"
+    # Two distinct balances snapshotted (980 then 975).
+    assert {b.balance_usd for b in balances} == {Decimal("980.0000"), Decimal("975.0000")}
 
 
 async def test_cancel_requested_live_orders_are_canceled(

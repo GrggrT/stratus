@@ -6,6 +6,8 @@ from decimal import Decimal
 from typing import Any
 
 from py_clob_client_v2 import (
+    AssetType,
+    BalanceAllowanceParams,
     ClobClient,
     OrderArgs,
     OrderType,
@@ -119,3 +121,23 @@ class ClobTrader:
         if not isinstance(payload, dict):
             raise ClobTradeError("CLOB returned an invalid order payload")
         return payload
+
+    async def collateral_balance(self) -> Decimal:
+        """Available USDC collateral, in dollars."""
+        self._require_connected()
+
+        def fetch() -> Any:
+            return self._client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+
+        payload = await asyncio.to_thread(fetch)
+        if not isinstance(payload, dict) or "balance" not in payload:
+            raise ClobTradeError("CLOB returned an invalid balance payload")
+        try:
+            # Balances are reported in USDC base units (6 decimals).
+            return (Decimal(str(payload["balance"])) / Decimal(10**6)).quantize(
+                Decimal("0.0001")
+            )
+        except (TypeError, ValueError) as exc:
+            raise ClobTradeError("CLOB balance is not a number") from exc

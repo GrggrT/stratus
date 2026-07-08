@@ -16,14 +16,19 @@ from stratus.db.models import ExecutionMode, Market, Signal, SignalStatus, Trade
 from stratus.db.session import session_factory_scope
 from stratus.repositories.execution import (
     LIVE_STATUS_CANCELED,
+    LIVE_STATUS_FILLED,
     LIVE_STATUS_SUBMIT_FAILED,
     LIVE_STATUS_UNCONFIRMED,
+    LiveFillValue,
     LiveOrderClaim,
     claim_cancellable_live_orders,
     claim_live_order,
     mark_live_order,
+    open_live_orders,
+    record_live_bankroll,
     record_live_placement,
     stale_submitting_orders,
+    upsert_live_position,
 )
 from stratus.repositories.risk import enforce_loss_limits
 from stratus.repositories.runtime_control import get_runtime_control, set_kill_switch
@@ -32,6 +37,7 @@ from stratus.services.live_execution import (
     LiveOrderRejected,
     evaluate_live_readiness,
     live_executor_configured,
+    parse_order_fill,
     placed_order_status,
     plan_live_buy,
 )
@@ -54,6 +60,8 @@ class Trader(Protocol):
         neg_risk: bool,
     ) -> PlacedOrder: ...
     async def cancel(self, order_ids: list[str]) -> None: ...
+    async def order(self, order_id: str) -> dict[str, object]: ...
+    async def collateral_balance(self) -> Decimal: ...
 
 
 async def _connect_trader(settings: Settings) -> ClobTrader:
@@ -240,6 +248,66 @@ async def execute_live_signals(
     return placed, failed, 0
 
 
+async def poll_live_fills(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    *,
+    trader: Trader | None = None,
+) -> tuple[int, int]:
+    """Recompute live positions from each open order's cumulative fills and
+    snapshot the live bankroll. Idempotent: re-reading an order and re-writing
+    its position is safe, so a missed or repeated poll self-heals."""
+    settings = settings or get_settings()
+    if not live_executor_configured(settings.polygon_private_key):
+        return 0, 0
+    updated = 0
+    async with session_factory_scope(settings, session_factory) as sessions:
+        async with sessions.begin() as session:
+            orders = await open_live_orders(session)
+            targets = [
+                (order.id, order.clob_order_id, market_id, order.side)
+                for order, market_id in orders
+                if order.clob_order_id
+            ]
+        live_trader: Trader = trader or await _connect_trader(settings)
+        for order_id, clob_order_id, market_id, side in targets:
+            try:
+                fill = parse_order_fill(await live_trader.order(clob_order_id))
+            except ClobTradeError as exc:
+                logger.warning("could not poll order %s: %s", clob_order_id, exc)
+                continue
+            if fill is None or fill.matched_shares <= 0:
+                continue
+            async with sessions.begin() as session:
+                await upsert_live_position(
+                    session,
+                    LiveFillValue(
+                        order_id=order_id,
+                        market_id=market_id,
+                        side=side,
+                        size_shares=fill.matched_shares,
+                        avg_price=fill.avg_price,
+                        cost_usd=fill.cost_usd,
+                    ),
+                )
+                if fill.terminal and fill.status == "matched":
+                    await mark_live_order(session, order_id, status=LIVE_STATUS_FILLED)
+                elif fill.terminal:
+                    await mark_live_order(session, order_id, status=LIVE_STATUS_CANCELED)
+            updated += 1
+
+        logged = 0
+        try:
+            balance = await live_trader.collateral_balance()
+        except ClobTradeError as exc:
+            logger.warning("live balance snapshot failed: %s", exc)
+        else:
+            async with sessions.begin() as session:
+                logged = await record_live_bankroll(session, balance=balance, now=datetime.now(UTC))
+    logger.info("live fill poll complete: positions=%d bankroll_logged=%d", updated, logged)
+    return updated, logged
+
+
 async def cancel_live_orders(
     settings: Settings | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
@@ -269,13 +337,23 @@ async def cancel_live_orders(
     return canceled
 
 
-def main() -> None:
-    settings = get_settings()
+def _configure_logging(settings: Settings) -> None:
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+
+
+def main() -> None:
+    settings = get_settings()
+    _configure_logging(settings)
     asyncio.run(execute_live_signals(settings))
+
+
+def poll_main() -> None:
+    settings = get_settings()
+    _configure_logging(settings)
+    asyncio.run(poll_live_fills(settings))
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from stratus.collectors.geoblock import parse_geoblock
 from stratus.services.live_execution import (
     LiveOrderRejected,
     evaluate_live_readiness,
+    parse_order_fill,
     plan_live_buy,
 )
 
@@ -91,6 +92,36 @@ def test_geoblock_parse_fails_closed() -> None:
     assert parse_geoblock({"blocked": "false"}).blocked is True
     assert parse_geoblock(None).blocked is True
     assert parse_geoblock([]).blocked is True
+
+
+def test_parse_order_fill_reads_cumulative_state() -> None:
+    partial = parse_order_fill(
+        {"size_matched": "40", "price": "0.53", "status": "LIVE"}
+    )
+    assert partial is not None
+    assert partial.matched_shares == Decimal("40")
+    assert partial.avg_price == Decimal("0.53")
+    assert partial.cost_usd == Decimal("21.2000")
+    assert partial.terminal is False
+
+    matched = parse_order_fill(
+        {"size_matched": "47.16", "price": "0.53", "status": "MATCHED"}
+    )
+    assert matched is not None and matched.terminal is True
+
+    canceled = parse_order_fill(
+        {"size_matched": "0", "price": "0.53", "status": "CANCELED"}
+    )
+    assert canceled is not None and canceled.terminal is True
+
+
+def test_parse_order_fill_fails_closed() -> None:
+    assert parse_order_fill(None) is None
+    assert parse_order_fill({"size_matched": "10"}) is None  # no price
+    assert parse_order_fill({"price": "0.5"}) is None  # no matched
+    assert parse_order_fill({"size_matched": "-1", "price": "0.5"}) is None
+    assert parse_order_fill({"size_matched": "10", "price": "1.5"}) is None
+    assert parse_order_fill({"size_matched": "x", "price": "0.5"}) is None
 
 
 def test_place_response_parse_accepts_only_explicit_success() -> None:

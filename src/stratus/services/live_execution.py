@@ -1,11 +1,53 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
+from typing import Any
 
 
 class LiveOrderRejected(ValueError):
     pass
+
+
+# CLOB order statuses that mean no further fills will arrive.
+_TERMINAL_ORDER_STATUSES = frozenset({"matched", "canceled", "cancelled"})
+
+
+@dataclass(frozen=True, slots=True)
+class OrderFill:
+    matched_shares: Decimal
+    avg_price: Decimal
+    cost_usd: Decimal
+    status: str
+    terminal: bool
+
+
+def parse_order_fill(payload: Any) -> OrderFill | None:
+    """Read cumulative fill state from a CLOB get_order response.
+
+    Fail-closed: an unparseable payload returns None (the poller leaves the
+    order untouched) rather than inventing a fill. avg_price uses the order's
+    limit price — a conservative upper bound on a BUY's actual cost, since
+    limit BUYs fill at or below their price.
+    """
+    if not isinstance(payload, dict):
+        return None
+    try:
+        matched = Decimal(str(payload["size_matched"]))
+        price = Decimal(str(payload["price"]))
+    except (KeyError, TypeError, InvalidOperation):
+        return None
+    if matched < 0 or not Decimal(0) < price < Decimal(1):
+        return None
+    raw_status = payload.get("status")
+    status = raw_status.lower() if isinstance(raw_status, str) else "unknown"
+    return OrderFill(
+        matched_shares=matched,
+        avg_price=price,
+        cost_usd=(matched * price).quantize(Decimal("0.0001")),
+        status=status,
+        terminal=status in _TERMINAL_ORDER_STATUSES,
+    )
 
 
 def live_executor_configured(private_key: str | None) -> bool:

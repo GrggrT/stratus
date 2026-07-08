@@ -304,6 +304,8 @@ class Position(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"))
+    # Live positions link 1:1 to their order; paper positions leave this NULL.
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"))
     mode: Mapped[ExecutionMode] = mapped_column(db_enum(ExecutionMode, "execution_mode"))
     side: Mapped[TradeSide] = mapped_column(db_enum(TradeSide, "trade_side"))
     avg_price: Mapped[Decimal] = mapped_column(Numeric(8, 6))

@@ -80,14 +80,33 @@ readiness-gated manual entry point in the meantime.
 
 ## Phase L3 — fills, positions, settlement
 
-- Poll open orders; build live positions from fills (partial fills
-  accumulate into one position per signal).
-- Live bankroll from `get_balance_allowance` snapshots.
-- Settlement: resolution detection reuses the Gamma path; on-chain
-  redemption of winning tokens stays MANUAL via the Polymarket UI in this
-  phase (documented operator runbook step); PnL is recorded at resolution.
-- Health audit: live-specific checks (unfilled order age, orphan orders on
-  the book with no matching signal, balance drift vs recorded bankroll).
+### L3a — fills → positions, live bankroll (implemented)
+
+- `poll_live_fills` reads each open live order's cumulative fill state
+  (`services/live_execution.py::parse_order_fill`, fail-closed) and
+  recomputes its position (`repositories/execution.py::
+  upsert_live_position`, one position per order via the partial-unique
+  `uq_positions_order` index from migration 0016). Recompute-not-append
+  makes repeated or missed polls self-healing. A fully matched order flips
+  to `filled`; a canceled one to `canceled`.
+- `avg_price` uses the order's limit price — a conservative upper bound on
+  a BUY's cost, since limit BUYs fill at or below their price. (Per-trade
+  reconciliation via `get_trades` is a later refinement.)
+- Live bankroll: `record_live_bankroll` appends a `get_balance_allowance`
+  snapshot only when the collateral balance changed.
+- `stratus-poll-live-fills` is a manual entry point; not scheduled yet.
+
+### L3b — live settlement (next)
+
+- Resolution detection reuses the Gamma path; settlement records live
+  position PnL at resolution. On-chain redemption of winning tokens stays
+  MANUAL via the Polymarket UI (documented operator runbook step).
+
+### L3c — go live (last)
+
+- Dispatch paper vs live in `execute_signals`; schedule `poll_live_fills`
+  and `cancel_live_orders`; unlock `/mode live`; live-specific health
+  checks (unconfirmed orders, open-order age, balance drift).
 
 ## Evidence retention (per the readiness memo)
 
