@@ -8,6 +8,21 @@ class LiveOrderRejected(ValueError):
     pass
 
 
+def live_executor_configured(private_key: str | None) -> bool:
+    """Whether the trading wallet is wired up. Distinct from readiness: this
+    is about deployment, not the per-order legal/geoblock/mode gates."""
+    return bool(private_key)
+
+
+def placed_order_status(clob_status: str) -> str:
+    """Map a CLOB placement status to our order lifecycle.
+
+    A fully matched order is terminal ("filled"); anything else rests on the
+    book ("open") where the kill switch can still cancel it.
+    """
+    return "filled" if clob_status.lower() == "matched" else "open"
+
+
 @dataclass(frozen=True, slots=True)
 class LiveReadiness:
     ready: bool

@@ -47,17 +47,36 @@ Polymarket CLOB. The operator accepted the legal/tax risk personally
 - `services/live_execution.py`: pure, unit-tested readiness and
   order-planning logic.
 
-## Phase L2 — order placement (next)
+## Phase L2 — order placement (implemented)
 
-- Live branch in `jobs/execute_signals.py`: readiness check -> geoblock ->
-  tick size/neg-risk lookup -> `plan_live_buy` -> `place_gtc_buy`;
-  Order row written with `clob_order_id` before any retry logic may run.
-  A timeout after submission is treated as possibly-placed: reconcile via
-  open-orders lookup before ever re-submitting a signal.
-- Cancellation worker for `cancel_requested` live orders
-  (kill switch / TTL expiry).
-- Unlock `/mode live`: replace the hardcoded "executor is not deployed"
-  response with a switch on executor configuration.
+- `jobs/execute_live_signals.py::execute_live_signals`: readiness check ->
+  geoblock -> tick size / neg-risk lookup -> `plan_live_buy` ->
+  `place_gtc_buy`. The order row is committed as `submitting` BEFORE the
+  network call (`repositories/execution.py::claim_live_order`, ON CONFLICT
+  DO NOTHING on `uq_orders_signal_mode`), so a signal that already has an
+  order is never re-submitted.
+- Outcome handling: an explicit exchange rejection -> `submit_failed` (no
+  order on the book, no halt); an unknown outcome (timeout) or an order
+  found stuck in `submitting` from a prior crash -> `submit_unconfirmed`
+  plus kill switch plus a critical alert, because the order MAY be live.
+  The executor never re-sends an order whose outcome it cannot confirm.
+- `cancel_live_orders`: cancels orders the kill switch marked
+  `cancel_requested`.
+- Order planning only ever adjusts DOWN and the `LIVE_MAX_ORDER_USD`
+  ceiling is enforced independently of Kelly/exposure.
+
+Tested end to end against a real Postgres with a fake trader (no wallet,
+no network): placement, geoblock gating, timeout-halts-trading,
+rejection-does-not-halt, orphaned-`submitting`-escalated, and cancellation.
+
+**Deliberately not wired yet.** Neither placement nor cancellation is
+registered in the scheduler, and `/mode live` still reports the executor as
+not deployed. Reaching LIVE mode would let the bot place orders with no
+position/PnL accounting, so the dispatch (paper vs live in
+`execute_signals`), the cancellation job, and the `/mode live` unlock are
+all deferred to the end of L3, where the full place -> fills -> positions ->
+settle loop lands together. `stratus-execute-live` exists as a
+readiness-gated manual entry point in the meantime.
 
 ## Phase L3 — fills, positions, settlement
 

@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stratus.db.models import (
@@ -17,6 +18,16 @@ from stratus.db.models import (
     TradeSide,
 )
 from stratus.db.session import dml_rowcount
+
+# Live order lifecycle. "submitting" is the durable pre-submit marker; a
+# crash leaves it here and the next run escalates it rather than re-sending.
+LIVE_STATUS_SUBMITTING = "submitting"
+LIVE_STATUS_OPEN = "open"
+LIVE_STATUS_FILLED = "filled"
+LIVE_STATUS_SUBMIT_FAILED = "submit_failed"
+LIVE_STATUS_UNCONFIRMED = "submit_unconfirmed"
+LIVE_STATUS_CANCEL_REQUESTED = "cancel_requested"
+LIVE_STATUS_CANCELED = "canceled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +53,100 @@ async def expire_pending_signals(session: AsyncSession, signal_ids: list[int]) -
         .values(status=SignalStatus.EXPIRED, skip_reason="paper_execution_timeout")
     )
     return dml_rowcount(result)
+
+
+@dataclass(frozen=True, slots=True)
+class LiveOrderClaim:
+    signal_id: int
+    market_id: int
+    side: TradeSide
+    price: Decimal
+    size_usd: Decimal
+
+
+async def claim_live_order(session: AsyncSession, claim: LiveOrderClaim) -> int | None:
+    """Insert the durable pre-submit marker; returns the order id if this call
+    created it, or None if an order for the signal already exists.
+
+    Committing this before the network call is what makes live placement
+    crash-safe: a signal that already has an order row is never re-submitted.
+    """
+    statement = (
+        insert(Order)
+        .values(
+            signal_id=claim.signal_id,
+            mode=ExecutionMode.LIVE,
+            clob_order_id=None,
+            side=claim.side,
+            price=claim.price,
+            size_usd=claim.size_usd,
+            filled_usd=Decimal(0),
+            status=LIVE_STATUS_SUBMITTING,
+        )
+        .on_conflict_do_nothing(constraint="uq_orders_signal_mode")
+        .returning(Order.id)
+    )
+    return (await session.execute(statement)).scalar_one_or_none()
+
+
+async def record_live_placement(
+    session: AsyncSession,
+    *,
+    order_id: int,
+    clob_order_id: str,
+    status: str,
+    placed_at: datetime,
+) -> None:
+    order = await session.get(Order, order_id, with_for_update=True)
+    if order is None:
+        return
+    order.clob_order_id = clob_order_id
+    order.status = status
+    order.filled_at = placed_at if status == LIVE_STATUS_FILLED else None
+    signal = await session.get(Signal, order.signal_id, with_for_update=True)
+    if signal is not None and signal.status is SignalStatus.PENDING:
+        signal.status = SignalStatus.EXECUTED
+
+
+async def mark_live_order(
+    session: AsyncSession, order_id: int, *, status: str, clob_order_id: str | None = None
+) -> None:
+    order = await session.get(Order, order_id, with_for_update=True)
+    if order is None:
+        return
+    order.status = status
+    if clob_order_id is not None:
+        order.clob_order_id = clob_order_id
+
+
+async def stale_submitting_orders(session: AsyncSession) -> list[Order]:
+    """Orders left in the pre-submit state by a crash: their real state on the
+    exchange is unknown, so they must be escalated, never re-sent."""
+    rows = (
+        await session.execute(
+            select(Order)
+            .where(
+                Order.mode == ExecutionMode.LIVE,
+                Order.status == LIVE_STATUS_SUBMITTING,
+            )
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def claim_cancellable_live_orders(session: AsyncSession) -> list[Order]:
+    rows = (
+        await session.execute(
+            select(Order)
+            .where(
+                Order.mode == ExecutionMode.LIVE,
+                Order.status == LIVE_STATUS_CANCEL_REQUESTED,
+            )
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars().all()
+    return list(rows)
 
 
 async def persist_paper_executions(
