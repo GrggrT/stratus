@@ -151,15 +151,17 @@ async def claim_cancellable_live_orders(session: AsyncSession) -> list[Order]:
 
 
 async def open_live_orders(session: AsyncSession) -> list[tuple[Order, int]]:
-    """Placed live orders that may still be accumulating fills, each paired
-    with its market id (resolved through the signal)."""
+    """Live orders still resting on the book, each paired with its market id
+    (resolved through the signal). A matched order is marked `filled` in the
+    same transaction as its final position write, so it drops out here and the
+    poll set stays bounded to genuinely open orders."""
     rows = (
         await session.execute(
             select(Order, Signal.market_id)
             .join(Signal, Order.signal_id == Signal.id)
             .where(
                 Order.mode == ExecutionMode.LIVE,
-                Order.status.in_([LIVE_STATUS_OPEN, LIVE_STATUS_FILLED]),
+                Order.status == LIVE_STATUS_OPEN,
                 Order.clob_order_id.is_not(None),
             )
             .with_for_update(of=Order, skip_locked=True)

@@ -126,14 +126,26 @@ readiness-gated manual entry point in the meantime.
 1. Set `LIVE_LEGAL_APPROVED=true`, `LIVE_TAX_APPROVED=true`,
    `POLYGON_PRIVATE_KEY`, and (proxy wallets) `POLYMARKET_FUNDER` /
    `POLYMARKET_SIGNATURE_TYPE` in `.env`. Keep `LIVE_MAX_ORDER_USD` small.
-2. Confirm the day-30/60 validation gate has passed (`/calib`).
-3. `/mode live`, then `/mode live` again within the confirmation window.
-4. Watch `/status`; the executor places GTC BUYs capped at
+2. **Preflight against the real server:** `uv run stratus-live-preflight`.
+   It authenticates the wallet, checks geoblock, reads the collateral
+   balance, and looks up a tick size — all WITHOUT placing an order — and
+   exits non-zero unless everything passed. This validates that the live
+   response shapes match the fail-closed parsers before any money moves.
+3. Confirm the day-30/60 validation gate has passed (`/calib`).
+4. `/mode live`, then `/mode live` again within the confirmation window.
+5. First real trade should be a single small order (`LIVE_MAX_ORDER_USD=2`):
+   verify it fills into a position, `/stop` cancels a resting order, and a
+   `live-redeem` reminder arrives on resolution.
+6. Watch `/status`; the executor places GTC BUYs capped at
    `LIVE_MAX_ORDER_USD`. `/stop` halts immediately and marks resting
    orders `cancel_requested` for the cancellation job.
-5. **Redemption is manual.** On resolution STRATUS records live PnL and
+7. **Redemption is manual.** On resolution STRATUS records live PnL and
    sends a `live-redeem` reminder; redeem winning tokens yourself in the
    Polymarket UI. The bot never moves funds on-chain.
+
+The place-order response (`success`, `errorMsg`, `orderID`, `status`) and
+the get-order object (`size_matched`, `price`, `status`) were verified
+against the official CLOB docs; the parsers fail closed on any deviation.
 
 ## Evidence retention (per the readiness memo)
 

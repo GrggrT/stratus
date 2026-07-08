@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
@@ -12,7 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from stratus.collectors.clob_trader import ClobTradeError, ClobTrader, PlacedOrder
 from stratus.collectors.geoblock import GeoblockStatus, fetch_geoblock
 from stratus.config import Settings, get_settings
-from stratus.db.models import ExecutionMode, Market, Signal, SignalStatus, TradeSide
+from stratus.db.models import (
+    ExecutionMode,
+    Market,
+    MarketStatus,
+    Signal,
+    SignalStatus,
+    TradeSide,
+)
 from stratus.db.session import session_factory_scope
 from stratus.repositories.execution import (
     LIVE_STATUS_CANCELED,
@@ -248,6 +256,98 @@ async def execute_live_signals(
     return placed, failed, 0
 
 
+@dataclass(slots=True)
+class PreflightReport:
+    configured: bool = False
+    connected: bool = False
+    geoblock_blocked: bool | None = None
+    geoblock_country: str | None = None
+    balance_usd: Decimal | None = None
+    sample_tick: Decimal | None = None
+    checks: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def ready(self) -> bool:
+        return (
+            self.configured
+            and self.connected
+            and self.geoblock_blocked is False
+            and self.balance_usd is not None
+        )
+
+
+async def preflight_live(
+    settings: Settings | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    *,
+    trader: Trader | None = None,
+    geoblock: GeoblockStatus | None = None,
+) -> PreflightReport:
+    """Validate the live wiring against the real server WITHOUT placing an
+    order: wallet auth, geoblock, collateral balance, and a tick-size lookup.
+    The one thing the fake-trader tests cannot cover before real money moves.
+    """
+    settings = settings or get_settings()
+    report = PreflightReport()
+    report.configured = live_executor_configured(settings.polygon_private_key)
+    if not report.configured:
+        report.checks["configured"] = "POLYGON_PRIVATE_KEY is not set"
+        return report
+    report.checks["configured"] = "ok"
+
+    geo = geoblock or await fetch_geoblock(settings.geoblock_url)
+    report.geoblock_blocked = geo.blocked
+    report.geoblock_country = geo.country
+    report.checks["geoblock"] = (
+        "blocked" if geo.blocked else f"allowed ({geo.country or 'unknown'})"
+    )
+
+    try:
+        live_trader: Trader = trader or await _connect_trader(settings)
+        report.connected = True
+        report.checks["connect"] = "ok"
+    except Exception as exc:  # noqa: BLE001 - preflight reports, never raises
+        report.checks["connect"] = f"{type(exc).__name__}: {exc}"
+        return report
+
+    try:
+        report.balance_usd = await live_trader.collateral_balance()
+        report.checks["balance"] = f"${report.balance_usd}"
+    except Exception as exc:  # noqa: BLE001
+        report.checks["balance"] = f"{type(exc).__name__}: {exc}"
+
+    token = await _sample_token(settings, session_factory)
+    if token is None:
+        report.checks["tick_size"] = "no active verified market to sample"
+    else:
+        try:
+            report.sample_tick = await live_trader.tick_size(token)
+            report.checks["tick_size"] = f"{report.sample_tick} ({token[:10]}...)"
+        except Exception as exc:  # noqa: BLE001
+            report.checks["tick_size"] = f"{type(exc).__name__}: {exc}"
+
+    logger.info(
+        "live preflight: ready=%s checks=%s", report.ready, report.checks
+    )
+    return report
+
+
+async def _sample_token(
+    settings: Settings, session_factory: async_sessionmaker[AsyncSession] | None
+) -> str | None:
+    async with session_factory_scope(settings, session_factory) as sessions:
+        async with sessions() as session:
+            return await session.scalar(
+                select(Market.yes_token_id)
+                .where(
+                    Market.status == MarketStatus.ACTIVE,
+                    Market.station_verified.is_(True),
+                    Market.yes_token_id.is_not(None),
+                )
+                .limit(1)
+            )
+
+
 async def poll_live_fills(
     settings: Settings | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
@@ -354,6 +454,18 @@ def poll_main() -> None:
     settings = get_settings()
     _configure_logging(settings)
     asyncio.run(poll_live_fills(settings))
+
+
+def preflight_main() -> None:
+    settings = get_settings()
+    _configure_logging(settings)
+    report = asyncio.run(preflight_live(settings))
+    print("STRATUS live preflight")
+    print(f"  ready: {report.ready}")
+    for name, detail in report.checks.items():
+        print(f"  {name}: {detail}")
+    if not report.ready:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

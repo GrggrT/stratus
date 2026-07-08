@@ -35,6 +35,7 @@ from stratus.jobs.execute_live_signals import (
     cancel_live_orders,
     execute_live_signals,
     poll_live_fills,
+    preflight_live,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -379,6 +380,46 @@ async def test_audit_health_flags_unconfirmed_live_orders(
         latest = await session.get(RuntimeControl, 1)
     # Critical audit engages the kill switch.
     assert latest is not None and latest.kill_switch is True
+
+
+async def test_preflight_reports_ready_without_placing_an_order(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    await _pending_signal(db_sessions)  # gives an active verified market to sample
+    trader = FakeTrader(balance=Decimal("500"))
+
+    report = await preflight_live(
+        _settings(migrated_database_url), db_sessions, trader=trader, geoblock=NOT_BLOCKED
+    )
+
+    assert report.ready is True
+    assert report.balance_usd == Decimal("500")
+    assert report.sample_tick == Decimal("0.01")
+    assert trader.placed == []  # never places an order
+    assert report.checks["geoblock"].startswith("allowed")
+
+
+async def test_preflight_not_ready_when_geoblocked(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    trader = FakeTrader()
+    report = await preflight_live(
+        _settings(migrated_database_url),
+        db_sessions,
+        trader=trader,
+        geoblock=GeoblockStatus(blocked=True, country="US", detail="ok"),
+    )
+    assert report.ready is False
+    assert report.geoblock_blocked is True
+
+
+async def test_preflight_not_ready_without_a_wallet(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    settings = Settings(database_url=migrated_database_url)  # no private key
+    report = await preflight_live(settings, db_sessions, geoblock=NOT_BLOCKED)
+    assert report.configured is False
+    assert report.ready is False
 
 
 async def test_cancel_requested_live_orders_are_canceled(
