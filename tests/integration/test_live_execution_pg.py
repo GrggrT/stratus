@@ -65,11 +65,13 @@ class FakeTrader:
         result: PlacedOrder | None = None,
         place_error: Exception | None = None,
         order_payloads: dict[str, dict[str, object]] | None = None,
+        trade_payloads: dict[str, list[dict[str, object]]] | None = None,
         balance: Decimal = Decimal("1000"),
     ) -> None:
         self.result = result or PlacedOrder(order_id="0xdead", status="live")
         self.place_error = place_error
         self.order_payloads = order_payloads or {}
+        self.trade_payloads = trade_payloads or {}
         self.balance = balance
         self.placed: list[dict[str, object]] = []
         self.canceled: list[str] = []
@@ -91,6 +93,9 @@ class FakeTrader:
 
     async def order(self, order_id: str) -> dict[str, object]:
         return self.order_payloads[order_id]
+
+    async def trades(self, asset_id: str) -> list[dict[str, object]]:
+        return self.trade_payloads.get(asset_id, [])
 
     async def collateral_balance(self) -> Decimal:
         return self.balance
@@ -420,6 +425,62 @@ async def test_preflight_not_ready_without_a_wallet(
     report = await preflight_live(settings, db_sessions, geoblock=NOT_BLOCKED)
     assert report.configured is False
     assert report.ready is False
+
+
+async def test_poll_uses_trade_vwap_when_it_agrees_with_the_order(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    order_id, clob_id = await _place_one(db_sessions, migrated_database_url)
+    # Order reports 40 matched at limit 0.53; trades show a better VWAP + fee.
+    trader = FakeTrader(
+        order_payloads={clob_id: {"size_matched": "40", "price": "0.53", "status": "LIVE"}},
+        trade_payloads={
+            "yes-token": [
+                {
+                    "status": "MATCHED",
+                    "taker_order_id": clob_id,
+                    "size": "40",
+                    "price": "0.51",
+                    "fee_rate_bps": "20",
+                }
+            ]
+        },
+    )
+    await poll_live_fills(_settings(migrated_database_url), db_sessions, trader=trader)
+
+    async with db_sessions() as session:
+        position = (await session.execute(select(Position))).scalar_one()
+    # VWAP 0.51 (not the 0.53 limit); fee = 20bps(0.002) * 0.51 * 40 = 0.0408.
+    assert position.avg_price == Decimal("0.510000")
+    assert position.size_usd == Decimal("20.4000")
+    assert position.fee_usd == Decimal("0.04080")
+
+
+async def test_poll_falls_back_to_limit_price_on_trade_drift(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    order_id, clob_id = await _place_one(db_sessions, migrated_database_url)
+    # Order says 40 matched; trades only cover 10 -> inconsistent, use limit.
+    trader = FakeTrader(
+        order_payloads={clob_id: {"size_matched": "40", "price": "0.53", "status": "LIVE"}},
+        trade_payloads={
+            "yes-token": [
+                {
+                    "status": "MATCHED",
+                    "taker_order_id": clob_id,
+                    "size": "10",
+                    "price": "0.40",
+                    "fee_rate_bps": "20",
+                }
+            ]
+        },
+    )
+    await poll_live_fills(_settings(migrated_database_url), db_sessions, trader=trader)
+
+    async with db_sessions() as session:
+        position = (await session.execute(select(Position))).scalar_one()
+    assert position.avg_price == Decimal("0.530000")  # limit price fallback
+    assert position.size_shares == Decimal("40.000000")
 
 
 async def test_cancel_requested_live_orders_are_canceled(

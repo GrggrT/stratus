@@ -13,6 +13,7 @@ from py_clob_client_v2 import (
     OrderType,
     PartialCreateOrderOptions,
     Side,
+    TradeParams,
 )
 
 
@@ -121,6 +122,17 @@ class ClobTrader:
         if not isinstance(payload, dict):
             raise ClobTradeError("CLOB returned an invalid order payload")
         return payload
+
+    async def trades(self, asset_id: str) -> list[dict[str, Any]]:
+        self._require_connected()
+
+        def fetch() -> Any:
+            return self._client.get_trades(TradeParams(asset_id=asset_id))
+
+        payload = await asyncio.to_thread(fetch)
+        if not isinstance(payload, list):
+            raise ClobTradeError("CLOB returned an invalid trades payload")
+        return [item for item in payload if isinstance(item, dict)]
 
     async def collateral_balance(self) -> Decimal:
         """Available USDC collateral, in dollars."""

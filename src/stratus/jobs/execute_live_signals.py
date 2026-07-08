@@ -29,6 +29,7 @@ from stratus.repositories.execution import (
     LIVE_STATUS_UNCONFIRMED,
     LiveFillValue,
     LiveOrderClaim,
+    OpenLiveOrder,
     claim_cancellable_live_orders,
     claim_live_order,
     mark_live_order,
@@ -43,6 +44,9 @@ from stratus.repositories.runtime_control import get_runtime_control, set_kill_s
 from stratus.repositories.telegram import enqueue_notification
 from stratus.services.live_execution import (
     LiveOrderRejected,
+    OrderFill,
+    TradeFill,
+    aggregate_order_trades,
     evaluate_live_readiness,
     live_executor_configured,
     parse_order_fill,
@@ -69,6 +73,7 @@ class Trader(Protocol):
     ) -> PlacedOrder: ...
     async def cancel(self, order_ids: list[str]) -> None: ...
     async def order(self, order_id: str) -> dict[str, object]: ...
+    async def trades(self, asset_id: str) -> list[dict[str, object]]: ...
     async def collateral_balance(self) -> Decimal: ...
 
 
@@ -348,6 +353,47 @@ async def _sample_token(
             )
 
 
+async def _trade_fill(trader: Trader, target: OpenLiveOrder) -> TradeFill | None:
+    """Best-effort per-trade VWAP; None on any failure so the caller falls
+    back to the order's conservative limit price."""
+    if target.token_id is None:
+        return None
+    try:
+        trades = await trader.trades(target.token_id)
+    except ClobTradeError as exc:
+        logger.warning("could not fetch trades for %s: %s", target.clob_order_id, exc)
+        return None
+    return aggregate_order_trades(trades, target.clob_order_id)
+
+
+def _reconcile_fill(
+    trade_fill: TradeFill | None, order_fill: OrderFill, target: OpenLiveOrder
+) -> LiveFillValue:
+    """Prefer the trade-derived VWAP and fee, but only when it agrees with the
+    order's authoritative matched size (within 1%); otherwise use the order's
+    size at its limit price (a conservative upper bound on cost)."""
+    if trade_fill is not None and order_fill.matched_shares > 0:
+        drift = abs(trade_fill.matched_shares - order_fill.matched_shares)
+        if drift <= order_fill.matched_shares * Decimal("0.01"):
+            return LiveFillValue(
+                order_id=target.order_id,
+                market_id=target.market_id,
+                side=target.side,
+                size_shares=trade_fill.matched_shares,
+                avg_price=trade_fill.avg_price,
+                cost_usd=trade_fill.cost_usd,
+                fee_usd=trade_fill.fee_usd,
+            )
+    return LiveFillValue(
+        order_id=target.order_id,
+        market_id=target.market_id,
+        side=target.side,
+        size_shares=order_fill.matched_shares,
+        avg_price=order_fill.avg_price,
+        cost_usd=order_fill.cost_usd,
+    )
+
+
 async def poll_live_fills(
     settings: Settings | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
@@ -363,37 +409,25 @@ async def poll_live_fills(
     updated = 0
     async with session_factory_scope(settings, session_factory) as sessions:
         async with sessions.begin() as session:
-            orders = await open_live_orders(session)
-            targets = [
-                (order.id, order.clob_order_id, market_id, order.side)
-                for order, market_id in orders
-                if order.clob_order_id
-            ]
+            targets = await open_live_orders(session)
         live_trader: Trader = trader or await _connect_trader(settings)
-        for order_id, clob_order_id, market_id, side in targets:
+        for target in targets:
             try:
-                fill = parse_order_fill(await live_trader.order(clob_order_id))
+                order_fill = parse_order_fill(await live_trader.order(target.clob_order_id))
             except ClobTradeError as exc:
-                logger.warning("could not poll order %s: %s", clob_order_id, exc)
+                logger.warning("could not poll order %s: %s", target.clob_order_id, exc)
                 continue
-            if fill is None or fill.matched_shares <= 0:
+            if order_fill is None or order_fill.matched_shares <= 0:
                 continue
+            value = _reconcile_fill(
+                await _trade_fill(live_trader, target), order_fill, target
+            )
             async with sessions.begin() as session:
-                await upsert_live_position(
-                    session,
-                    LiveFillValue(
-                        order_id=order_id,
-                        market_id=market_id,
-                        side=side,
-                        size_shares=fill.matched_shares,
-                        avg_price=fill.avg_price,
-                        cost_usd=fill.cost_usd,
-                    ),
-                )
-                if fill.terminal and fill.status == "matched":
-                    await mark_live_order(session, order_id, status=LIVE_STATUS_FILLED)
-                elif fill.terminal:
-                    await mark_live_order(session, order_id, status=LIVE_STATUS_CANCELED)
+                await upsert_live_position(session, value)
+                if order_fill.terminal and order_fill.status == "matched":
+                    await mark_live_order(session, target.order_id, status=LIVE_STATUS_FILLED)
+                elif order_fill.terminal:
+                    await mark_live_order(session, target.order_id, status=LIVE_STATUS_CANCELED)
             updated += 1
 
         logged = 0

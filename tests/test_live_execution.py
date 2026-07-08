@@ -6,6 +6,7 @@ from stratus.collectors.clob_trader import ClobTradeError, parse_place_response
 from stratus.collectors.geoblock import parse_geoblock
 from stratus.services.live_execution import (
     LiveOrderRejected,
+    aggregate_order_trades,
     evaluate_live_readiness,
     parse_order_fill,
     plan_live_buy,
@@ -122,6 +123,42 @@ def test_parse_order_fill_fails_closed() -> None:
     assert parse_order_fill({"size_matched": "-1", "price": "0.5"}) is None
     assert parse_order_fill({"size_matched": "10", "price": "1.5"}) is None
     assert parse_order_fill({"size_matched": "x", "price": "0.5"}) is None
+
+
+def test_aggregate_order_trades_computes_vwap_across_taker_and_maker_legs() -> None:
+    trades = [
+        # We were the taker on this trade.
+        {"status": "MATCHED", "taker_order_id": "0xme", "size": "30", "price": "0.50",
+         "fee_rate_bps": "10"},
+        # We were a maker on this one; our leg is inside maker_orders.
+        {"status": "CONFIRMED", "taker_order_id": "0xother",
+         "maker_orders": [
+             {"order_id": "0xme", "matched_amount": "10", "price": "0.60", "fee_rate_bps": "10"},
+             {"order_id": "0xsomeoneelse", "matched_amount": "5", "price": "0.61"},
+         ]},
+        # Failed trade is ignored.
+        {"status": "FAILED", "taker_order_id": "0xme", "size": "100", "price": "0.90"},
+    ]
+
+    fill = aggregate_order_trades(trades, "0xme")
+
+    assert fill is not None
+    # 30@0.50 + 10@0.60 = 21.0 over 40 shares -> VWAP 0.525.
+    assert fill.matched_shares == Decimal("40")
+    assert fill.avg_price == Decimal("0.525000")
+    assert fill.cost_usd == Decimal("21.0000")
+    # fees: 10bps*(0.50*30) + 10bps*(0.60*10) = 0.015 + 0.006 = 0.021.
+    assert fill.fee_usd == Decimal("0.02100")
+
+
+def test_aggregate_order_trades_returns_none_without_matches() -> None:
+    assert aggregate_order_trades([], "0xme") is None
+    assert aggregate_order_trades(
+        [{"status": "MATCHED", "taker_order_id": "0xother", "size": "5", "price": "0.5"}],
+        "0xme",
+    ) is None
+    # Malformed entries are skipped, not crashed on.
+    assert aggregate_order_trades(["nope", {"status": "MATCHED"}], "0xme") is None
 
 
 def test_place_response_parse_accepts_only_explicit_success() -> None:

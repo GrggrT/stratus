@@ -11,6 +11,82 @@ class LiveOrderRejected(ValueError):
 
 # CLOB order statuses that mean no further fills will arrive.
 _TERMINAL_ORDER_STATUSES = frozenset({"matched", "canceled", "cancelled"})
+# Trade statuses that represent a settled fill (vs. failed/retrying).
+_CONFIRMED_TRADE_STATUSES = frozenset({"matched", "mined", "confirmed"})
+
+
+@dataclass(frozen=True, slots=True)
+class TradeFill:
+    matched_shares: Decimal
+    avg_price: Decimal
+    cost_usd: Decimal
+    fee_usd: Decimal
+
+
+def _matched_leg(
+    trade: dict[str, Any], clob_order_id: str
+) -> tuple[Decimal, Decimal, Decimal] | None:
+    """Our (shares, price, fee_rate_bps) in one trade, whether we were the
+    taker or one of the makers. Returns None if the order is not in the trade.
+
+    NOTE: the Trade field names (taker_order_id, maker_orders[].order_id /
+    matched_amount, fee_rate_bps) follow the documented CLOB schema but have
+    not been checked against a live response — confirm on the first real
+    trade. The caller falls back to the order's limit price if this yields
+    nothing, so a field mismatch degrades gracefully rather than corrupting.
+    """
+    try:
+        if trade.get("taker_order_id") == clob_order_id:
+            return (
+                Decimal(str(trade["size"])),
+                Decimal(str(trade["price"])),
+                Decimal(str(trade.get("fee_rate_bps", 0))),
+            )
+        makers = trade.get("maker_orders")
+        if isinstance(makers, list):
+            for leg in makers:
+                if isinstance(leg, dict) and leg.get("order_id") == clob_order_id:
+                    return (
+                        Decimal(str(leg["matched_amount"])),
+                        Decimal(str(leg["price"])),
+                        Decimal(str(leg.get("fee_rate_bps", 0))),
+                    )
+    except (KeyError, TypeError, InvalidOperation):
+        return None
+    return None
+
+
+def aggregate_order_trades(
+    trades: list[dict[str, Any]], clob_order_id: str
+) -> TradeFill | None:
+    """VWAP fill for one order from its confirmed trades. None if there are no
+    usable confirmed trades (the poller then falls back to the limit price)."""
+    shares = Decimal(0)
+    cost = Decimal(0)
+    fee = Decimal(0)
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        status = trade.get("status")
+        if not isinstance(status, str) or status.lower() not in _CONFIRMED_TRADE_STATUSES:
+            continue
+        leg = _matched_leg(trade, clob_order_id)
+        if leg is None:
+            continue
+        leg_shares, leg_price, fee_bps = leg
+        if leg_shares <= 0 or not Decimal(0) < leg_price < Decimal(1):
+            continue
+        shares += leg_shares
+        cost += leg_price * leg_shares
+        fee += fee_bps / Decimal(10000) * leg_price * leg_shares
+    if shares <= 0:
+        return None
+    return TradeFill(
+        matched_shares=shares,
+        avg_price=(cost / shares).quantize(Decimal("0.000001")),
+        cost_usd=cost.quantize(Decimal("0.0001")),
+        fee_usd=fee.quantize(Decimal("0.00001")),
+    )
 
 
 @dataclass(frozen=True, slots=True)

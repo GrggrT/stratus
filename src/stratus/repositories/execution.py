@@ -150,15 +150,27 @@ async def claim_cancellable_live_orders(session: AsyncSession) -> list[Order]:
     return list(rows)
 
 
-async def open_live_orders(session: AsyncSession) -> list[tuple[Order, int]]:
-    """Live orders still resting on the book, each paired with its market id
-    (resolved through the signal). A matched order is marked `filled` in the
-    same transaction as its final position write, so it drops out here and the
-    poll set stays bounded to genuinely open orders."""
+@dataclass(frozen=True, slots=True)
+class OpenLiveOrder:
+    order_id: int
+    clob_order_id: str
+    market_id: int
+    side: TradeSide
+    token_id: str | None
+
+
+async def open_live_orders(session: AsyncSession) -> list[OpenLiveOrder]:
+    """Live orders still resting on the book, each with the market id and the
+    traded token. A matched order is marked `filled` in the same transaction
+    as its final position write, so it drops out here and the poll set stays
+    bounded to genuinely open orders."""
+    from stratus.db.models import Market
+
     rows = (
         await session.execute(
-            select(Order, Signal.market_id)
+            select(Order, Signal.market_id, Market.yes_token_id, Market.no_token_id)
             .join(Signal, Order.signal_id == Signal.id)
+            .join(Market, Signal.market_id == Market.id)
             .where(
                 Order.mode == ExecutionMode.LIVE,
                 Order.status == LIVE_STATUS_OPEN,
@@ -167,7 +179,20 @@ async def open_live_orders(session: AsyncSession) -> list[tuple[Order, int]]:
             .with_for_update(of=Order, skip_locked=True)
         )
     ).all()
-    return [(order, market_id) for order, market_id in rows]
+    result = []
+    for order, market_id, yes_token, no_token in rows:
+        token = yes_token if order.side is TradeSide.BUY_YES else no_token
+        assert order.clob_order_id is not None
+        result.append(
+            OpenLiveOrder(
+                order_id=order.id,
+                clob_order_id=order.clob_order_id,
+                market_id=market_id,
+                side=order.side,
+                token_id=token,
+            )
+        )
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +203,7 @@ class LiveFillValue:
     size_shares: Decimal
     avg_price: Decimal
     cost_usd: Decimal
+    fee_usd: Decimal | None = None
 
 
 async def upsert_live_position(session: AsyncSession, fill: LiveFillValue) -> None:
@@ -201,6 +227,7 @@ async def upsert_live_position(session: AsyncSession, fill: LiveFillValue) -> No
                 avg_price=fill.avg_price,
                 size_shares=fill.size_shares,
                 size_usd=fill.cost_usd,
+                fee_usd=fill.fee_usd,
                 status=PositionStatus.OPEN,
             )
         )
@@ -210,6 +237,8 @@ async def upsert_live_position(session: AsyncSession, fill: LiveFillValue) -> No
     position.avg_price = fill.avg_price
     position.size_shares = fill.size_shares
     position.size_usd = fill.cost_usd
+    if fill.fee_usd is not None:
+        position.fee_usd = fill.fee_usd
 
 
 async def record_live_bankroll(
