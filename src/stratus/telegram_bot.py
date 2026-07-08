@@ -33,6 +33,7 @@ from stratus.services.telegram_reports import (
     calculate_live_gate,
     calibration_report,
     daily_report,
+    live_report,
     reliability_chart,
     status_report,
 )
@@ -66,6 +67,7 @@ def build_router(settings: Settings, session_factory: object) -> Router:
             "/status — bankroll and exposure\n"
             "/calib — Brier, reliability, live gate\n"
             "/daily — previous-day P&L and CLV\n"
+            "/live — live P&L, ROI, and CLV retrospective\n"
             "/verify <market_id> — approve parsed station\n"
             "/stop /resume — kill switch\n"
             "/mode paper|live — execution mode"
@@ -100,6 +102,14 @@ def build_router(settings: Settings, session_factory: object) -> Router:
             return
         async with session_factory() as session:  # type: ignore[operator]
             report = await daily_report(session)
+        await message.answer(report)
+
+    @router.message(Command("live"))
+    async def live_handler(message: Message) -> None:
+        if await _deny_unless_admin(message, settings):
+            return
+        async with session_factory() as session:  # type: ignore[operator]
+            report = await live_report(session)
         await message.answer(report)
 
     @router.message(Command("stop"))
@@ -243,6 +253,7 @@ async def run_bot(settings: Settings | None = None) -> None:
             BotCommand(command="status", description="Bankroll and exposure"),
             BotCommand(command="calib", description="Calibration and live gate"),
             BotCommand(command="daily", description="Previous-day paper results"),
+            BotCommand(command="live", description="Live P&L, ROI, and CLV"),
             BotCommand(command="stop", description="Enable kill switch"),
             BotCommand(command="resume", description="Disable kill switch"),
             BotCommand(command="mode", description="Set paper or live mode"),

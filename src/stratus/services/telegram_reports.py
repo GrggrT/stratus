@@ -25,6 +25,7 @@ from stratus.db.models import (
 )
 from stratus.repositories.job_runs import collector_uptime
 from stratus.repositories.runtime_control import get_runtime_control
+from stratus.services.live_analytics import PositionStat, summarize_live_performance
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,6 +378,47 @@ async def calibration_report(session: AsyncSession, initial_bankroll_usd: float)
         f"CLV {clv}; ROI {gate.roi:+.2%}"
     )
     return "\n".join(lines)
+
+
+async def live_report(session: AsyncSession) -> str:
+    rows = (
+        await session.execute(
+            select(
+                Position.status,
+                Position.pnl_usd,
+                Position.clv,
+                Position.size_usd,
+                Position.fee_usd,
+            ).where(Position.mode == ExecutionMode.LIVE)
+        )
+    ).all()
+    perf = summarize_live_performance(
+        [
+            PositionStat(
+                closed=status is PositionStatus.CLOSED,
+                pnl_usd=float(pnl) if pnl is not None else None,
+                clv=float(clv) if clv is not None else None,
+                cost_usd=float(cost),
+                fee_usd=float(fee) if fee is not None else None,
+            )
+            for status, pnl, clv, cost, fee in rows
+        ]
+    )
+    if perf.positions == 0:
+        return "Live trading: no live positions yet."
+    win_rate = "n/a" if perf.win_rate is None else f"{perf.win_rate:.0%}"
+    roi = "n/a" if perf.roi is None else f"{perf.roi:+.2%}"
+    clv = "n/a" if perf.avg_clv is None else f"{perf.avg_clv:+.3f}"
+    beat = "n/a" if perf.clv_beat_rate is None else f"{perf.clv_beat_rate:.0%}"
+    return "\n".join(
+        [
+            "Live performance",
+            f"Positions: {perf.positions} ({perf.open} open, {perf.closed} closed)",
+            f"P&L: ${perf.total_pnl_usd:+.2f} · ROI {roi} · win rate {win_rate}",
+            f"Avg CLV: {clv} · beat closing line: {beat}",
+            f"Fees paid: ${perf.total_fees_usd:.2f}",
+        ]
+    )
 
 
 async def daily_report(session: AsyncSession, now: datetime | None = None) -> str:

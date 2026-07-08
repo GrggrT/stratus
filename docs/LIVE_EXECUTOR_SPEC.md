@@ -147,6 +147,16 @@ The place-order response (`success`, `errorMsg`, `orderID`, `status`) and
 the get-order object (`size_matched`, `price`, `status`) were verified
 against the official CLOB docs; the parsers fail closed on any deviation.
 
+## Live performance retrospective
+
+`services/live_analytics.py::summarize_live_performance` (pure, unit-tested)
+turns the live positions into realised stats: PnL, ROI over deployed cost
+(not bankroll, so partial deployment is not flattered), win rate, average
+CLV, and the CLV beat-rate — the share of closed positions that entered
+better than the closing line, the core skill signal independent of
+individual outcomes. Surfaced by the Telegram `/live` command and the
+`GET /api/v1/live-summary` endpoint.
+
 ## Evidence retention (per the readiness memo)
 
 Orders, fills, fees, geoblock responses, and wallet transaction hashes are

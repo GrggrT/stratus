@@ -13,6 +13,7 @@ from stratus.config import Settings
 from stratus.db.models import (
     BankrollLog,
     Calibration,
+    ExecutionMode,
     HealthAudit,
     JobRun,
     Market,
@@ -27,6 +28,7 @@ from stratus.db.models import (
 )
 from stratus.repositories.operator_commands import enqueue_command, recent_commands
 from stratus.repositories.runtime_control import get_runtime_control
+from stratus.services.live_analytics import PositionStat, summarize_live_performance
 from stratus.services.operator_commands import validate_command
 
 router = APIRouter(prefix="/api/v1", tags=["operator-monitoring"])
@@ -156,6 +158,21 @@ class CalibrationItem(BaseModel):
 class CalibrationsResponse(BaseModel):
     generated_at: datetime
     items: list[CalibrationItem]
+
+
+class LiveSummaryResponse(BaseModel):
+    generated_at: datetime
+    positions: int
+    closed: int
+    open: int
+    wins: int
+    win_rate: float | None
+    total_pnl_usd: float
+    total_cost_usd: float
+    total_fees_usd: float
+    roi: float | None
+    avg_clv: float | None
+    clv_beat_rate: float | None
 
 
 class OrderItem(BaseModel):
@@ -503,6 +520,50 @@ async def commands(
     return CommandsResponse(
         generated_at=datetime.now(UTC),
         items=[_command_item(row) for row in rows],
+    )
+
+
+async def _live_position_stats(session: AsyncSession) -> list[PositionStat]:
+    rows = (
+        await session.execute(
+            select(
+                Position.status,
+                Position.pnl_usd,
+                Position.clv,
+                Position.size_usd,
+                Position.fee_usd,
+            ).where(Position.mode == ExecutionMode.LIVE)
+        )
+    ).all()
+    return [
+        PositionStat(
+            closed=status is PositionStatus.CLOSED,
+            pnl_usd=_number(pnl),
+            clv=_number(clv),
+            cost_usd=float(cost),
+            fee_usd=_number(fee),
+        )
+        for status, pnl, clv, cost, fee in rows
+    ]
+
+
+@router.get("/live-summary", response_model=LiveSummaryResponse)
+async def live_summary(request: Request) -> LiveSummaryResponse:
+    async with _sessions(request)() as session:
+        perf = summarize_live_performance(await _live_position_stats(session))
+    return LiveSummaryResponse(
+        generated_at=datetime.now(UTC),
+        positions=perf.positions,
+        closed=perf.closed,
+        open=perf.open,
+        wins=perf.wins,
+        win_rate=perf.win_rate,
+        total_pnl_usd=perf.total_pnl_usd,
+        total_cost_usd=perf.total_cost_usd,
+        total_fees_usd=perf.total_fees_usd,
+        roi=perf.roi,
+        avg_clv=perf.avg_clv,
+        clv_beat_rate=perf.clv_beat_rate,
     )
 
 
