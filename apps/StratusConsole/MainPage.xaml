@@ -45,6 +45,9 @@
             <NavigationViewItem Content="Jobs" Tag="Jobs">
                 <NavigationViewItem.Icon><FontIcon Glyph="&#xE9F5;" /></NavigationViewItem.Icon>
             </NavigationViewItem>
+            <NavigationViewItem Content="Live" Tag="Live">
+                <NavigationViewItem.Icon><FontIcon Glyph="&#xE945;" /></NavigationViewItem.Icon>
+            </NavigationViewItem>
             <NavigationViewItem Content="Operations" Tag="Operations">
                 <NavigationViewItem.Icon><FontIcon Glyph="&#xE713;" /></NavigationViewItem.Icon>
             </NavigationViewItem>

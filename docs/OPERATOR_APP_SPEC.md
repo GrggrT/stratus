@@ -56,7 +56,12 @@ Implemented resources:
 - `GET /api/v1/signals?limit=...`
 - `GET /api/v1/positions?limit=...`
 - `GET /api/v1/calibration?limit=...`
+- `GET /api/v1/orders?limit=...`
 - `GET /api/v1/jobs?limit=...`
+
+The **Live** page renders live orders and positions from `/orders` and
+`/positions` and flags winning closed live positions as awaiting a manual
+on-chain redemption (the bot never redeems).
 
 All collection limits are bounded to 1–200 records. The desktop refreshes through loopback
 HTTP every 10 seconds and clears stale collection data after a failed refresh.

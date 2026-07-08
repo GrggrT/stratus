@@ -132,6 +132,13 @@ public sealed partial class MainPage : Page
                 case "Jobs":
                     RenderJobs((await _apiClient.GetJobsAsync(_lifetime.Token)).Items);
                     break;
+                case "Live":
+                    CollectionResponse<OrderDto> liveOrders =
+                        await _apiClient.GetOrdersAsync(_lifetime.Token);
+                    CollectionResponse<PositionDto> livePositions =
+                        await _apiClient.GetPositionsAsync(_lifetime.Token);
+                    RenderLive(liveOrders.Items, livePositions.Items);
+                    break;
                 case "Operations":
                     OverviewResponse operationsOverview =
                         await _apiClient.GetOverviewAsync(_lifetime.Token);
@@ -595,6 +602,50 @@ public sealed partial class MainPage : Page
         SystemInfoBar.Message = message;
     }
 
+    private void RenderLive(
+        IReadOnlyList<OrderDto> orders,
+        IReadOnlyList<PositionDto> positions)
+    {
+        List<OrderDto> live = orders
+            .Where(order => string.Equals(order.Mode, "live", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        List<PositionDto> livePositions = positions
+            .Where(p => string.Equals(p.Mode, "live", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        // Winning closed live positions still need a manual on-chain redeem.
+        List<PositionDto> redeemPending = livePositions
+            .Where(p => string.Equals(p.Status, "closed", StringComparison.OrdinalIgnoreCase)
+                && p.PnlUsd is > 0)
+            .ToList();
+
+        List<MonitoringListItem> items =
+        [
+            new(
+                "Live executor",
+                live.Count == 0 ? "No live orders" : $"{live.Count} live order(s)",
+                redeemPending.Count == 0
+                    ? "No manual redemptions pending"
+                    : $"{redeemPending.Count} winning position(s) awaiting manual redeem",
+                "Redemption of winnings is always a manual step in the Polymarket UI",
+                redeemPending.Count == 0 ? "OK" : "Redeem"),
+        ];
+        items.AddRange(live.Select(order => new MonitoringListItem(
+            $"{order.StationIcao ?? "Unmapped"} · {Pretty(order.Side)} · #{order.Id}",
+            $"{Percent(order.Price)} · size {Usd(order.SizeUsd)} · filled {Usd(order.FilledUsd)}",
+            $"CLOB {order.ClobOrderId ?? "—"} · fee {Usd(order.FeeUsd)}",
+            order.FilledAt is null
+                ? $"Created {LocalTime(order.CreatedAt)} · {order.PolymarketId}"
+                : $"Filled {LocalTime(order.FilledAt.Value)} · {order.PolymarketId}",
+            Pretty(order.Status))));
+        items.AddRange(livePositions.Select(position => new MonitoringListItem(
+            $"Position · {position.StationIcao ?? "Unmapped"} · {Pretty(position.Side)}",
+            $"price {Percent(position.AveragePrice)} · size {Usd(position.SizeUsd)}",
+            $"P&L {Usd(position.PnlUsd)} · CLV {Percent(position.Clv)} · fees {Usd(position.FeeUsd)}",
+            position.ClosedAt is null ? position.PolymarketId : $"Closed · {position.PolymarketId}",
+            Pretty(position.Status))));
+        SetCollection(items);
+    }
+
     private void RenderSettings()
     {
         SetCollection(
@@ -713,6 +764,7 @@ public sealed partial class MainPage : Page
             "Positions" => "Paper positions, P&L, fees, and closing-line value",
             "Calibration" => "Station and horizon calibration evidence",
             "Jobs" => "Recent scheduler outcomes and execution durations",
+            "Live" => "Live orders, positions, and pending manual redemptions",
             "Operations" => "Runtime control, operator command audit, and validation state",
             "Settings" => "Local client configuration",
             _ => "STRATUS monitoring",

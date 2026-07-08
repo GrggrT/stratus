@@ -17,6 +17,7 @@ from stratus.db.models import (
     JobRun,
     Market,
     MarketStatus,
+    Order,
     Position,
     PositionStatus,
     Signal,
@@ -155,6 +156,28 @@ class CalibrationItem(BaseModel):
 class CalibrationsResponse(BaseModel):
     generated_at: datetime
     items: list[CalibrationItem]
+
+
+class OrderItem(BaseModel):
+    id: int
+    signal_id: int
+    polymarket_id: str
+    station_icao: str | None
+    mode: str
+    clob_order_id: str | None
+    side: str
+    price: float
+    size_usd: float
+    filled_usd: float
+    fee_usd: float | None
+    status: str
+    created_at: datetime
+    filled_at: datetime | None
+
+
+class OrdersResponse(BaseModel):
+    generated_at: datetime
+    items: list[OrderItem]
 
 
 class JobItem(BaseModel):
@@ -480,6 +503,46 @@ async def commands(
     return CommandsResponse(
         generated_at=datetime.now(UTC),
         items=[_command_item(row) for row in rows],
+    )
+
+
+@router.get("/orders", response_model=OrdersResponse)
+async def orders(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> OrdersResponse:
+    async with _sessions(request)() as session:
+        rows = (
+            await session.execute(
+                select(Order, Market.polymarket_id, Station.icao)
+                .join(Signal, Signal.id == Order.signal_id)
+                .join(Market, Market.id == Signal.market_id)
+                .outerjoin(Station, Station.id == Market.station_id)
+                .order_by(Order.id.desc())
+                .limit(limit)
+            )
+        ).all()
+    return OrdersResponse(
+        generated_at=datetime.now(UTC),
+        items=[
+            OrderItem(
+                id=order.id,
+                signal_id=order.signal_id,
+                polymarket_id=polymarket_id,
+                station_icao=icao,
+                mode=order.mode.value,
+                clob_order_id=order.clob_order_id,
+                side=order.side.value,
+                price=float(order.price),
+                size_usd=float(order.size_usd),
+                filled_usd=float(order.filled_usd),
+                fee_usd=_number(order.fee_usd),
+                status=order.status,
+                created_at=order.created_at,
+                filled_at=order.filled_at,
+            )
+            for order, polymarket_id, icao in rows
+        ],
     )
 
 

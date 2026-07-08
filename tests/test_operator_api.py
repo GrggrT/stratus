@@ -19,6 +19,7 @@ def test_operator_monitoring_routes_are_registered() -> None:
         "/api/v1/signals",
         "/api/v1/positions",
         "/api/v1/calibration",
+        "/api/v1/orders",
         "/api/v1/jobs",
     }
     assert expected <= routes.keys()

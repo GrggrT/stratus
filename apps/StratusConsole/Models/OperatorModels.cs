@@ -96,6 +96,21 @@ public sealed record JobDto(
     [property: JsonPropertyName("status")] string Status,
     [property: JsonPropertyName("error")] string? Error);
 
+public sealed record OrderDto(
+    [property: JsonPropertyName("id")] long Id,
+    [property: JsonPropertyName("polymarket_id")] string PolymarketId,
+    [property: JsonPropertyName("station_icao")] string? StationIcao,
+    [property: JsonPropertyName("mode")] string Mode,
+    [property: JsonPropertyName("clob_order_id")] string? ClobOrderId,
+    [property: JsonPropertyName("side")] string Side,
+    [property: JsonPropertyName("price")] double Price,
+    [property: JsonPropertyName("size_usd")] double SizeUsd,
+    [property: JsonPropertyName("filled_usd")] double FilledUsd,
+    [property: JsonPropertyName("fee_usd")] double? FeeUsd,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("created_at")] DateTimeOffset CreatedAt,
+    [property: JsonPropertyName("filled_at")] DateTimeOffset? FilledAt);
+
 public sealed record MonitoringListItem(
     string Title,
     string Subtitle,
