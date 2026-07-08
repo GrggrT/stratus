@@ -33,3 +33,12 @@ async def test_probability_pipeline_is_serialized(monkeypatch) -> None:
 
     assert max_active == 1
     assert events == ["recompute", "signals", "recompute", "signals"]
+
+
+async def test_startup_refresh_failure_does_not_escape(monkeypatch) -> None:
+    async def fail_refresh(_settings: Settings, _sessions=None) -> None:
+        raise RuntimeError("incomplete source data")
+
+    monkeypatch.setattr(runtime, "startup_refresh", fail_refresh)
+
+    await runtime.safe_startup_refresh(Settings())

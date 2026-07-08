@@ -123,6 +123,13 @@
                         Visibility="Collapsed">
                         <AppBarButton.Icon><FontIcon Glyph="&#xE9F5;" /></AppBarButton.Icon>
                     </AppBarButton>
+                    <AppBarButton
+                        x:Name="ApiKeyButton"
+                        Click="ApiKeyButton_Click"
+                        Label="API key"
+                        Visibility="Collapsed">
+                        <AppBarButton.Icon><FontIcon Glyph="&#xE72E;" /></AppBarButton.Icon>
+                    </AppBarButton>
                     <AppBarSeparator />
                     <AppBarButton
                         x:Name="RefreshButton"

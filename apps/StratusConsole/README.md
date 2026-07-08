@@ -1,8 +1,8 @@
 # STRATUS Operator Console
 
-Local Windows monitoring UI for STRATUS. The current Phase B build is deliberately
-read-only and calls the health routes plus bounded `/api/v1/*` monitoring resources for
-overview, markets, signals, positions, calibration, and job runs.
+Local Windows operator UI for STRATUS. The Phase C build combines bounded `/api/v1/*`
+monitoring with authenticated, audited commands that are executed asynchronously by the
+worker queue. It never connects directly to PostgreSQL or starts Python jobs itself.
 
 ## Build and run
 
@@ -20,8 +20,9 @@ The application does not connect to PostgreSQL and cannot execute shell commands
 ## Authentication
 
 If the API is started with `OPERATOR_API_KEY` set, the console must send the
-same value. It reads `STRATUS_OPERATOR_API_KEY` from its environment and sends
-it as the `X-API-Key` header on every `/api/v1/*` request:
+same value. Open **Settings**, choose **API key**, and save it in Windows
+Credential Locker. As a development fallback, the console also reads
+`STRATUS_OPERATOR_API_KEY` from its environment:
 
 ```powershell
 $env:STRATUS_OPERATOR_API_KEY = "change-me"

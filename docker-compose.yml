@@ -23,6 +23,7 @@ services:
     environment: &stratus-environment
       DATABASE_URL: postgresql+asyncpg://stratus:${POSTGRES_PASSWORD:-stratus}@postgres:5432/stratus
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      OPERATOR_API_KEY: ${OPERATOR_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

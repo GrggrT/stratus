@@ -92,6 +92,18 @@ async def startup_refresh(
     await settle_markets(settings, sessions)
 
 
+async def safe_startup_refresh(
+    settings: Settings, sessions: SessionFactory | None = None
+) -> None:
+    """Run the eager refresh without letting source-data gaps kill the scheduler."""
+    try:
+        await startup_refresh(settings, sessions)
+    except Exception:
+        logger.exception(
+            "startup refresh failed; scheduled jobs and operator commands remain active"
+        )
+
+
 def build_scheduler(
     settings: Settings, sessions: SessionFactory | None = None
 ) -> AsyncIOScheduler:
@@ -202,7 +214,7 @@ async def run(settings: Settings | None = None) -> None:
     scheduler.start()
     logger.info("STRATUS scheduler started with %d jobs", len(scheduler.get_jobs()))
     try:
-        await startup_refresh(settings, sessions)
+        await safe_startup_refresh(settings, sessions)
         await stopped.wait()
     finally:
         scheduler.shutdown(wait=False)

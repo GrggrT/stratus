@@ -8,9 +8,9 @@ namespace StratusConsole;
 
 public sealed partial class MainPage : Page
 {
-    private readonly StratusApiClient _apiClient = new(
-        new Uri("http://127.0.0.1:8000"),
-        Environment.GetEnvironmentVariable("STRATUS_OPERATOR_API_KEY"));
+    private static readonly Uri ApiBaseAddress = new("http://127.0.0.1:8000");
+    private readonly OperatorCredentialStore _credentialStore = new();
+    private StratusApiClient _apiClient;
     private readonly DispatcherTimer _refreshTimer = new() { Interval = TimeSpan.FromSeconds(10) };
     private readonly CancellationTokenSource _lifetime = new();
     private string _selectedDestination = "Dashboard";
@@ -18,9 +18,20 @@ public sealed partial class MainPage : Page
     private bool _refreshPending;
     private bool _isSubmittingCommand;
     private RuntimeDto? _lastRuntime;
+    private string _credentialSource;
 
     public MainPage()
     {
+        string? storedApiKey = _credentialStore.LoadApiKey();
+        string? environmentApiKey =
+            Environment.GetEnvironmentVariable("STRATUS_OPERATOR_API_KEY");
+        string? apiKey = storedApiKey ?? environmentApiKey;
+        _credentialSource = storedApiKey is not null
+            ? "Windows Credential Locker"
+            : environmentApiKey is not null
+                ? "STRATUS_OPERATOR_API_KEY environment variable"
+                : "Not configured";
+        _apiClient = new StratusApiClient(ApiBaseAddress, apiKey);
         InitializeComponent();
 
         RootNavigation.SelectedItem = RootNavigation.MenuItems[0];
@@ -497,6 +508,86 @@ public sealed partial class MainPage : Page
         await RefreshAsync();
     }
 
+    private async void ApiKeyButton_Click(object sender, RoutedEventArgs e)
+    {
+        PasswordBox keyBox = new()
+        {
+            PlaceholderText = "Paste the OPERATOR_API_KEY value",
+            PasswordRevealMode = PasswordRevealMode.Peek,
+        };
+        StackPanel panel = new() { Spacing = 12 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "The key is stored for this Windows user in Credential Locker. "
+                + "Configure the same OPERATOR_API_KEY in the backend .env file.",
+            TextWrapping = TextWrapping.Wrap,
+        });
+        panel.Children.Add(keyBox);
+        panel.Children.Add(new TextBlock
+        {
+            Text = $"Current source: {_credentialSource}",
+            TextWrapping = TextWrapping.Wrap,
+        });
+        ContentDialog dialog = new()
+        {
+            Title = "Operator API credential",
+            Content = panel,
+            PrimaryButtonText = "Save",
+            SecondaryButtonText = "Remove saved key",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot,
+        };
+        ContentDialogResult result = await dialog.ShowAsync();
+        if (result == ContentDialogResult.None)
+        {
+            return;
+        }
+
+        string? apiKey = null;
+        if (result == ContentDialogResult.Primary)
+        {
+            apiKey = keyBox.Password.Trim();
+            if (apiKey.Length < 16)
+            {
+                ShowCommandWarning("The API key must contain at least 16 characters.");
+                return;
+            }
+        }
+
+        if (_isSubmittingCommand)
+        {
+            ShowCommandWarning("Wait for the current command submission to finish.");
+            return;
+        }
+        for (int attempt = 0; _isRefreshing && attempt < 60; attempt++)
+        {
+            await Task.Delay(50);
+            if (_lifetime.IsCancellationRequested)
+            {
+                return;
+            }
+        }
+        if (_isRefreshing)
+        {
+            ShowCommandWarning("Wait for the current refresh to finish.");
+            return;
+        }
+
+        _credentialStore.SaveApiKey(apiKey);
+        StratusApiClient previous = _apiClient;
+        _apiClient = new StratusApiClient(ApiBaseAddress, apiKey);
+        previous.Dispose();
+        _credentialSource = apiKey is null ? "Not configured" : "Windows Credential Locker";
+        SystemInfoBar.Severity = InfoBarSeverity.Success;
+        SystemInfoBar.Title = apiKey is null ? "Saved key removed" : "API key saved";
+        SystemInfoBar.Message = apiKey is null
+            ? "Monitoring remains available only while the backend does not require a key."
+            : "The key is stored in Windows Credential Locker and is never displayed.";
+        RenderSettings();
+        await RefreshAsync();
+    }
+
     private void ShowCommandWarning(string message)
     {
         SystemInfoBar.Severity = InfoBarSeverity.Warning;
@@ -514,6 +605,12 @@ public sealed partial class MainPage : Page
                 "Loopback-only connection; direct database access is disabled",
                 "Changeable endpoint settings will be added with authenticated operations",
                 "Read only"),
+            new(
+                "Operator API credential",
+                _credentialSource,
+                "Stored secrets are never written to app settings or displayed after saving",
+                "Use the API key command to save or remove the credential",
+                _credentialSource == "Not configured" ? "Missing" : "Configured"),
             new(
                 "Refresh cadence",
                 "10 seconds",
@@ -596,6 +693,8 @@ public sealed partial class MainPage : Page
             _selectedDestination == "Jobs" ? Visibility.Visible : Visibility.Collapsed;
         ResumeButton.Visibility =
             _selectedDestination == "Operations" ? Visibility.Visible : Visibility.Collapsed;
+        ApiKeyButton.Visibility =
+            _selectedDestination == "Settings" ? Visibility.Visible : Visibility.Collapsed;
 
         if (IsLoaded)
         {

@@ -2,6 +2,16 @@
 
 Status date: 2026-07-06. This is a technical compliance review, not legal or tax advice.
 
+> **Operator decision, 2026-07-07.** The operator chose to proceed with the
+> live executor implementation at small size without obtaining the written
+> legal and tax opinions below, accepting the personal risk. Note that the
+> legal uncertainty described here concerns participation as such, not a
+> turnover threshold. The `LIVE_LEGAL_APPROVED` / `LIVE_TAX_APPROVED` flags
+> remain in the configuration and are set exclusively by the operator in
+> `.env`; the runtime, the quantitative paper gate, the geoblock check
+> before every order, the double confirmation, and the kill switch stay
+> mandatory and unchanged.
+
 ## Decision
 
 Live trading is **blocked**. Technical access from Austria is currently available, but that

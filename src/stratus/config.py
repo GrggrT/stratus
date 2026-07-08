@@ -32,6 +32,18 @@ class Settings(BaseSettings):
     observation_lookback_hours: int = Field(default=6, ge=1, le=360)
     clob_books_url: str = "https://clob.polymarket.com/books"
     clob_batch_size: int = Field(default=50, ge=1, le=100)
+    # --- Live executor (Polymarket CLOB) ---
+    clob_api_url: str = "https://clob.polymarket.com"
+    geoblock_url: str = "https://polymarket.com/api/geoblock"
+    polygon_chain_id: int = 137
+    polygon_private_key: str | None = None
+    # Funder address and signature type for Polymarket proxy wallets;
+    # leave unset when the key is a plain EOA trading for itself.
+    polymarket_funder: str | None = None
+    polymarket_signature_type: int | None = Field(default=None, ge=0, le=2)
+    # Physical per-order ceiling for live orders, independent of Kelly and
+    # exposure limits. Orders are clamped down to this, never up.
+    live_max_order_usd: float = Field(default=25.0, gt=0)
     iem_asos_url: str = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
     iem_bootstrap_years: int = Field(default=3, ge=1, le=10)
     iem_request_delay_seconds: float = Field(default=12.0, ge=1.0, le=60.0)
@@ -146,7 +158,13 @@ class Settings(BaseSettings):
         return normalized
 
     @field_validator(
-        "telegram_admin_user_id", "telegram_chat_id", "operator_api_key", mode="before"
+        "telegram_admin_user_id",
+        "telegram_chat_id",
+        "operator_api_key",
+        "polygon_private_key",
+        "polymarket_funder",
+        "polymarket_signature_type",
+        mode="before",
     )
     @classmethod
     def parse_optional_value(cls, value: object) -> object:

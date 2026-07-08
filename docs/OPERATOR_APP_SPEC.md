@@ -1,7 +1,8 @@
 # STRATUS Operator Console
 
-Status: Phase A and Phase B monitoring are implemented. The desktop client is Windows-only
-and local-only; controlled operations remain intentionally unavailable.
+Status: Phase A, Phase B monitoring, and Phase C controlled operations are implemented.
+The desktop client is Windows-only and local-only; mutations remain fail-closed until the
+backend and Credential Locker contain the same operator API key.
 
 ## Purpose
 
@@ -89,6 +90,8 @@ Implemented (backend):
 
 Implemented (desktop):
 
+- The operator key is stored per Windows user in Credential Locker; the
+  `STRATUS_OPERATOR_API_KEY` environment variable remains a development fallback.
 - Command bar: `Stop` is always visible; `Resume` appears on Operations,
   `Verify market` on Markets, `Run job` on Jobs. Every action opens a
   confirmation dialog whose default button is Cancel and requires a
