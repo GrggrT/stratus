@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -157,6 +157,51 @@ class OpenLiveOrder:
     market_id: int
     side: TradeSide
     token_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class InFlightLiveExposure:
+    market_id: int
+    station_id: int | None
+    market_date: date
+    size_usd: Decimal
+
+
+async def in_flight_live_exposure(session: AsyncSession) -> list[InFlightLiveExposure]:
+    """Live orders that are placed but do not yet have an open position — the
+    window between placement and the first fill poll. Signal generation must
+    count this committed capital, or a second order could breach the exposure
+    caps on the same market/station-day. Paper has no such window."""
+    from stratus.db.models import Market
+
+    rows = (
+        await session.execute(
+            select(Order.size_usd, Market.id, Market.station_id, Market.market_date)
+            .join(Signal, Order.signal_id == Signal.id)
+            .join(Market, Signal.market_id == Market.id)
+            .outerjoin(
+                Position,
+                and_(
+                    Position.order_id == Order.id,
+                    Position.status == PositionStatus.OPEN,
+                ),
+            )
+            .where(
+                Order.mode == ExecutionMode.LIVE,
+                Order.status.in_([LIVE_STATUS_SUBMITTING, LIVE_STATUS_OPEN]),
+                Position.id.is_(None),
+            )
+        )
+    ).all()
+    return [
+        InFlightLiveExposure(
+            market_id=market_id,
+            station_id=station_id,
+            market_date=market_date,
+            size_usd=size_usd,
+        )
+        for size_usd, market_id, station_id, market_date in rows
+    ]
 
 
 async def open_live_orders(session: AsyncSession) -> list[OpenLiveOrder]:

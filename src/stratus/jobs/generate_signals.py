@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from stratus.config import Settings, get_settings
 from stratus.db.models import (
     BankrollLog,
+    ExecutionMode,
     Market,
     MarketPrice,
     MarketStatus,
@@ -24,6 +25,7 @@ from stratus.db.models import (
     TradeSide,
 )
 from stratus.db.session import session_factory_scope
+from stratus.repositories.execution import in_flight_live_exposure
 from stratus.repositories.risk import enforce_loss_limits
 from stratus.repositories.runtime_control import get_runtime_control
 from stratus.repositories.signals import SignalValue, insert_signals
@@ -103,6 +105,14 @@ async def generate_signals(
                     .where(Signal.status == SignalStatus.PENDING)
                 )
             ).all()
+            # Live mode only: orders placed but not yet turned into a position
+            # by the fill poll. Paper positions are created atomically, so
+            # there is no such window there.
+            in_flight = (
+                await in_flight_live_exposure(session)
+                if mode is ExecutionMode.LIVE
+                else []
+            )
 
         bankroll_usd = float(bankroll or settings.initial_bankroll_usd)
         latest_probs = {probability.market_id: probability for probability in probabilities}
@@ -120,6 +130,11 @@ async def generate_signals(
             pending_market_ids.add(market.id)
             market_exposure[market.id] += exposure
             station_day_exposure[(market.station_id, market.market_date)] += exposure
+        for order in in_flight:
+            exposure = float(order.size_usd)
+            pending_market_ids.add(order.market_id)
+            market_exposure[order.market_id] += exposure
+            station_day_exposure[(order.station_id, order.market_date)] += exposure
 
         global_reasons = []
         if control.kill_switch:

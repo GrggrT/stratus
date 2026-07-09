@@ -483,6 +483,62 @@ async def test_poll_falls_back_to_limit_price_on_trade_drift(
     assert position.size_shares == Decimal("40.000000")
 
 
+async def test_in_flight_live_exposure_tracks_orders_without_a_position(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    from stratus.repositories.execution import in_flight_live_exposure
+
+    signal_id = await _pending_signal(db_sessions)
+    async with db_sessions.begin() as session:
+        session.add(
+            Order(
+                signal_id=signal_id, mode=ExecutionMode.LIVE, clob_order_id="0xopen",
+                side=TradeSide.BUY_YES, price=Decimal("0.53"), size_usd=Decimal("20"),
+                filled_usd=Decimal("0"), status="open",
+            )
+        )
+        await session.flush()
+        order_id = (await session.execute(select(Order.id))).scalar_one()
+
+    # Placed, no position yet -> counted as in-flight committed capital.
+    async with db_sessions() as session:
+        rows = await in_flight_live_exposure(session)
+    assert len(rows) == 1
+    assert rows[0].size_usd == Decimal("20.0000")
+
+    # Once the fill poll creates the position, it is no longer in-flight.
+    async with db_sessions.begin() as session:
+        market_id = rows[0].market_id
+        session.add(
+            Position(
+                order_id=order_id, market_id=market_id, mode=ExecutionMode.LIVE,
+                side=TradeSide.BUY_YES, avg_price=Decimal("0.53"),
+                size_shares=Decimal("37"), size_usd=Decimal("20"),
+                status=PositionStatus.OPEN,
+            )
+        )
+    async with db_sessions() as session:
+        assert await in_flight_live_exposure(session) == []
+
+
+async def test_in_flight_excludes_paper_orders(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    from stratus.repositories.execution import in_flight_live_exposure
+
+    signal_id = await _pending_signal(db_sessions)
+    async with db_sessions.begin() as session:
+        session.add(
+            Order(
+                signal_id=signal_id, mode=ExecutionMode.PAPER, clob_order_id="paper-1",
+                side=TradeSide.BUY_YES, price=Decimal("0.53"), size_usd=Decimal("20"),
+                filled_usd=Decimal("20"), status="filled",
+            )
+        )
+    async with db_sessions() as session:
+        assert await in_flight_live_exposure(session) == []
+
+
 async def test_cancel_requested_live_orders_are_canceled(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
