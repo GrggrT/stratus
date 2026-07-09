@@ -11,11 +11,16 @@ def test_validate_command_enforces_the_allowlist() -> None:
     assert validate_command("verify_market", {"market_id": 7}) is None
     assert validate_command("run_job", {"job": "prune-signals"}) is None
 
+    assert validate_command("set_mode", {"mode": "paper"}) is None
+    assert validate_command("set_mode", {"mode": "live"}) is None
+
     assert validate_command("drop_tables", {}) is not None
     assert validate_command("verify_market", {}) is not None
     assert validate_command("verify_market", {"market_id": "7"}) is not None
     assert validate_command("verify_market", {"market_id": 0}) is not None
     assert validate_command("run_job", {"job": "rm -rf"}) is not None
+    assert validate_command("set_mode", {}) is not None
+    assert validate_command("set_mode", {"mode": "yolo"}) is not None
     assert validate_command("stop", {"extra": True}) is not None
 
 

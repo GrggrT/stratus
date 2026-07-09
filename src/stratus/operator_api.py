@@ -17,6 +17,7 @@ from stratus.db.models import (
     HealthAudit,
     JobRun,
     Market,
+    MarketPrice,
     MarketStatus,
     Order,
     Position,
@@ -131,6 +132,8 @@ class PositionItem(BaseModel):
     id: int
     polymarket_id: str
     station_icao: str | None
+    market_date: date
+    kind: str
     mode: str
     side: str
     average_price: float
@@ -140,6 +143,10 @@ class PositionItem(BaseModel):
     pnl_usd: float | None
     clv: float | None
     closed_at: datetime | None
+    # Open positions only: the side-adjusted latest midpoint and the
+    # mark-to-market against it. Null when closed or no price snapshot.
+    mark_price: float | None
+    unrealized_pnl_usd: float | None
 
 
 class PositionsResponse(BaseModel):
@@ -424,20 +431,53 @@ async def positions(
     async with _sessions(request)() as session:
         rows = (
             await session.execute(
-                select(Position, Market.polymarket_id, Station.icao)
+                select(Position, Market)
                 .join(Market, Market.id == Position.market_id)
-                .outerjoin(Station, Station.id == Market.station_id)
                 .order_by(Position.id.desc())
                 .limit(limit)
             )
         ).all()
-    return PositionsResponse(
-        generated_at=datetime.now(UTC),
-        items=[
+        market_ids = {market.id for _, market in rows}
+        station_rows = (
+            await session.execute(
+                select(Market.id, Station.icao)
+                .join(Station, Station.id == Market.station_id)
+                .where(Market.id.in_(market_ids))
+            )
+        ).all()
+        station_names: dict[int, str] = {mid: icao for mid, icao in station_rows}
+        mid_rows = (
+            await session.execute(
+                select(MarketPrice.market_id, MarketPrice.midpoint)
+                .where(MarketPrice.market_id.in_(market_ids))
+                .distinct(MarketPrice.market_id)
+                .order_by(MarketPrice.market_id, MarketPrice.ts.desc())
+            )
+        ).all()
+        latest_mid: dict[int, Decimal] = {mid: mp for mid, mp in mid_rows}
+
+    items = []
+    for position, market in rows:
+        mark_price: float | None = None
+        unrealized: float | None = None
+        midpoint = latest_mid.get(market.id)
+        if position.status is PositionStatus.OPEN and midpoint is not None:
+            side_mid = (
+                midpoint if position.side.value == "buy_yes" else Decimal(1) - midpoint
+            )
+            mark_price = float(side_mid)
+            unrealized = float(
+                (position.size_shares * side_mid - position.size_usd).quantize(
+                    Decimal("0.0001")
+                )
+            )
+        items.append(
             PositionItem(
                 id=position.id,
-                polymarket_id=polymarket_id,
-                station_icao=icao,
+                polymarket_id=market.polymarket_id,
+                station_icao=station_names.get(market.id),
+                market_date=market.market_date,
+                kind=market.kind.value,
                 mode=position.mode.value,
                 side=position.side.value,
                 average_price=float(position.avg_price),
@@ -447,10 +487,11 @@ async def positions(
                 pnl_usd=_number(position.pnl_usd),
                 clv=_number(position.clv),
                 closed_at=position.closed_at,
+                mark_price=mark_price,
+                unrealized_pnl_usd=unrealized,
             )
-            for position, polymarket_id, icao in rows
-        ],
-    )
+        )
+    return PositionsResponse(generated_at=datetime.now(UTC), items=items)
 
 
 @router.get("/calibration", response_model=CalibrationsResponse)
@@ -581,13 +622,12 @@ async def live_summary(request: Request) -> LiveSummaryResponse:
     )
 
 
-@router.get("/live-equity", response_model=EquityResponse)
-async def live_equity(request: Request) -> EquityResponse:
+async def _equity_response(request: Request, mode: ExecutionMode) -> EquityResponse:
     async with _sessions(request)() as session:
         rows = (
             await session.execute(
                 select(Position.closed_at, Position.pnl_usd).where(
-                    Position.mode == ExecutionMode.LIVE,
+                    Position.mode == mode,
                     Position.status == PositionStatus.CLOSED,
                     Position.closed_at.is_not(None),
                 )
@@ -602,6 +642,22 @@ async def live_equity(request: Request) -> EquityResponse:
             EquityPointItem(t=p.ts, cumulative_pnl_usd=p.cumulative_pnl_usd)
             for p in points
         ],
+    )
+
+
+@router.get("/live-equity", response_model=EquityResponse)
+async def live_equity(request: Request) -> EquityResponse:
+    return await _equity_response(request, ExecutionMode.LIVE)
+
+
+@router.get("/equity", response_model=EquityResponse)
+async def equity(
+    request: Request,
+    mode: Annotated[str, Query(pattern="^(paper|live)$")] = "paper",
+) -> EquityResponse:
+    """Cumulative realised PnL for either execution mode."""
+    return await _equity_response(
+        request, ExecutionMode.LIVE if mode == "live" else ExecutionMode.PAPER
     )
 
 

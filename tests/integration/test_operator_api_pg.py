@@ -88,6 +88,98 @@ async def test_orders_endpoint_joins_order_signal_market_station(
     assert item["polymarket_id"] == "pm-orders-1"
 
 
+async def test_positions_endpoint_reports_mark_to_market(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    from stratus.db.models import MarketPrice
+
+    async with db_sessions.begin() as session:
+        station = Station(
+            icao="KLGA", name="LaGuardia", city="New York City",
+            lat=Decimal("40.77"), lon=Decimal("-73.87"), tz="America/New_York",
+        )
+        session.add(station)
+        await session.flush()
+        market = Market(
+            polymarket_id="pm-mtm-1", event_id="ev-1", station_id=station.id,
+            market_date=NOW.date(), kind=WeatherKind.HIGH, rules_raw="rules",
+            resolves_at=NOW + timedelta(hours=6), status=MarketStatus.ACTIVE,
+            station_verified=True,
+        )
+        session.add(market)
+        await session.flush()
+        # Open BUY_NO position: 40 shares at 0.50 = $20 cost.
+        session.add(
+            Position(
+                market_id=market.id, mode=ExecutionMode.PAPER, side=TradeSide.BUY_NO,
+                avg_price=Decimal("0.5"), size_shares=Decimal("40"),
+                size_usd=Decimal("20"), status=PositionStatus.OPEN,
+            )
+        )
+        # Latest YES midpoint 0.40 -> NO side mid 0.60 -> mark $24, +$4.
+        session.add(
+            MarketPrice(
+                market_id=market.id, ts=NOW, midpoint=Decimal("0.400000"),
+                best_bid=Decimal("0.39"), best_ask=Decimal("0.41"),
+                bid_depth_usd=Decimal("100"), ask_depth_usd=Decimal("100"),
+            )
+        )
+
+    app = create_app(Settings(database_url=migrated_database_url))
+    app.state.sessions = db_sessions
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/api/v1/positions")
+
+    item = response.json()["items"][0]
+    assert item["mark_price"] == 0.6
+    assert item["unrealized_pnl_usd"] == 4.0
+    assert item["market_date"] == str(NOW.date())
+    assert item["kind"] == "high"
+
+
+async def test_equity_endpoint_filters_by_mode(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    async with db_sessions.begin() as session:
+        station = Station(
+            icao="KLGA", name="LaGuardia", city="New York City",
+            lat=Decimal("40.77"), lon=Decimal("-73.87"), tz="America/New_York",
+        )
+        session.add(station)
+        await session.flush()
+        market = Market(
+            polymarket_id="pm-eqm-1", event_id="ev-1", station_id=station.id,
+            market_date=NOW.date(), kind=WeatherKind.HIGH, rules_raw="rules",
+            resolves_at=NOW, status=MarketStatus.RESOLVED, station_verified=True,
+        )
+        session.add(market)
+        await session.flush()
+        for mode, pnl in ((ExecutionMode.PAPER, "12.5"), (ExecutionMode.LIVE, "-3.0")):
+            session.add(
+                Position(
+                    market_id=market.id, mode=mode, side=TradeSide.BUY_YES,
+                    avg_price=Decimal("0.5"), size_shares=Decimal("40"),
+                    size_usd=Decimal("20"), status=PositionStatus.CLOSED,
+                    pnl_usd=Decimal(pnl), closed_at=NOW + timedelta(hours=1),
+                )
+            )
+
+    app = create_app(Settings(database_url=migrated_database_url))
+    app.state.sessions = db_sessions
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        paper = await client.get("/api/v1/equity?mode=paper")
+        live = await client.get("/api/v1/equity?mode=live")
+        bad = await client.get("/api/v1/equity?mode=yolo")
+
+    assert [p["cumulative_pnl_usd"] for p in paper.json()["points"]] == [12.5]
+    assert [p["cumulative_pnl_usd"] for p in live.json()["points"]] == [-3.0]
+    assert bad.status_code == 422
+
+
 async def test_live_equity_endpoint_returns_cumulative_series(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:

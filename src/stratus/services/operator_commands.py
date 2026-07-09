@@ -4,7 +4,9 @@ from typing import Any
 
 # The only operations the console may request. Anything else is rejected at
 # the API boundary and never reaches the queue.
-SUPPORTED_COMMANDS = frozenset({"stop", "resume", "verify_market", "run_job"})
+SUPPORTED_COMMANDS = frozenset({"stop", "resume", "verify_market", "run_job", "set_mode"})
+
+EXECUTION_MODES = frozenset({"paper", "live"})
 
 # Maintenance jobs the worker will run on request. Names map to callables in
 # jobs/process_operator_commands.py; keeping only names here avoids importing
@@ -25,6 +27,9 @@ def validate_command(command: str, payload: dict[str, Any]) -> str | None:
         if job not in MAINTENANCE_JOBS:
             allowed = ", ".join(sorted(MAINTENANCE_JOBS))
             return f"run_job requires job to be one of: {allowed}"
+    elif command == "set_mode":
+        if payload.get("mode") not in EXECUTION_MODES:
+            return "set_mode requires mode to be paper or live"
     elif payload:
         return f"{command} does not accept a payload"
     return None

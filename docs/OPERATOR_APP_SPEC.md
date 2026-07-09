@@ -94,6 +94,15 @@ Implemented (backend):
   instead of wedging the queue), and shares the `/verify` logic with the
   Telegram bot.
 - `StratusApiClient` gained `PostCommandAsync`/`GetCommandsAsync`.
+- `set_mode {mode: paper|live}` joined the command allowlist. Paper switches
+  immediately; live replays the full Telegram gating server-side (operator
+  legal/tax flags, configured wallet, the day-30/60 validation gate, and a
+  two-command confirmation within 5 minutes) — the console can request live
+  mode but can never bypass a gate.
+- `/api/v1/positions` items now carry `market_date`, `kind`, and — for open
+  positions — `mark_price` (side-adjusted latest midpoint) and
+  `unrealized_pnl_usd`. `/api/v1/equity?mode=paper|live` generalises the
+  equity series to both modes.
 
 Implemented (desktop):
 

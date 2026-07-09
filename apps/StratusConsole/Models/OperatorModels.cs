@@ -67,6 +67,8 @@ public sealed record PositionDto(
     [property: JsonPropertyName("id")] long Id,
     [property: JsonPropertyName("polymarket_id")] string PolymarketId,
     [property: JsonPropertyName("station_icao")] string? StationIcao,
+    [property: JsonPropertyName("market_date")] DateOnly MarketDate,
+    [property: JsonPropertyName("kind")] string Kind,
     [property: JsonPropertyName("mode")] string Mode,
     [property: JsonPropertyName("side")] string Side,
     [property: JsonPropertyName("average_price")] double AveragePrice,
@@ -75,7 +77,9 @@ public sealed record PositionDto(
     [property: JsonPropertyName("status")] string Status,
     [property: JsonPropertyName("pnl_usd")] double? PnlUsd,
     [property: JsonPropertyName("clv")] double? Clv,
-    [property: JsonPropertyName("closed_at")] DateTimeOffset? ClosedAt);
+    [property: JsonPropertyName("closed_at")] DateTimeOffset? ClosedAt,
+    [property: JsonPropertyName("mark_price")] double? MarkPrice,
+    [property: JsonPropertyName("unrealized_pnl_usd")] double? UnrealizedPnlUsd);
 
 public sealed record CalibrationDto(
     [property: JsonPropertyName("station_icao")] string StationIcao,
@@ -137,4 +141,5 @@ public sealed record MonitoringListItem(
     string Subtitle,
     string Detail,
     string Meta,
-    string Status);
+    string Status,
+    string? Accent = null);

@@ -161,7 +161,11 @@ public sealed partial class MainPage : Page
                     RenderSignals((await _apiClient.GetSignalsAsync(_lifetime.Token)).Items);
                     break;
                 case "Positions":
-                    RenderPositions((await _apiClient.GetPositionsAsync(_lifetime.Token)).Items);
+                    CollectionResponse<PositionDto> allPositions =
+                        await _apiClient.GetPositionsAsync(_lifetime.Token);
+                    EquityResponse paperEquity =
+                        await _apiClient.GetEquityAsync("paper", _lifetime.Token);
+                    RenderPositions(allPositions.Items, paperEquity.Points);
                     break;
                 case "Calibration":
                     RenderCalibrations((await _apiClient.GetCalibrationsAsync(_lifetime.Token)).Items);
@@ -279,16 +283,86 @@ public sealed partial class MainPage : Page
             Pretty(signal.Status))));
     }
 
-    private void RenderPositions(IReadOnlyList<PositionDto> positions)
+    private string _positionsFilter = "Open";
+
+    private async void PositionsFilterBox_SelectionChanged(
+        object sender, SelectionChangedEventArgs e)
     {
-        SetCollection(positions.Select(position => new MonitoringListItem(
-            $"{position.StationIcao ?? "Unmapped"} · {Pretty(position.Side)}",
-            $"{Pretty(position.Mode)} · price {Percent(position.AveragePrice)} · size {Usd(position.SizeUsd)}",
-            $"P&L {Usd(position.PnlUsd)} · CLV {Percent(position.Clv)} · fees {Usd(position.FeeUsd)}",
-            position.ClosedAt is null
-                ? position.PolymarketId
-                : $"Closed {LocalTime(position.ClosedAt.Value)} · {position.PolymarketId}",
-            Pretty(position.Status))));
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        _positionsFilter =
+            (PositionsFilterBox.SelectedItem as ComboBoxItem)?.Content as string ?? "Open";
+        await RefreshAsync();
+    }
+
+    private static string? PnlAccent(double? value) =>
+        value is null or 0 ? null : value > 0 ? "positive" : "negative";
+
+    private void RenderPositions(
+        IReadOnlyList<PositionDto> positions,
+        IReadOnlyList<EquityPointDto> paperEquity)
+    {
+        List<PositionDto> open = positions
+            .Where(p => string.Equals(p.Status, "open", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        List<PositionDto> closed = positions
+            .Where(p => string.Equals(p.Status, "closed", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        List<PositionDto> shown = _positionsFilter switch
+        {
+            "Open" => open,
+            "Closed" => closed,
+            _ => positions.ToList(),
+        };
+
+        double openCost = open.Sum(p => p.SizeUsd);
+        double? unrealized = open.Any(p => p.UnrealizedPnlUsd is not null)
+            ? open.Sum(p => p.UnrealizedPnlUsd ?? 0)
+            : null;
+        double realized = closed.Sum(p => p.PnlUsd ?? 0);
+
+        List<MonitoringListItem> items =
+        [
+            new(
+                "Portfolio",
+                $"{open.Count} open (cost {Usd(openCost)}) · {closed.Count} closed",
+                $"Unrealized {Signed(unrealized)} · Realized {Signed(realized)}",
+                $"Showing: {_positionsFilter.ToLowerInvariant()} positions",
+                Signed(unrealized is null ? realized : unrealized + realized),
+                PnlAccent((unrealized ?? 0) + realized)),
+        ];
+        items.AddRange(shown.Select(position =>
+        {
+            bool isOpen = position.ClosedAt is null;
+            double? pnl = isOpen ? position.UnrealizedPnlUsd : position.PnlUsd;
+            return new MonitoringListItem(
+                $"{position.StationIcao ?? "Unmapped"} · {position.MarketDate:MM-dd} "
+                    + $"{Pretty(position.Kind)} · {Pretty(position.Side)}",
+                $"{Pretty(position.Mode)} · entry {Percent(position.AveragePrice)}"
+                    + (position.MarkPrice is null ? "" : $" → mark {Percent(position.MarkPrice)}")
+                    + $" · size {Usd(position.SizeUsd)}",
+                (isOpen
+                    ? $"Unrealized {Signed(position.UnrealizedPnlUsd)}"
+                    : $"P&L {Signed(position.PnlUsd)} · CLV {Percent(position.Clv)}")
+                    + $" · fees {Usd(position.FeeUsd)}",
+                position.ClosedAt is null
+                    ? position.PolymarketId
+                    : $"Closed {LocalTime(position.ClosedAt.Value)} · {position.PolymarketId}",
+                Pretty(position.Status),
+                PnlAccent(pnl));
+        }));
+        SetCollection(items);
+
+        _equityPoints = paperEquity;
+        if (paperEquity.Count >= 2)
+        {
+            _equityChartLabel = "Paper realised equity";
+            EquityChartCard.Visibility = Visibility.Visible;
+            DrawEquity();
+        }
     }
 
     private void RenderCalibrations(IReadOnlyList<CalibrationDto> calibrations)
@@ -383,6 +457,37 @@ public sealed partial class MainPage : Page
         if (reason is not null)
         {
             await SubmitCommandAsync("resume", reason);
+        }
+    }
+
+    private async void PaperModeButton_Click(object sender, RoutedEventArgs e)
+    {
+        string? reason = await ConfirmWithReasonAsync(
+            "Switch to paper trading",
+            "Signals will execute against the simulated book with virtual money. "
+                + "Real Polymarket data keeps flowing; no real orders are placed.",
+            "Switch to paper");
+        if (reason is not null)
+        {
+            await SubmitCommandAsync(
+                "set_mode", reason, new Dictionary<string, object> { ["mode"] = "paper" });
+        }
+    }
+
+    private async void LiveModeButton_Click(object sender, RoutedEventArgs e)
+    {
+        string? reason = await ConfirmWithReasonAsync(
+            "Request LIVE trading",
+            "Live mode places REAL orders with REAL money. The backend enforces "
+                + "every gate: operator legal/tax flags, a configured wallet, the "
+                + "day-30/60 validation gate, and a two-step confirmation — this "
+                + "command must be sent TWICE within 5 minutes. The audit log "
+                + "below shows each gate's verdict.",
+            "Request live mode");
+        if (reason is not null)
+        {
+            await SubmitCommandAsync(
+                "set_mode", reason, new Dictionary<string, object> { ["mode"] = "live" });
         }
     }
 
@@ -705,6 +810,7 @@ public sealed partial class MainPage : Page
         _equityPoints = equity;
         if (equity.Count >= 2)
         {
+            _equityChartLabel = "Live realised equity";
             EquityChartCard.Visibility = Visibility.Visible;
             DrawEquity();
         }
@@ -766,8 +872,15 @@ public sealed partial class MainPage : Page
         EquityCanvas.Children.Add(dot);
 
         EquityChartTitle.Text =
-            $"Live realised equity — {Usd(values[^1])} over {values.Length} trades";
+            $"{_equityChartLabel} — {Usd(values[^1])} over {values.Length} trades";
     }
+
+    private string _equityChartLabel = "Realised equity";
+
+    private static string Signed(double? value) =>
+        value.HasValue
+            ? value.Value.ToString("+$0.00;-$0.00;$0.00", CultureInfo.InvariantCulture)
+            : "—";
 
     private void RenderSettings()
     {
@@ -871,6 +984,12 @@ public sealed partial class MainPage : Page
             _selectedDestination == "Jobs" ? Visibility.Visible : Visibility.Collapsed;
         ResumeButton.Visibility =
             _selectedDestination == "Operations" ? Visibility.Visible : Visibility.Collapsed;
+        PaperModeButton.Visibility =
+            _selectedDestination == "Operations" ? Visibility.Visible : Visibility.Collapsed;
+        LiveModeButton.Visibility =
+            _selectedDestination == "Operations" ? Visibility.Visible : Visibility.Collapsed;
+        PositionsFilterContainer.Visibility =
+            _selectedDestination == "Positions" ? Visibility.Visible : Visibility.Collapsed;
         ApiKeyButton.Visibility =
             _selectedDestination == "Settings" ? Visibility.Visible : Visibility.Collapsed;
 

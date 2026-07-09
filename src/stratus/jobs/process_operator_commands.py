@@ -8,15 +8,22 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.config import Settings, get_settings
-from stratus.db.models import OperatorCommand
+from stratus.db.models import ExecutionMode, OperatorCommand
 from stratus.db.session import session_factory_scope
 from stratus.jobs.backfill_fees import backfill_fees
 from stratus.jobs.discover_markets import discover_markets
 from stratus.jobs.prune_signals import prune_signals
 from stratus.repositories.markets import verify_market_station
 from stratus.repositories.operator_commands import claim_pending_commands, mark_command
-from stratus.repositories.runtime_control import set_kill_switch
+from stratus.repositories.runtime_control import (
+    get_runtime_control,
+    request_live_confirmation,
+    set_kill_switch,
+    set_mode,
+)
+from stratus.services.live_execution import live_executor_configured
 from stratus.services.operator_commands import validate_command
+from stratus.services.telegram_reports import calculate_live_gate
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +64,48 @@ async def _execute(
             session, int(command.payload["market_id"])
         )
         return ("succeeded" if unblocked else "rejected"), message
+    if command.command == "set_mode":
+        return await _execute_set_mode(
+            session, str(command.payload["mode"]), settings
+        )
     # run_job: the job manages its own transactions on the shared factory.
     job = _MAINTENANCE_JOBS[str(command.payload["job"])]
     result = await job(settings, session_factory)
     return "succeeded", f"{command.payload['job']} completed: {result}."
+
+
+async def _execute_set_mode(
+    session: AsyncSession, mode: str, settings: Settings
+) -> tuple[str, str]:
+    """Switch the execution mode with the same gates as Telegram /mode.
+
+    Live is only reachable when the operator's legal/tax flags are set, a
+    trading wallet is configured, the quantitative paper gate has passed, and
+    the request is repeated within the 5-minute confirmation window.
+    """
+    if mode == "paper":
+        await set_mode(session, ExecutionMode.PAPER)
+        return "succeeded", "Mode set to paper."
+    if not settings.live_legal_approved:
+        return "rejected", "Live mode blocked: legal classification is not approved."
+    if not settings.live_tax_approved:
+        return "rejected", "Live mode blocked: tax treatment is not approved."
+    if not live_executor_configured(settings.polygon_private_key):
+        return "rejected", "Live mode blocked: no trading wallet is configured."
+    gate = await calculate_live_gate(session, settings.initial_bankroll_usd)
+    if not gate.passed:
+        return "rejected", "Live mode blocked: the validation gate has not passed."
+    control = await get_runtime_control(session)
+    now = datetime.now(UTC)
+    if control.live_confirmation_until is None or control.live_confirmation_until < now:
+        deadline = await request_live_confirmation(session)
+        return (
+            "succeeded",
+            "Gate passed. Repeat set_mode live before "
+            f"{deadline:%H:%M:%S} UTC to confirm.",
+        )
+    await set_mode(session, ExecutionMode.LIVE)
+    return "succeeded", "LIVE mode enabled. Use stop to halt immediately."
 
 
 async def process_operator_commands(

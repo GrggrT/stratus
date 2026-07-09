@@ -141,6 +141,81 @@ async def test_verify_market_command_unblocks_the_market(
     assert "station parser" in (command.detail or "")
 
 
+async def test_set_mode_paper_switches_and_live_is_gated(
+    db_sessions: SessionFactory, migrated_database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from stratus.db.models import ExecutionMode, RuntimeControl
+    from stratus.jobs.process_operator_commands import process_operator_commands
+
+    settings = _settings(migrated_database_url)
+
+    async def enqueue(request_id: str, mode: str) -> None:
+        async with db_sessions.begin() as session:
+            await enqueue_command(
+                session,
+                request_id=request_id,
+                command="set_mode",
+                payload={"mode": mode},
+                actor="integration",
+                reason="mode test",
+            )
+
+    # Paper switch always succeeds.
+    await enqueue("req-mode-0001", "paper")
+    assert await process_operator_commands(settings, db_sessions) == (1, 1)
+
+    # Live without the operator flags is rejected outright.
+    await enqueue("req-mode-0002", "live")
+    succeeded, finished = await process_operator_commands(settings, db_sessions)
+    assert (succeeded, finished) == (0, 1)
+    async with db_sessions() as session:
+        rejected = (
+            await session.execute(
+                select(OperatorCommand).where(
+                    OperatorCommand.request_id == "req-mode-0002"
+                )
+            )
+        ).scalar_one()
+    assert rejected.status == "rejected"
+    assert "legal" in (rejected.detail or "")
+
+    # With flags + wallet + a passing gate (patched), live needs the
+    # two-step confirmation: first opens the window, second flips the mode.
+    gated = Settings(
+        database_url=migrated_database_url,
+        operator_api_key="secret-key",
+        live_legal_approved=True,
+        live_tax_approved=True,
+        polygon_private_key="0xtestkey",
+    )
+
+    async def passing_gate(session: object, bankroll: float) -> SimpleNamespace:
+        return SimpleNamespace(passed=True)
+
+    monkeypatch.setattr(
+        "stratus.jobs.process_operator_commands.calculate_live_gate", passing_gate
+    )
+    await enqueue("req-mode-0003", "live")
+    assert await process_operator_commands(gated, db_sessions) == (1, 1)
+    async with db_sessions() as session:
+        control = await session.get(RuntimeControl, 1)
+    assert control is not None
+    assert control.mode is ExecutionMode.PAPER  # window opened, not switched
+    assert control.live_confirmation_until is not None
+
+    await enqueue("req-mode-0004", "live")
+    assert await process_operator_commands(gated, db_sessions) == (1, 1)
+    async with db_sessions() as session:
+        control = await session.get(RuntimeControl, 1)
+    assert control is not None and control.mode is ExecutionMode.LIVE
+
+    # Restore paper for other tests.
+    await enqueue("req-mode-0005", "paper")
+    await process_operator_commands(gated, db_sessions)
+
+
 async def test_http_submit_and_audit_roundtrip(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:

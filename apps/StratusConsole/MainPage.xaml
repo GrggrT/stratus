@@ -6,9 +6,11 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:models="using:StratusConsole.Models"
+    xmlns:converters="using:StratusConsole.Converters"
     mc:Ignorable="d">
 
     <Page.Resources>
+        <converters:AccentToBrushConverter x:Key="AccentToBrush" />
         <Style x:Key="StatusCardStyle" TargetType="Border">
             <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
             <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
@@ -127,6 +129,34 @@
                         Visibility="Collapsed">
                         <AppBarButton.Icon><FontIcon Glyph="&#xE9F5;" /></AppBarButton.Icon>
                     </AppBarButton>
+                    <AppBarButton
+                        x:Name="PaperModeButton"
+                        Click="PaperModeButton_Click"
+                        Label="Paper mode"
+                        Visibility="Collapsed">
+                        <AppBarButton.Icon><FontIcon Glyph="&#xE8A5;" /></AppBarButton.Icon>
+                    </AppBarButton>
+                    <AppBarButton
+                        x:Name="LiveModeButton"
+                        Click="LiveModeButton_Click"
+                        Label="Live mode"
+                        Visibility="Collapsed">
+                        <AppBarButton.Icon><FontIcon Glyph="&#xE945;" /></AppBarButton.Icon>
+                    </AppBarButton>
+                    <AppBarElementContainer
+                        x:Name="PositionsFilterContainer"
+                        VerticalContentAlignment="Center"
+                        Visibility="Collapsed">
+                        <ComboBox
+                            x:Name="PositionsFilterBox"
+                            MinWidth="110"
+                            SelectedIndex="0"
+                            SelectionChanged="PositionsFilterBox_SelectionChanged">
+                            <ComboBoxItem Content="Open" />
+                            <ComboBoxItem Content="Closed" />
+                            <ComboBoxItem Content="All" />
+                        </ComboBox>
+                    </AppBarElementContainer>
                     <AppBarButton
                         x:Name="ApiKeyButton"
                         Click="ApiKeyButton_Click"
@@ -311,7 +341,7 @@
                                         Grid.Column="1"
                                         Padding="8,2"
                                         VerticalAlignment="Top"
-                                        Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                        Background="{x:Bind Accent, Converter={StaticResource AccentToBrush}}"
                                         CornerRadius="10">
                                         <TextBlock FontSize="11" Text="{x:Bind Status}" />
                                     </Border>
