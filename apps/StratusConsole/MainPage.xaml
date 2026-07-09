@@ -243,7 +243,15 @@
                 </StackPanel>
             </ScrollViewer>
 
-            <Grid x:Name="CollectionView" Grid.Row="2" Visibility="Collapsed">
+            <!-- Cap the content column and align it left with the header so
+                 single-row cards don't stretch into sparse full-width strips
+                 on wide monitors. -->
+            <Grid
+                x:Name="CollectionView"
+                Grid.Row="2"
+                MaxWidth="1000"
+                HorizontalAlignment="Left"
+                Visibility="Collapsed">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
