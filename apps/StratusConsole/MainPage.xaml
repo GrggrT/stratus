@@ -53,7 +53,7 @@
             </NavigationViewItem>
         </NavigationView.MenuItems>
 
-        <Grid>
+        <Grid x:Name="ContentRoot" SizeChanged="ContentRoot_SizeChanged">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />

@@ -47,9 +47,25 @@ public sealed partial class MainPage : Page
 
     private async void MainPage_Loaded(object sender, RoutedEventArgs e)
     {
+        ResizeCollectionView(ContentRoot.ActualWidth);
         ResizeDashboardContent(DashboardView.ActualWidth);
         _refreshTimer.Start();
         await RefreshAsync();
+    }
+
+    private void ContentRoot_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        ResizeCollectionView(e.NewSize.Width);
+    }
+
+    private void ResizeCollectionView(double viewportWidth)
+    {
+        if (double.IsNaN(viewportWidth) || viewportWidth <= 0)
+        {
+            return;
+        }
+
+        CollectionView.Width = Math.Min(1000, viewportWidth);
     }
 
     private void DashboardView_SizeChanged(object sender, SizeChangedEventArgs e)
