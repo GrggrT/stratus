@@ -8,6 +8,7 @@ using StratusConsole.Models;
 using StratusConsole.Services;
 using Windows.Foundation;
 using Windows.UI;
+using Windows.UI.Text;
 
 namespace StratusConsole;
 
@@ -24,6 +25,8 @@ public sealed partial class MainPage : Page
     private bool _isSubmittingCommand;
     private RuntimeDto? _lastRuntime;
     private string _credentialSource;
+    private IReadOnlyList<PositionDto> _cockpitPositions = [];
+    private IReadOnlyList<EquityPointDto> _cockpitEquity = [];
 
     public MainPage()
     {
@@ -80,7 +83,7 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        DashboardContent.Width = Math.Min(1200, viewportWidth);
+        DashboardContent.Width = Math.Min(1500, viewportWidth);
     }
 
     private void MainPage_Unloaded(object sender, RoutedEventArgs e)
@@ -152,7 +155,19 @@ public sealed partial class MainPage : Page
             switch (destination)
             {
                 case "Dashboard":
-                    RenderOverview(await _apiClient.GetOverviewAsync(_lifetime.Token));
+                    OverviewResponse cockpitOverview =
+                        await _apiClient.GetOverviewAsync(_lifetime.Token);
+                    CollectionResponse<SignalDto> cockpitSignals =
+                        await _apiClient.GetSignalsAsync(_lifetime.Token);
+                    CollectionResponse<PositionDto> cockpitPositions =
+                        await _apiClient.GetPositionsAsync(_lifetime.Token);
+                    EquityResponse cockpitEquity =
+                        await _apiClient.GetEquityAsync("paper", _lifetime.Token);
+                    RenderCockpit(
+                        cockpitOverview,
+                        cockpitSignals.Items,
+                        cockpitPositions.Items,
+                        cockpitEquity.Points);
                     break;
                 case "Markets":
                     RenderMarkets((await _apiClient.GetMarketsAsync(_lifetime.Token)).Items);
@@ -258,6 +273,118 @@ public sealed partial class MainPage : Page
         ActivityText.Text =
             $"{overview.ActiveMarkets} active markets · {overview.BlockedMarkets} blocked markets · "
             + $"{overview.PendingSignals} pending signals";
+    }
+
+    private void RenderCockpit(
+        OverviewResponse overview,
+        IReadOnlyList<SignalDto> signals,
+        IReadOnlyList<PositionDto> positions,
+        IReadOnlyList<EquityPointDto> paperEquity)
+    {
+        RenderOverview(overview);
+        _cockpitPositions = positions;
+        _cockpitEquity = paperEquity;
+
+        List<PositionDto> open = positions
+            .Where(p => string.Equals(p.Status, "open", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        List<PositionDto> closed = positions
+            .Where(p => string.Equals(p.Status, "closed", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        double? unrealized = open.Any(p => p.UnrealizedPnlUsd is not null)
+            ? open.Sum(p => p.UnrealizedPnlUsd ?? 0)
+            : null;
+        double realized = closed.Sum(p => p.PnlUsd ?? 0);
+
+        CockpitUnrealizedText.Text = Signed(unrealized);
+        CockpitUnrealizedText.Foreground = AccentBrush(PnlAccent(unrealized));
+        CockpitUnrealizedDetailText.Text =
+            $"{open.Count} open positions · realised {Signed(realized)}";
+        CockpitExposureText.Text = Usd(overview.OpenExposureUsd);
+        CockpitExposureDetailText.Text =
+            $"{overview.OpenPositions} open positions · {overview.PendingSignals} pending signals";
+        CockpitRiskRuntime.Text = overview.Runtime.KillSwitch
+            ? $"Kill switch active{ReasonSuffix(overview.Runtime.HaltedReason)}"
+            : $"Mode {overview.Runtime.Mode.ToUpperInvariant()} · kill switch off";
+        CockpitRiskHealth.Text = overview.HealthAudit is null
+            ? "No health audit available"
+            : $"{Pretty(overview.HealthAudit.Status)} · {overview.HealthAudit.Issues.Count} issue(s)";
+        CockpitRiskActivity.Text =
+            $"{overview.ActiveMarkets} active markets · {overview.BlockedMarkets} blocked";
+
+        List<MonitoringListItem> scannerItems = BuildCockpitScanner(signals, open);
+        CockpitScannerList.ItemsSource = scannerItems;
+        CockpitScannerSubtitle.Text =
+            $"{signals.Count} recent signal decisions · {open.Count} open positions";
+        if (scannerItems.Count == 0)
+        {
+            RenderCockpitDetail(new MonitoringListItem(
+                "No active opportunity",
+                "Scanner is waiting for signals or open positions",
+                "Collectors and models are still feeding the system.",
+                "No row selected",
+                "Idle"));
+        }
+        else
+        {
+            CockpitScannerList.SelectedIndex = 0;
+            RenderCockpitDetail(scannerItems[0]);
+        }
+
+        DrawCockpitChart();
+    }
+
+    private static List<MonitoringListItem> BuildCockpitScanner(
+        IReadOnlyList<SignalDto> signals,
+        IReadOnlyList<PositionDto> openPositions)
+    {
+        IEnumerable<MonitoringListItem> signalItems = signals
+            .OrderByDescending(signal => Math.Abs(signal.Edge))
+            .Take(10)
+            .Select(signal => new MonitoringListItem(
+                $"{signal.StationIcao ?? "Unmapped"} · Signal · {Pretty(signal.Side)}",
+                $"edge {Percent(signal.Edge)} · model {Percent(signal.ModelProbability)} · market {Percent(signal.MarketPrice)}",
+                $"size {Usd(signal.SizeUsd)} · Kelly {Percent(signal.KellyFraction)} · confidence {signal.Confidence}",
+                signal.SkipReason is null
+                    ? $"{LocalTime(signal.Timestamp)} · {signal.PolymarketId}"
+                    : $"{LocalTime(signal.Timestamp)} · {HumanizeReasons(signal.SkipReason)}",
+                signal.Confidence,
+                signal.Edge > 0 ? "positive" : "negative"));
+        IEnumerable<MonitoringListItem> positionItems = openPositions
+            .OrderByDescending(position => Math.Abs(position.UnrealizedPnlUsd ?? 0))
+            .Take(10)
+            .Select(position => new MonitoringListItem(
+                $"{position.StationIcao ?? "Unmapped"} · Position · {Pretty(position.Side)}",
+                $"{position.MarketDate:MM-dd} {Pretty(position.Kind)} · entry {Percent(position.AveragePrice)}"
+                    + (position.MarkPrice is null ? string.Empty : $" → mark {Percent(position.MarkPrice)}"),
+                $"unrealized {Signed(position.UnrealizedPnlUsd)} · size {Usd(position.SizeUsd)} · fees {Usd(position.FeeUsd)}",
+                position.PolymarketId,
+                "Open",
+                PnlAccent(position.UnrealizedPnlUsd)));
+        return signalItems.Concat(positionItems).ToList();
+    }
+
+    private void CockpitScannerList_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is MonitoringListItem item)
+        {
+            RenderCockpitDetail(item);
+        }
+    }
+
+    private void RenderCockpitDetail(MonitoringListItem item)
+    {
+        CockpitDetailStatusTag.Text = item.Status;
+        CockpitDetailStatusBadge.Background = AccentBrush(item.Accent);
+        CockpitDetailTitle.Text = item.Title;
+        CockpitDetailPrimary.Text = item.Subtitle;
+        CockpitDetailSecondary.Text = item.Detail;
+        CockpitDetailMeta.Text = item.Meta;
+        CockpitDetailHint.Text = item.Title.Contains("Signal", StringComparison.OrdinalIgnoreCase)
+            ? "Signal context: model-vs-market edge, sizing, confidence, and skip rationale."
+            : item.Title.Contains("Position", StringComparison.OrdinalIgnoreCase)
+                ? "Position context: entry, current mark, unrealized P&L, fees, and market id."
+                : "Click a scanner row to inspect the signal or position.";
     }
 
     private void RenderMarkets(IReadOnlyList<MarketDto> markets)
@@ -818,6 +945,199 @@ public sealed partial class MainPage : Page
 
     private IReadOnlyList<EquityPointDto> _equityPoints = [];
 
+    private void CockpitChartCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (_selectedDestination == "Dashboard")
+        {
+            DrawCockpitChart();
+        }
+    }
+
+    private void DrawCockpitChart()
+    {
+        CockpitChartCanvas.Children.Clear();
+        double width = CockpitChartCanvas.ActualWidth;
+        double height = CockpitChartCanvas.ActualHeight;
+        if (width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        DrawChartGrid(CockpitChartCanvas, width, height);
+        if (_cockpitEquity.Count >= 2)
+        {
+            double[] values = _cockpitEquity.Select(p => p.CumulativePnlUsd).ToArray();
+            DrawLineSeries(
+                CockpitChartCanvas,
+                values,
+                width,
+                height,
+                values[^1] >= 0 ? "positive" : "negative");
+            CockpitChartTitle.Text = "Paper realised equity";
+            CockpitChartSubtitle.Text =
+                $"{Usd(values[^1])} over {_cockpitEquity.Count} closed trade points";
+            CockpitLegendText.Text = "Realised P&L curve";
+            return;
+        }
+
+        List<PositionDto> marked = _cockpitPositions
+            .Where(p => string.Equals(p.Status, "open", StringComparison.OrdinalIgnoreCase)
+                && p.UnrealizedPnlUsd is not null)
+            .OrderBy(p => p.UnrealizedPnlUsd)
+            .Take(18)
+            .ToList();
+        if (marked.Count == 0)
+        {
+            AddCanvasText(
+                CockpitChartCanvas,
+                "No chart data yet",
+                20,
+                22,
+                new SolidColorBrush(Colors.White),
+                18,
+                new FontWeight { Weight = 600 });
+            AddCanvasText(
+                CockpitChartCanvas,
+                "The cockpit will draw equity once trades close, or open P&L bars once marks arrive.",
+                20,
+                54,
+                new SolidColorBrush(Color.FromArgb(0xAA, 0xFF, 0xFF, 0xFF)),
+                13);
+            CockpitChartTitle.Text = "Paper equity and open P&L";
+            CockpitChartSubtitle.Text = "Waiting for mark-to-market or realised trade history";
+            CockpitLegendText.Text = "No series";
+            return;
+        }
+
+        double[] pnl = marked.Select(p => p.UnrealizedPnlUsd ?? 0).ToArray();
+        DrawBarSeries(CockpitChartCanvas, pnl, width, height);
+        double total = pnl.Sum();
+        CockpitChartTitle.Text = "Open mark-to-market distribution";
+        CockpitChartSubtitle.Text =
+            $"{Signed(total)} across {marked.Count} marked open position(s)";
+        CockpitLegendText.Text = "Green positive · red negative";
+    }
+
+    private static void DrawChartGrid(Canvas canvas, double width, double height)
+    {
+        var gridBrush = new SolidColorBrush(Color.FromArgb(0x24, 0xFF, 0xFF, 0xFF));
+        for (int i = 1; i <= 4; i++)
+        {
+            double y = i * height / 5;
+            canvas.Children.Add(new Line
+            {
+                X1 = 0,
+                X2 = width,
+                Y1 = y,
+                Y2 = y,
+                Stroke = gridBrush,
+                StrokeThickness = 1,
+            });
+        }
+    }
+
+    private static void DrawLineSeries(
+        Canvas canvas,
+        IReadOnlyList<double> values,
+        double width,
+        double height,
+        string? accent)
+    {
+        double lo = Math.Min(0, values.Min());
+        double hi = Math.Max(0, values.Max());
+        double span = hi - lo <= 0 ? 1 : hi - lo;
+        double X(int i) => i * (width / (values.Count - 1));
+        double Y(double v) => height - ((v - lo) / span * height);
+
+        var zero = new Line
+        {
+            X1 = 0,
+            X2 = width,
+            Y1 = Y(0),
+            Y2 = Y(0),
+            Stroke = new SolidColorBrush(Color.FromArgb(0x66, 0x99, 0x99, 0x99)),
+            StrokeThickness = 1,
+        };
+        canvas.Children.Add(zero);
+
+        Brush brush = AccentBrush(accent);
+        var line = new Polyline { Stroke = brush, StrokeThickness = 3 };
+        for (int i = 0; i < values.Count; i++)
+        {
+            line.Points.Add(new Point(X(i), Y(values[i])));
+        }
+        canvas.Children.Add(line);
+
+        var dot = new Ellipse { Width = 10, Height = 10, Fill = brush };
+        Canvas.SetLeft(dot, X(values.Count - 1) - 5);
+        Canvas.SetTop(dot, Y(values[^1]) - 5);
+        canvas.Children.Add(dot);
+    }
+
+    private static void DrawBarSeries(
+        Canvas canvas,
+        IReadOnlyList<double> values,
+        double width,
+        double height)
+    {
+        double absMax = Math.Max(1, values.Select(Math.Abs).Max());
+        double baseline = height / 2;
+        double gap = 4;
+        double barWidth = Math.Max(8, (width - gap * (values.Count - 1)) / values.Count);
+        var zero = new Line
+        {
+            X1 = 0,
+            X2 = width,
+            Y1 = baseline,
+            Y2 = baseline,
+            Stroke = new SolidColorBrush(Color.FromArgb(0x88, 0xAA, 0xAA, 0xAA)),
+            StrokeThickness = 1,
+        };
+        canvas.Children.Add(zero);
+
+        for (int i = 0; i < values.Count; i++)
+        {
+            double value = values[i];
+            double barHeight = Math.Abs(value) / absMax * (height * 0.42);
+            double x = i * (barWidth + gap);
+            double y = value >= 0 ? baseline - barHeight : baseline;
+            var bar = new Rectangle
+            {
+                Width = barWidth,
+                Height = Math.Max(2, barHeight),
+                RadiusX = 3,
+                RadiusY = 3,
+                Fill = AccentBrush(PnlAccent(value)),
+            };
+            Canvas.SetLeft(bar, x);
+            Canvas.SetTop(bar, y);
+            canvas.Children.Add(bar);
+        }
+    }
+
+    private static void AddCanvasText(
+        Canvas canvas,
+        string text,
+        double left,
+        double top,
+        Brush brush,
+        double fontSize,
+        FontWeight? weight = null)
+    {
+        TextBlock block = new()
+        {
+            Text = text,
+            Foreground = brush,
+            FontSize = fontSize,
+            FontWeight = weight ?? new FontWeight { Weight = 400 },
+            TextWrapping = TextWrapping.Wrap,
+            MaxWidth = Math.Max(120, canvas.ActualWidth - left - 20),
+        };
+        Canvas.SetLeft(block, left);
+        Canvas.SetTop(block, top);
+        canvas.Children.Add(block);
+    }
+
     private void EquityCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (EquityChartCard.Visibility == Visibility.Visible)
@@ -1001,10 +1321,10 @@ public sealed partial class MainPage : Page
 
     private void SetPageHeading(string destination)
     {
-        PageTitle.Text = destination == "Dashboard" ? "System overview" : destination;
+        PageTitle.Text = destination == "Dashboard" ? "STRATUS Cockpit" : destination;
         PageSubtitle.Text = destination switch
         {
-            "Dashboard" => "Live read-only monitoring from the local STRATUS API",
+            "Dashboard" => "Trading cockpit: equity, scanner, risk, and selected market context",
             "Markets" => "Active, resolved, and blocked weather markets",
             "Signals" => "Recent signal decisions and structured skip reasons",
             "Positions" => "Paper positions, P&L, fees, and closing-line value",
@@ -1041,6 +1361,18 @@ public sealed partial class MainPage : Page
 
     private static string ReasonSuffix(string? reason) =>
         string.IsNullOrWhiteSpace(reason) ? string.Empty : $" · {reason}";
+
+    private static Brush AccentBrush(string? accent) =>
+        accent switch
+        {
+            "positive" or "Passed" or "High" => new SolidColorBrush(Color.FromArgb(0xFF, 0x31, 0xC4, 0x8D)),
+            "negative" or "Blocked" or "Low" => new SolidColorBrush(Color.FromArgb(0xFF, 0xF8, 0x51, 0x49)),
+            "warning" or "Pending" => new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xB0, 0x2E)),
+            "A" => new SolidColorBrush(Color.FromArgb(0xFF, 0x31, 0xC4, 0x8D)),
+            "B" => new SolidColorBrush(Color.FromArgb(0xFF, 0x4C, 0xB3, 0xFF)),
+            "C" => new SolidColorBrush(Color.FromArgb(0xFF, 0xB2, 0x7C, 0xFF)),
+            _ => new SolidColorBrush(Color.FromArgb(0xFF, 0x4C, 0xB3, 0xFF)),
+        };
 
     private static string HumanizeReasons(string? reasons) =>
         string.IsNullOrWhiteSpace(reasons)

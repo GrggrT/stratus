@@ -19,17 +19,25 @@
             <Setter Property="Padding" Value="20" />
             <Setter Property="MinHeight" Value="142" />
         </Style>
+        <Style x:Key="CockpitCardStyle" TargetType="Border">
+            <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="10" />
+            <Setter Property="Padding" Value="16" />
+        </Style>
     </Page.Resources>
 
     <NavigationView
         x:Name="RootNavigation"
         IsBackButtonVisible="Collapsed"
         IsSettingsVisible="True"
+        OpenPaneLength="280"
         PaneDisplayMode="Auto"
         PaneTitle="STRATUS"
         SelectionChanged="RootNavigation_SelectionChanged">
         <NavigationView.MenuItems>
-            <NavigationViewItem Content="Dashboard" Tag="Dashboard">
+            <NavigationViewItem Content="Cockpit" Tag="Dashboard">
                 <NavigationViewItem.Icon><FontIcon Glyph="&#xE80F;" /></NavigationViewItem.Icon>
             </NavigationViewItem>
             <NavigationViewItem Content="Markets" Tag="Markets">
@@ -196,80 +204,244 @@
                 SizeChanged="DashboardView_SizeChanged">
                 <StackPanel
                     x:Name="DashboardContent"
-                    MaxWidth="1200"
+                    MaxWidth="1500"
                     Padding="32,0,32,40"
                     HorizontalAlignment="Left"
-                    Spacing="20">
-                    <Grid x:Name="StatusCardGrid" ColumnSpacing="16" RowSpacing="16">
+                    Spacing="16">
+                    <Grid ColumnSpacing="12" RowSpacing="12">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
-                            <RowDefinition Height="Auto" />
-                            <RowDefinition Height="Auto" />
-                            <RowDefinition Height="Auto" />
-                        </Grid.RowDefinitions>
-                        <VisualStateManager.VisualStateGroups>
-                            <VisualStateGroup>
-                                <VisualState x:Name="NarrowCards" />
-                                <VisualState x:Name="WideCards">
-                                    <VisualState.StateTriggers>
-                                        <AdaptiveTrigger MinWindowWidth="900" />
-                                    </VisualState.StateTriggers>
-                                    <VisualState.Setters>
-                                        <Setter Target="RuntimeCard.(Grid.Column)" Value="1" />
-                                        <Setter Target="RuntimeCard.(Grid.Row)" Value="0" />
-                                        <Setter Target="PortfolioCard.(Grid.Column)" Value="0" />
-                                        <Setter Target="PortfolioCard.(Grid.Row)" Value="1" />
-                                        <Setter Target="GateCard.(Grid.Column)" Value="1" />
-                                        <Setter Target="GateCard.(Grid.Row)" Value="1" />
-                                    </VisualState.Setters>
-                                </VisualState>
-                            </VisualStateGroup>
-                        </VisualStateManager.VisualStateGroups>
 
-                        <Border x:Name="ApiCard" Grid.Row="0" Style="{StaticResource StatusCardStyle}">
-                            <StackPanel Spacing="10">
-                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="API and dependencies" />
-                                <TextBlock x:Name="ApiStatusText" FontSize="24" FontWeight="SemiBold" Text="Connecting" />
-                                <TextBlock x:Name="ApiDetailText" Text="Waiting for health checks" TextWrapping="Wrap" />
+                        <Border Style="{StaticResource CockpitCardStyle}">
+                            <StackPanel Spacing="8">
+                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Runtime" />
+                                <TextBlock x:Name="RuntimeStatusText" FontSize="22" FontWeight="SemiBold" Text="Unknown" />
+                                <TextBlock
+                                    x:Name="RuntimeDetailText"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Waiting for /api/v1/overview"
+                                    TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
-                        <Border x:Name="RuntimeCard" Grid.Row="1" Style="{StaticResource StatusCardStyle}">
-                            <StackPanel Spacing="10">
-                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Runtime control" />
-                                <TextBlock x:Name="RuntimeStatusText" FontSize="24" FontWeight="SemiBold" Text="Unknown" />
-                                <TextBlock x:Name="RuntimeDetailText" Text="Waiting for /api/v1/overview" TextWrapping="Wrap" />
+                        <Border Grid.Column="1" Style="{StaticResource CockpitCardStyle}">
+                            <StackPanel Spacing="8">
+                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Bankroll" />
+                                <TextBlock x:Name="PortfolioStatusText" FontSize="22" FontWeight="SemiBold" Text="—" />
+                                <TextBlock
+                                    x:Name="PortfolioDetailText"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Balance and exposure unavailable"
+                                    TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
-                        <Border x:Name="PortfolioCard" Grid.Row="2" Style="{StaticResource StatusCardStyle}">
-                            <StackPanel Spacing="10">
-                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Paper portfolio" />
-                                <TextBlock x:Name="PortfolioStatusText" FontSize="24" FontWeight="SemiBold" Text="—" />
-                                <TextBlock x:Name="PortfolioDetailText" Text="Balance and exposure unavailable" TextWrapping="Wrap" />
+                        <Border Grid.Column="2" Style="{StaticResource CockpitCardStyle}">
+                            <StackPanel Spacing="8">
+                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Unrealized P&amp;L" />
+                                <TextBlock x:Name="CockpitUnrealizedText" FontSize="22" FontWeight="SemiBold" Text="—" />
+                                <TextBlock
+                                    x:Name="CockpitUnrealizedDetailText"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="No open mark-to-market yet"
+                                    TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
-                        <Border x:Name="GateCard" Grid.Row="3" Style="{StaticResource StatusCardStyle}">
-                            <StackPanel Spacing="10">
+                        <Border Grid.Column="3" Style="{StaticResource CockpitCardStyle}">
+                            <StackPanel Spacing="8">
+                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Open exposure" />
+                                <TextBlock x:Name="CockpitExposureText" FontSize="22" FontWeight="SemiBold" Text="—" />
+                                <TextBlock
+                                    x:Name="CockpitExposureDetailText"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="No open exposure"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                        <Border Grid.Column="4" Style="{StaticResource CockpitCardStyle}">
+                            <StackPanel Spacing="8">
                                 <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Validation gate" />
-                                <TextBlock x:Name="GateStatusText" FontSize="24" FontWeight="SemiBold" Text="Not evaluated" />
-                                <TextBlock x:Name="GateDetailText" Text="Waiting for a validation checkpoint" TextWrapping="Wrap" />
+                                <TextBlock x:Name="GateStatusText" FontSize="22" FontWeight="SemiBold" Text="Not evaluated" />
+                                <TextBlock
+                                    x:Name="GateDetailText"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Waiting for a validation checkpoint"
+                                    TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
                     </Grid>
 
-                    <Border Style="{StaticResource StatusCardStyle}">
-                        <StackPanel Spacing="8">
-                            <TextBlock FontSize="18" FontWeight="SemiBold" Text="Current activity" />
-                            <TextBlock x:Name="ActivityText" Text="Waiting for monitoring data" TextWrapping="Wrap" />
-                            <TextBlock
-                                x:Name="UpdatedStatusText"
-                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                Text="No successful refresh yet" />
-                        </StackPanel>
-                    </Border>
+                    <Grid ColumnSpacing="16" RowSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="2.2*" />
+                            <ColumnDefinition Width="1*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <Border Style="{StaticResource CockpitCardStyle}">
+                            <Grid RowSpacing="12">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="280" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid RowSpacing="8">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <StackPanel Spacing="4">
+                                        <TextBlock x:Name="CockpitChartTitle" FontSize="20" FontWeight="SemiBold" Text="Paper equity and open P&amp;L" />
+                                        <TextBlock
+                                            x:Name="CockpitChartSubtitle"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="Realised curve when available; otherwise open mark-to-market distribution"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
+                                        <FontIcon FontSize="13" Glyph="&#xE9D2;" />
+                                        <TextBlock x:Name="CockpitLegendText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Signals · Fills · Risk" />
+                                    </StackPanel>
+                                </Grid>
+                                <Canvas
+                                    x:Name="CockpitChartCanvas"
+                                    Grid.Row="1"
+                                    SizeChanged="CockpitChartCanvas_SizeChanged" />
+                                <TextBlock
+                                    x:Name="ActivityText"
+                                    Grid.Row="2"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Waiting for monitoring data"
+                                    TextWrapping="Wrap" />
+                            </Grid>
+                        </Border>
+
+                        <Border Grid.Column="1" Style="{StaticResource CockpitCardStyle}">
+                            <StackPanel Spacing="12">
+                                <StackPanel>
+                                    <TextBlock FontSize="18" FontWeight="SemiBold" Text="Selected context" />
+                                    <TextBlock
+                                        x:Name="CockpitDetailHint"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Click a scanner row to inspect the signal or position."
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Border
+                                    x:Name="CockpitDetailStatusBadge"
+                                    Padding="10,4"
+                                    HorizontalAlignment="Left"
+                                    Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                    CornerRadius="10">
+                                    <TextBlock x:Name="CockpitDetailStatusTag" FontSize="12" Text="Idle" />
+                                </Border>
+                                <TextBlock x:Name="CockpitDetailTitle" FontSize="20" FontWeight="SemiBold" Text="No selection" TextWrapping="Wrap" />
+                                <TextBlock x:Name="CockpitDetailPrimary" FontSize="15" Text="Select a market signal, open position, or risk event." TextWrapping="Wrap" />
+                                <TextBlock
+                                    x:Name="CockpitDetailSecondary"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="The panel will show model-vs-market context, sizing, P&amp;L, and skip rationale."
+                                    TextWrapping="Wrap" />
+                                <TextBlock
+                                    x:Name="CockpitDetailMeta"
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                    Text="No market selected"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Grid.Row="1" Style="{StaticResource CockpitCardStyle}">
+                            <Grid RowSpacing="12">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="360" />
+                                </Grid.RowDefinitions>
+                                <Grid>
+                                    <StackPanel>
+                                        <TextBlock FontSize="18" FontWeight="SemiBold" Text="Opportunity scanner" />
+                                        <TextBlock
+                                            x:Name="CockpitScannerSubtitle"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="Recent signal edges and active mark-to-market positions"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <TextBlock
+                                        x:Name="UpdatedStatusText"
+                                        HorizontalAlignment="Right"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No successful refresh yet" />
+                                </Grid>
+                                <ListView
+                                    x:Name="CockpitScannerList"
+                                    Grid.Row="1"
+                                    IsItemClickEnabled="True"
+                                    ItemClick="CockpitScannerList_ItemClick"
+                                    SelectionMode="Single"
+                                    ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                    ScrollViewer.HorizontalScrollMode="Disabled">
+                                    <ListView.ItemContainerStyle>
+                                        <Style TargetType="ListViewItem">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                            <Setter Property="Padding" Value="0" />
+                                            <Setter Property="Margin" Value="0,0,0,6" />
+                                            <Setter Property="MinHeight" Value="0" />
+                                        </Style>
+                                    </ListView.ItemContainerStyle>
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate x:DataType="models:MonitoringListItem">
+                                            <Border
+                                                Padding="12,9"
+                                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="8">
+                                                <Grid ColumnSpacing="12">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Spacing="2">
+                                                        <TextBlock FontSize="14" FontWeight="SemiBold" Text="{x:Bind Title}" TextWrapping="Wrap" />
+                                                        <TextBlock FontSize="12" Text="{x:Bind Subtitle}" TextWrapping="Wrap" />
+                                                        <TextBlock
+                                                            FontSize="12"
+                                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                            Text="{x:Bind Detail}"
+                                                            TextWrapping="Wrap" />
+                                                    </StackPanel>
+                                                    <Border
+                                                        Grid.Column="1"
+                                                        Padding="8,2"
+                                                        VerticalAlignment="Top"
+                                                        Background="{x:Bind Accent, Converter={StaticResource AccentToBrush}}"
+                                                        CornerRadius="10">
+                                                        <TextBlock FontSize="11" Text="{x:Bind Status}" />
+                                                    </Border>
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+                            </Grid>
+                        </Border>
+
+                        <Border Grid.Row="1" Grid.Column="1" Style="{StaticResource CockpitCardStyle}">
+                            <StackPanel Spacing="12">
+                                <TextBlock FontSize="18" FontWeight="SemiBold" Text="Risk rail" />
+                                <TextBlock x:Name="ApiStatusText" FontSize="16" FontWeight="SemiBold" Text="Connecting" />
+                                <TextBlock x:Name="ApiDetailText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Waiting for health checks" TextWrapping="Wrap" />
+                                <Rectangle Height="1" Fill="{ThemeResource CardStrokeColorDefaultBrush}" />
+                                <TextBlock x:Name="CockpitRiskRuntime" Text="Runtime state unavailable" TextWrapping="Wrap" />
+                                <TextBlock x:Name="CockpitRiskHealth" Text="Health audit unavailable" TextWrapping="Wrap" />
+                                <TextBlock x:Name="CockpitRiskActivity" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="No recent activity" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
                 </StackPanel>
             </ScrollViewer>
 
