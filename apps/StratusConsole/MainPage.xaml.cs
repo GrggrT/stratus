@@ -185,6 +185,13 @@ public sealed partial class MainPage : Page
         SystemInfoBar.Message = healthy && ready
             ? "The local API and backend dependencies report ready."
             : ApiDetailText.Text;
+        // The green "ready" banner is reassurance for the Dashboard; on data
+        // pages it just steals vertical space. Keep problems (warning/error)
+        // visible everywhere.
+        bool onDashboard = _selectedDestination == "Dashboard";
+        SystemInfoBar.Visibility = (healthy && ready && !onDashboard)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
     }
 
     private void RenderOverview(OverviewResponse overview)
@@ -225,7 +232,7 @@ public sealed partial class MainPage : Page
             market.StationVerified
                 ? "Station rules verified"
                 : $"Verification blocked{ReasonSuffix(HumanizeReasons(market.VerificationReason))}",
-            $"Resolves {LocalTime(market.ResolvesAt)} · #{market.Id} · {market.PolymarketId}",
+            $"Resolves {LocalTime(market.ResolvesAt)} · market #{market.Id}",
             Pretty(market.Status))));
     }
 
@@ -781,6 +788,7 @@ public sealed partial class MainPage : Page
         SystemInfoBar.Severity = InfoBarSeverity.Error;
         SystemInfoBar.Title = "Monitoring API unavailable";
         SystemInfoBar.Message = error;
+        SystemInfoBar.Visibility = Visibility.Visible;
     }
 
     private void RenderUnreachable(string error)
@@ -799,6 +807,7 @@ public sealed partial class MainPage : Page
         SystemInfoBar.Severity = InfoBarSeverity.Error;
         SystemInfoBar.Title = "API unreachable";
         SystemInfoBar.Message = error;
+        SystemInfoBar.Visibility = Visibility.Visible;
     }
 
     private void ResetOverview()

@@ -268,18 +268,19 @@
                         <Style TargetType="ListViewItem">
                             <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                             <Setter Property="Padding" Value="0" />
-                            <Setter Property="Margin" Value="0,0,0,8" />
+                            <Setter Property="Margin" Value="0,0,0,6" />
+                            <Setter Property="MinHeight" Value="0" />
                         </Style>
                     </ListView.ItemContainerStyle>
                     <ListView.ItemTemplate>
                         <DataTemplate x:DataType="models:MonitoringListItem">
                             <Border
-                                Padding="16"
+                                Padding="14,10"
                                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                                 BorderThickness="1"
                                 CornerRadius="8">
-                                <Grid ColumnSpacing="16" RowSpacing="6">
+                                <Grid ColumnSpacing="12" RowSpacing="3">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
@@ -290,25 +291,27 @@
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
-                                    <TextBlock FontSize="17" FontWeight="SemiBold" Text="{x:Bind Title}" TextWrapping="Wrap" />
+                                    <TextBlock FontSize="15" FontWeight="SemiBold" Text="{x:Bind Title}" TextWrapping="Wrap" />
                                     <Border
                                         Grid.Column="1"
-                                        Padding="8,3"
+                                        Padding="8,2"
+                                        VerticalAlignment="Top"
                                         Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
                                         CornerRadius="10">
-                                        <TextBlock FontSize="12" Text="{x:Bind Status}" />
+                                        <TextBlock FontSize="11" Text="{x:Bind Status}" />
                                     </Border>
-                                    <TextBlock Grid.Row="1" Grid.ColumnSpan="2" Text="{x:Bind Subtitle}" TextWrapping="Wrap" />
+                                    <TextBlock Grid.Row="1" Grid.ColumnSpan="2" FontSize="13" Text="{x:Bind Subtitle}" TextWrapping="Wrap" />
                                     <TextBlock
                                         Grid.Row="2"
                                         Grid.ColumnSpan="2"
+                                        FontSize="13"
                                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                         Text="{x:Bind Detail}"
                                         TextWrapping="Wrap" />
                                     <TextBlock
                                         Grid.Row="3"
                                         Grid.ColumnSpan="2"
-                                        FontSize="12"
+                                        FontSize="11"
                                         Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                         Text="{x:Bind Meta}"
                                         TextWrapping="Wrap" />
