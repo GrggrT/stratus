@@ -6,6 +6,10 @@ collector and weather-market discovery for three active stations: KLGA, EGLC, an
 
 ## Run locally
 
+For console/API development, prefer the guarded host-API workflow in
+[`docs/LOCAL_DEV_MODE.md`](docs/LOCAL_DEV_MODE.md). It keeps Postgres in Docker, runs
+`stratus-api` from the current checkout, and stops stale container `api`/`worker` services.
+
 ```powershell
 Copy-Item .env.example .env
 docker compose up -d postgres
