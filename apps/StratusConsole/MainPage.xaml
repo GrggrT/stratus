@@ -74,7 +74,7 @@
                         <VisualState x:Name="CompactHeader" />
                         <VisualState x:Name="WideHeader">
                             <VisualState.StateTriggers>
-                                <AdaptiveTrigger MinWindowWidth="760" />
+                                <AdaptiveTrigger MinWindowWidth="1700" />
                             </VisualState.StateTriggers>
                             <VisualState.Setters>
                                 <Setter Target="PageCommandBar.(Grid.Row)" Value="0" />
@@ -98,6 +98,7 @@
                     Grid.ColumnSpan="2"
                     Background="Transparent"
                     DefaultLabelPosition="Right"
+                    HorizontalAlignment="Left"
                     IsDynamicOverflowEnabled="True">
                     <AppBarButton
                         x:Name="StopButton"
@@ -157,11 +158,17 @@
                 Severity="Informational"
                 Title="Connecting" />
 
-            <ScrollViewer x:Name="DashboardView" Grid.Row="2">
+            <ScrollViewer
+                x:Name="DashboardView"
+                Grid.Row="2"
+                HorizontalScrollBarVisibility="Disabled"
+                HorizontalScrollMode="Disabled"
+                SizeChanged="DashboardView_SizeChanged">
                 <StackPanel
+                    x:Name="DashboardContent"
                     MaxWidth="1200"
                     Padding="32,0,32,40"
-                    HorizontalAlignment="Stretch"
+                    HorizontalAlignment="Left"
                     Spacing="20">
                     <Grid x:Name="StatusCardGrid" ColumnSpacing="16" RowSpacing="16">
                         <Grid.ColumnDefinitions>

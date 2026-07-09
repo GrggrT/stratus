@@ -47,8 +47,24 @@ public sealed partial class MainPage : Page
 
     private async void MainPage_Loaded(object sender, RoutedEventArgs e)
     {
+        ResizeDashboardContent(DashboardView.ActualWidth);
         _refreshTimer.Start();
         await RefreshAsync();
+    }
+
+    private void DashboardView_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        ResizeDashboardContent(e.NewSize.Width);
+    }
+
+    private void ResizeDashboardContent(double viewportWidth)
+    {
+        if (double.IsNaN(viewportWidth) || viewportWidth <= 0)
+        {
+            return;
+        }
+
+        DashboardContent.Width = Math.Min(1200, viewportWidth);
     }
 
     private void MainPage_Unloaded(object sender, RoutedEventArgs e)
