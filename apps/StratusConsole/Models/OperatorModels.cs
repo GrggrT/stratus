@@ -50,6 +50,7 @@ public sealed record MarketDto(
 
 public sealed record SignalDto(
     [property: JsonPropertyName("id")] long Id,
+    [property: JsonPropertyName("market_id")] long MarketId,
     [property: JsonPropertyName("timestamp")] DateTimeOffset Timestamp,
     [property: JsonPropertyName("polymarket_id")] string PolymarketId,
     [property: JsonPropertyName("station_icao")] string? StationIcao,
@@ -65,6 +66,7 @@ public sealed record SignalDto(
 
 public sealed record PositionDto(
     [property: JsonPropertyName("id")] long Id,
+    [property: JsonPropertyName("market_id")] long MarketId,
     [property: JsonPropertyName("polymarket_id")] string PolymarketId,
     [property: JsonPropertyName("station_icao")] string? StationIcao,
     [property: JsonPropertyName("market_date")] DateOnly MarketDate,
@@ -108,6 +110,53 @@ public sealed record EquityResponse(
     [property: JsonPropertyName("generated_at")] DateTimeOffset GeneratedAt,
     [property: JsonPropertyName("points")] IReadOnlyList<EquityPointDto> Points);
 
+public sealed record MarketPricePointDto(
+    [property: JsonPropertyName("t")] DateTimeOffset T,
+    [property: JsonPropertyName("midpoint")] double Midpoint,
+    [property: JsonPropertyName("best_bid")] double BestBid,
+    [property: JsonPropertyName("best_ask")] double BestAsk,
+    [property: JsonPropertyName("bid_depth_usd")] double BidDepthUsd,
+    [property: JsonPropertyName("ask_depth_usd")] double AskDepthUsd);
+
+public sealed record MarketPriceSeriesResponse(
+    [property: JsonPropertyName("generated_at")] DateTimeOffset GeneratedAt,
+    [property: JsonPropertyName("market_id")] long MarketId,
+    [property: JsonPropertyName("points")] IReadOnlyList<MarketPricePointDto> Points);
+
+public sealed record ProbabilityPointDto(
+    [property: JsonPropertyName("t")] DateTimeOffset T,
+    [property: JsonPropertyName("source")] string Source,
+    [property: JsonPropertyName("model_probability")] double? ModelProbability,
+    [property: JsonPropertyName("market_price")] double? MarketPrice,
+    [property: JsonPropertyName("edge")] double? Edge,
+    [property: JsonPropertyName("sigma")] double? Sigma,
+    [property: JsonPropertyName("horizon_h")] double? HorizonH,
+    [property: JsonPropertyName("confidence")] string? Confidence,
+    [property: JsonPropertyName("status")] string? Status);
+
+public sealed record ProbabilitySeriesResponse(
+    [property: JsonPropertyName("generated_at")] DateTimeOffset GeneratedAt,
+    [property: JsonPropertyName("market_id")] long MarketId,
+    [property: JsonPropertyName("points")] IReadOnlyList<ProbabilityPointDto> Points);
+
+public sealed record OrderBookLevelDto(
+    [property: JsonPropertyName("price")] double Price,
+    [property: JsonPropertyName("size")] double Size,
+    [property: JsonPropertyName("notional_usd")] double NotionalUsd);
+
+public sealed record OrderBookResponse(
+    [property: JsonPropertyName("generated_at")] DateTimeOffset GeneratedAt,
+    [property: JsonPropertyName("market_id")] long MarketId,
+    [property: JsonPropertyName("side")] string Side,
+    [property: JsonPropertyName("token_id")] string? TokenId,
+    [property: JsonPropertyName("source_status")] string SourceStatus,
+    [property: JsonPropertyName("error")] string? Error,
+    [property: JsonPropertyName("midpoint")] double? Midpoint,
+    [property: JsonPropertyName("best_bid")] double? BestBid,
+    [property: JsonPropertyName("best_ask")] double? BestAsk,
+    [property: JsonPropertyName("bids")] IReadOnlyList<OrderBookLevelDto> Bids,
+    [property: JsonPropertyName("asks")] IReadOnlyList<OrderBookLevelDto> Asks);
+
 public sealed record LiveSummaryDto(
     [property: JsonPropertyName("positions")] int Positions,
     [property: JsonPropertyName("closed")] int Closed,
@@ -142,4 +191,5 @@ public sealed record MonitoringListItem(
     string Detail,
     string Meta,
     string Status,
-    string? Accent = null);
+    string? Accent = null,
+    long? MarketId = null);

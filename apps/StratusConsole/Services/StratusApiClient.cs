@@ -73,6 +73,28 @@ public sealed class StratusApiClient : IDisposable
         CancellationToken cancellationToken = default) =>
         GetRequiredAsync<EquityResponse>($"api/v1/equity?mode={mode}", cancellationToken);
 
+    public Task<MarketPriceSeriesResponse> GetMarketPricesAsync(
+        long marketId,
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<MarketPriceSeriesResponse>(
+            $"api/v1/market-timeseries?market_id={marketId}&limit=240",
+            cancellationToken);
+
+    public Task<ProbabilitySeriesResponse> GetProbabilitySeriesAsync(
+        long marketId,
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<ProbabilitySeriesResponse>(
+            $"api/v1/probability-timeseries?market_id={marketId}&limit=240",
+            cancellationToken);
+
+    public Task<OrderBookResponse> GetOrderBookAsync(
+        long marketId,
+        string side = "yes",
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<OrderBookResponse>(
+            $"api/v1/orderbook?market_id={marketId}&side={side}",
+            cancellationToken);
+
     public Task<CollectionResponse<CommandItem>> GetCommandsAsync(
         CancellationToken cancellationToken = default) =>
         GetRequiredAsync<CollectionResponse<CommandItem>>("api/v1/commands?limit=100", cancellationToken);

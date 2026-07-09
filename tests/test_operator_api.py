@@ -22,6 +22,9 @@ def test_operator_monitoring_routes_are_registered() -> None:
         "/api/v1/orders",
         "/api/v1/live-summary",
         "/api/v1/live-equity",
+        "/api/v1/market-timeseries",
+        "/api/v1/probability-timeseries",
+        "/api/v1/orderbook",
         "/api/v1/jobs",
     }
     assert expected <= routes.keys()

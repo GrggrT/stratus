@@ -15,7 +15,9 @@ from stratus.config import Settings
 from stratus.db.models import (
     ExecutionMode,
     Market,
+    MarketPrice,
     MarketStatus,
+    ModelProb,
     Order,
     Position,
     PositionStatus,
@@ -178,6 +180,73 @@ async def test_equity_endpoint_filters_by_mode(
     assert [p["cumulative_pnl_usd"] for p in paper.json()["points"]] == [12.5]
     assert [p["cumulative_pnl_usd"] for p in live.json()["points"]] == [-3.0]
     assert bad.status_code == 422
+
+
+async def test_market_drilldown_endpoints_return_series_and_fail_soft_orderbook(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    async with db_sessions.begin() as session:
+        station = Station(
+            icao="LFPB", name="Paris Le Bourget", city="Paris",
+            lat=Decimal("48.96"), lon=Decimal("2.44"), tz="Europe/Paris",
+        )
+        session.add(station)
+        await session.flush()
+        market = Market(
+            polymarket_id="pm-drill-1", event_id="ev-1", station_id=station.id,
+            market_date=NOW.date(), kind=WeatherKind.HIGH, rules_raw="rules",
+            resolves_at=NOW + timedelta(hours=6), status=MarketStatus.ACTIVE,
+            station_verified=True,
+        )
+        session.add(market)
+        await session.flush()
+        session.add_all([
+            MarketPrice(
+                market_id=market.id, ts=NOW - timedelta(minutes=2),
+                midpoint=Decimal("0.410000"), best_bid=Decimal("0.40"),
+                best_ask=Decimal("0.42"), bid_depth_usd=Decimal("12.5"),
+                ask_depth_usd=Decimal("18.0"),
+            ),
+            MarketPrice(
+                market_id=market.id, ts=NOW - timedelta(minutes=1),
+                midpoint=Decimal("0.430000"), best_bid=Decimal("0.42"),
+                best_ask=Decimal("0.44"), bid_depth_usd=Decimal("14.5"),
+                ask_depth_usd=Decimal("20.0"),
+            ),
+            ModelProb(
+                market_id=market.id, ts=NOW - timedelta(minutes=1),
+                prob=Decimal("0.610000"), sigma=Decimal("1.2500"),
+                horizon_h=Decimal("12.00"), components={},
+            ),
+            Signal(
+                market_id=market.id, ts=NOW, side=TradeSide.BUY_YES,
+                model_prob=Decimal("0.62"), market_price=Decimal("0.43"),
+                edge=Decimal("0.19"), kelly_frac=Decimal("0.05"),
+                size_usd=Decimal("25"), confidence=SignalConfidence.A,
+                status=SignalStatus.PENDING,
+            ),
+        ])
+
+    app = create_app(Settings(database_url=migrated_database_url))
+    app.state.sessions = db_sessions
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        prices = await client.get(f"/api/v1/market-timeseries?market_id={market.id}")
+        probability = await client.get(
+            f"/api/v1/probability-timeseries?market_id={market.id}"
+        )
+        book = await client.get(f"/api/v1/orderbook?market_id={market.id}")
+
+    assert prices.status_code == 200
+    assert [p["midpoint"] for p in prices.json()["points"]] == [0.41, 0.43]
+    assert probability.status_code == 200
+    probability_points = probability.json()["points"]
+    assert {p["source"] for p in probability_points} == {"model", "signal"}
+    assert probability_points[-1]["edge"] == 0.19
+    assert book.status_code == 200
+    assert book.json()["source_status"] == "unavailable"
+    assert "token id" in book.json()["error"]
 
 
 async def test_live_equity_endpoint_returns_cumulative_series(

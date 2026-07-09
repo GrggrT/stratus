@@ -451,9 +451,13 @@
             <Grid
                 x:Name="CollectionView"
                 Grid.Row="2"
-                MaxWidth="1000"
+                MaxWidth="1500"
                 HorizontalAlignment="Left"
                 Visibility="Collapsed">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition x:Name="CollectionDetailColumn" Width="0" />
+                </Grid.ColumnDefinitions>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
@@ -461,6 +465,7 @@
                 <Border
                     x:Name="EquityChartCard"
                     Grid.Row="0"
+                    Grid.ColumnSpan="2"
                     Margin="32,0,32,12"
                     Padding="16"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
@@ -477,8 +482,9 @@
                     x:Name="CollectionList"
                     Grid.Row="1"
                     Padding="32,0,32,32"
-                    IsItemClickEnabled="False"
-                    SelectionMode="None"
+                    IsItemClickEnabled="True"
+                    ItemClick="CollectionList_ItemClick"
+                    SelectionMode="Single"
                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                     ScrollViewer.HorizontalScrollMode="Disabled">
                     <ListView.ItemContainerStyle>
@@ -540,6 +546,7 @@
                 <StackPanel
                     x:Name="CollectionEmptyState"
                     Grid.Row="1"
+                    Grid.Column="0"
                     MaxWidth="520"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Center"
@@ -552,6 +559,84 @@
                         TextAlignment="Center"
                         TextWrapping="Wrap" />
                 </StackPanel>
+
+                <Border
+                    x:Name="MarketDrilldownPanel"
+                    Grid.Row="1"
+                    Grid.Column="1"
+                    Margin="0,0,32,32"
+                    Padding="16"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Visibility="Collapsed">
+                    <Grid RowSpacing="12">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="190" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <StackPanel Spacing="4">
+                            <TextBlock FontSize="18" FontWeight="SemiBold" Text="Market drill-down" />
+                            <TextBlock
+                                x:Name="DrilldownTitle"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Select a market, signal, or position"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ComboBox
+                            x:Name="DrilldownSeriesBox"
+                            Grid.Row="1"
+                            MinWidth="180"
+                            SelectedIndex="0"
+                            SelectionChanged="DrilldownSeriesBox_SelectionChanged">
+                            <ComboBoxItem Content="Price" />
+                            <ComboBoxItem Content="Probability" />
+                            <ComboBoxItem Content="Edge" />
+                        </ComboBox>
+                        <Canvas
+                            x:Name="DrilldownChartCanvas"
+                            Grid.Row="2"
+                            SizeChanged="DrilldownChartCanvas_SizeChanged" />
+                        <StackPanel Grid.Row="3" Spacing="4">
+                            <TextBlock x:Name="DrilldownSummaryText" Text="No market selected" TextWrapping="Wrap" />
+                            <TextBlock
+                                x:Name="DrilldownMetaText"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Chart and orderbook will load after selection"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Grid Grid.Row="4" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="4">
+                                <TextBlock FontWeight="SemiBold" Text="Bids" />
+                                <TextBlock
+                                    x:Name="OrderBookBidsText"
+                                    FontFamily="Consolas"
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="—"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Spacing="4">
+                                <TextBlock FontWeight="SemiBold" Text="Asks" />
+                                <TextBlock
+                                    x:Name="OrderBookAsksText"
+                                    FontFamily="Consolas"
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="—"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Grid>
+                    </Grid>
+                </Border>
             </Grid>
         </Grid>
     </NavigationView>

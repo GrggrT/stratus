@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from stratus.collectors.clob import ClobClient
 from stratus.config import Settings
 from stratus.db.models import (
     BankrollLog,
@@ -19,6 +20,7 @@ from stratus.db.models import (
     Market,
     MarketPrice,
     MarketStatus,
+    ModelProb,
     Order,
     Position,
     PositionStatus,
@@ -109,6 +111,7 @@ class MarketsResponse(BaseModel):
 
 class SignalItem(BaseModel):
     id: int
+    market_id: int
     timestamp: datetime
     polymarket_id: str
     station_icao: str | None
@@ -130,6 +133,7 @@ class SignalsResponse(BaseModel):
 
 class PositionItem(BaseModel):
     id: int
+    market_id: int
     polymarket_id: str
     station_icao: str | None
     market_date: date
@@ -232,6 +236,59 @@ class JobsResponse(BaseModel):
     items: list[JobItem]
 
 
+class MarketPricePoint(BaseModel):
+    t: datetime
+    midpoint: float
+    best_bid: float
+    best_ask: float
+    bid_depth_usd: float
+    ask_depth_usd: float
+
+
+class MarketPriceSeriesResponse(BaseModel):
+    generated_at: datetime
+    market_id: int
+    points: list[MarketPricePoint]
+
+
+class ProbabilityPoint(BaseModel):
+    t: datetime
+    source: str
+    model_probability: float | None
+    market_price: float | None
+    edge: float | None
+    sigma: float | None
+    horizon_h: float | None
+    confidence: str | None
+    status: str | None
+
+
+class ProbabilitySeriesResponse(BaseModel):
+    generated_at: datetime
+    market_id: int
+    points: list[ProbabilityPoint]
+
+
+class OrderBookLevel(BaseModel):
+    price: float
+    size: float
+    notional_usd: float
+
+
+class OrderBookResponse(BaseModel):
+    generated_at: datetime
+    market_id: int
+    side: str
+    token_id: str | None
+    source_status: str
+    error: str | None
+    midpoint: float | None
+    best_bid: float | None
+    best_ask: float | None
+    bids: list[OrderBookLevel]
+    asks: list[OrderBookLevel]
+
+
 class CommandRequest(BaseModel):
     request_id: str = Field(min_length=8, max_length=64)
     command: str = Field(max_length=32)
@@ -269,6 +326,54 @@ def _sessions(request: Request) -> SessionFactory:
 
 def _number(value: Decimal | None) -> float | None:
     return float(value) if value is not None else None
+
+
+def _book_levels(raw: Any, *, reverse: bool, limit: int = 10) -> list[OrderBookLevel]:
+    if not isinstance(raw, list):
+        raise ValueError("book side is missing or not a list")
+    parsed: list[tuple[Decimal, Decimal]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("book level is not an object")
+        try:
+            price = Decimal(str(item["price"]))
+            size = Decimal(str(item["size"]))
+        except (KeyError, InvalidOperation) as exc:
+            raise ValueError("book level contains an invalid price or size") from exc
+        if not Decimal(0) < price < Decimal(1) or size <= 0:
+            raise ValueError("book level is out of range")
+        parsed.append((price, size))
+    parsed.sort(key=lambda level: level[0], reverse=reverse)
+    return [
+        OrderBookLevel(
+            price=float(price),
+            size=float(size),
+            notional_usd=float((price * size).quantize(Decimal("0.0001"))),
+        )
+        for price, size in parsed[:limit]
+    ]
+
+
+def _empty_orderbook(
+    *,
+    market_id: int,
+    side: str,
+    token_id: str | None,
+    error: str,
+) -> OrderBookResponse:
+    return OrderBookResponse(
+        generated_at=datetime.now(UTC),
+        market_id=market_id,
+        side=side,
+        token_id=token_id,
+        source_status="unavailable",
+        error=error,
+        midpoint=None,
+        best_bid=None,
+        best_ask=None,
+        bids=[],
+        asks=[],
+    )
 
 
 @router.get("/overview", response_model=OverviewResponse)
@@ -405,6 +510,7 @@ async def signals(
         items=[
             SignalItem(
                 id=signal.id,
+                market_id=signal.market_id,
                 timestamp=signal.ts,
                 polymarket_id=polymarket_id,
                 station_icao=icao,
@@ -474,6 +580,7 @@ async def positions(
         items.append(
             PositionItem(
                 id=position.id,
+                market_id=market.id,
                 polymarket_id=market.polymarket_id,
                 station_icao=station_names.get(market.id),
                 market_date=market.market_date,
@@ -492,6 +599,174 @@ async def positions(
             )
         )
     return PositionsResponse(generated_at=datetime.now(UTC), items=items)
+
+
+@router.get("/market-timeseries", response_model=MarketPriceSeriesResponse)
+async def market_timeseries(
+    request: Request,
+    market_id: Annotated[int, Query(ge=1)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 240,
+) -> MarketPriceSeriesResponse:
+    async with _sessions(request)() as session:
+        exists = await session.scalar(select(Market.id).where(Market.id == market_id))
+        if exists is None:
+            raise HTTPException(status_code=404, detail="market not found")
+        rows = (
+            await session.execute(
+                select(MarketPrice)
+                .where(MarketPrice.market_id == market_id)
+                .order_by(MarketPrice.ts.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+    return MarketPriceSeriesResponse(
+        generated_at=datetime.now(UTC),
+        market_id=market_id,
+        points=[
+            MarketPricePoint(
+                t=row.ts,
+                midpoint=float(row.midpoint),
+                best_bid=float(row.best_bid),
+                best_ask=float(row.best_ask),
+                bid_depth_usd=float(row.bid_depth_usd),
+                ask_depth_usd=float(row.ask_depth_usd),
+            )
+            for row in reversed(rows)
+        ],
+    )
+
+
+@router.get("/probability-timeseries", response_model=ProbabilitySeriesResponse)
+async def probability_timeseries(
+    request: Request,
+    market_id: Annotated[int, Query(ge=1)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 240,
+) -> ProbabilitySeriesResponse:
+    async with _sessions(request)() as session:
+        exists = await session.scalar(select(Market.id).where(Market.id == market_id))
+        if exists is None:
+            raise HTTPException(status_code=404, detail="market not found")
+        model_rows = (
+            await session.execute(
+                select(ModelProb)
+                .where(ModelProb.market_id == market_id)
+                .order_by(ModelProb.ts.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+        signal_rows = (
+            await session.execute(
+                select(Signal)
+                .where(Signal.market_id == market_id)
+                .order_by(Signal.ts.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+
+    points = [
+        ProbabilityPoint(
+            t=row.ts,
+            source="model",
+            model_probability=float(row.prob),
+            market_price=None,
+            edge=None,
+            sigma=float(row.sigma),
+            horizon_h=float(row.horizon_h),
+            confidence=None,
+            status=None,
+        )
+        for row in model_rows
+    ]
+    points.extend(
+        ProbabilityPoint(
+            t=row.ts,
+            source="signal",
+            model_probability=float(row.model_prob),
+            market_price=float(row.market_price),
+            edge=float(row.edge),
+            sigma=None,
+            horizon_h=None,
+            confidence=row.confidence.value,
+            status=row.status.value,
+        )
+        for row in signal_rows
+    )
+    points.sort(key=lambda point: (point.t, point.source))
+    return ProbabilitySeriesResponse(
+        generated_at=datetime.now(UTC),
+        market_id=market_id,
+        points=points[-limit:],
+    )
+
+
+@router.get("/orderbook", response_model=OrderBookResponse)
+async def orderbook(
+    request: Request,
+    market_id: Annotated[int, Query(ge=1)],
+    side: Annotated[str, Query(pattern="^(yes|no)$")] = "yes",
+) -> OrderBookResponse:
+    settings = cast(Settings, request.app.state.settings)
+    async with _sessions(request)() as session:
+        market = await session.scalar(select(Market).where(Market.id == market_id))
+    if market is None:
+        raise HTTPException(status_code=404, detail="market not found")
+
+    token_id = market.yes_token_id if side == "yes" else market.no_token_id
+    if not token_id:
+        return _empty_orderbook(
+            market_id=market_id,
+            side=side,
+            token_id=None,
+            error=f"market has no {side.upper()} token id",
+        )
+
+    try:
+        async with ClobClient(
+            books_url=settings.clob_books_url,
+            batch_size=settings.clob_batch_size,
+        ) as client:
+            books = await client.fetch_books([token_id])
+        if not books:
+            return _empty_orderbook(
+                market_id=market_id,
+                side=side,
+                token_id=token_id,
+                error="CLOB returned no book for token",
+            )
+        book = books[0]
+        bids = _book_levels(book.get("bids"), reverse=True)
+        asks = _book_levels(book.get("asks"), reverse=False)
+        if not bids or not asks:
+            return _empty_orderbook(
+                market_id=market_id,
+                side=side,
+                token_id=token_id,
+                error="book has no two-sided liquidity",
+            )
+        best_bid = bids[0].price
+        best_ask = asks[0].price
+        midpoint = (best_bid + best_ask) / 2
+    except Exception as exc:  # noqa: BLE001 - external CLOB snapshot must fail soft.
+        return _empty_orderbook(
+            market_id=market_id,
+            side=side,
+            token_id=token_id,
+            error=f"CLOB unavailable: {exc}",
+        )
+
+    return OrderBookResponse(
+        generated_at=datetime.now(UTC),
+        market_id=market_id,
+        side=side,
+        token_id=token_id,
+        source_status="ok",
+        error=None,
+        midpoint=midpoint,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        bids=bids,
+        asks=asks,
+    )
 
 
 @router.get("/calibration", response_model=CalibrationsResponse)

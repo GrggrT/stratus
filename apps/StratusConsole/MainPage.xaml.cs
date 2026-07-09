@@ -27,6 +27,13 @@ public sealed partial class MainPage : Page
     private string _credentialSource;
     private IReadOnlyList<PositionDto> _cockpitPositions = [];
     private IReadOnlyList<EquityPointDto> _cockpitEquity = [];
+    private string? _cockpitMarketTitle;
+    private IReadOnlyList<MarketPricePointDto> _cockpitMarketPrices = [];
+    private IReadOnlyList<ProbabilityPointDto> _cockpitProbabilities = [];
+    private IReadOnlyList<MarketPricePointDto> _drilldownPrices = [];
+    private IReadOnlyList<ProbabilityPointDto> _drilldownProbabilities = [];
+    private OrderBookResponse? _drilldownOrderBook;
+    private MonitoringListItem? _selectedDrilldownItem;
 
     public MainPage()
     {
@@ -68,7 +75,7 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        CollectionView.Width = Math.Min(1000, viewportWidth);
+        CollectionView.Width = Math.Min(1500, viewportWidth);
     }
 
     private void DashboardView_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -349,7 +356,8 @@ public sealed partial class MainPage : Page
                     ? $"{LocalTime(signal.Timestamp)} · {signal.PolymarketId}"
                     : $"{LocalTime(signal.Timestamp)} · {HumanizeReasons(signal.SkipReason)}",
                 signal.Confidence,
-                signal.Edge > 0 ? "positive" : "negative"));
+                signal.Edge > 0 ? "positive" : "negative",
+                signal.MarketId));
         IEnumerable<MonitoringListItem> positionItems = openPositions
             .OrderByDescending(position => Math.Abs(position.UnrealizedPnlUsd ?? 0))
             .Take(10)
@@ -360,15 +368,20 @@ public sealed partial class MainPage : Page
                 $"unrealized {Signed(position.UnrealizedPnlUsd)} · size {Usd(position.SizeUsd)} · fees {Usd(position.FeeUsd)}",
                 position.PolymarketId,
                 "Open",
-                PnlAccent(position.UnrealizedPnlUsd)));
+                PnlAccent(position.UnrealizedPnlUsd),
+                position.MarketId));
         return signalItems.Concat(positionItems).ToList();
     }
 
-    private void CockpitScannerList_ItemClick(object sender, ItemClickEventArgs e)
+    private async void CockpitScannerList_ItemClick(object sender, ItemClickEventArgs e)
     {
         if (e.ClickedItem is MonitoringListItem item)
         {
             RenderCockpitDetail(item);
+            if (item.MarketId is not null)
+            {
+                await LoadCockpitMarketChartAsync(item);
+            }
         }
     }
 
@@ -387,6 +400,123 @@ public sealed partial class MainPage : Page
                 : "Click a scanner row to inspect the signal or position.";
     }
 
+    private async Task LoadCockpitMarketChartAsync(MonitoringListItem item)
+    {
+        if (item.MarketId is null)
+        {
+            return;
+        }
+
+        try
+        {
+            MarketPriceSeriesResponse prices =
+                await _apiClient.GetMarketPricesAsync(item.MarketId.Value, _lifetime.Token);
+            ProbabilitySeriesResponse probabilities =
+                await _apiClient.GetProbabilitySeriesAsync(item.MarketId.Value, _lifetime.Token);
+            _cockpitMarketTitle = item.Title;
+            _cockpitMarketPrices = prices.Points;
+            _cockpitProbabilities = probabilities.Points;
+            DrawCockpitChart();
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            CockpitDetailMeta.Text = $"Drill-down unavailable: {ex.Message}";
+        }
+    }
+
+    private async void CollectionList_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is not MonitoringListItem item || item.MarketId is null)
+        {
+            HideMarketDrilldown();
+            return;
+        }
+
+        await LoadMarketDrilldownAsync(item);
+    }
+
+    private void HideMarketDrilldown()
+    {
+        MarketDrilldownPanel.Visibility = Visibility.Collapsed;
+        CollectionDetailColumn.Width = new GridLength(0);
+        _drilldownPrices = [];
+        _drilldownProbabilities = [];
+        _drilldownOrderBook = null;
+        _selectedDrilldownItem = null;
+    }
+
+    private async Task LoadMarketDrilldownAsync(MonitoringListItem item)
+    {
+        if (item.MarketId is null)
+        {
+            HideMarketDrilldown();
+            return;
+        }
+
+        _selectedDrilldownItem = item;
+        CollectionDetailColumn.Width = new GridLength(460);
+        MarketDrilldownPanel.Visibility = Visibility.Visible;
+        DrilldownTitle.Text = item.Title;
+        DrilldownSummaryText.Text = "Loading market series and orderbook...";
+        DrilldownMetaText.Text = item.Meta;
+        OrderBookBidsText.Text = "Loading";
+        OrderBookAsksText.Text = "Loading";
+        DrilldownChartCanvas.Children.Clear();
+
+        try
+        {
+            Task<MarketPriceSeriesResponse> pricesTask =
+                _apiClient.GetMarketPricesAsync(item.MarketId.Value, _lifetime.Token);
+            Task<ProbabilitySeriesResponse> probabilitiesTask =
+                _apiClient.GetProbabilitySeriesAsync(item.MarketId.Value, _lifetime.Token);
+            Task<OrderBookResponse> orderBookTask =
+                _apiClient.GetOrderBookAsync(item.MarketId.Value, cancellationToken: _lifetime.Token);
+
+            await Task.WhenAll(pricesTask, probabilitiesTask, orderBookTask);
+            _drilldownPrices = pricesTask.Result.Points;
+            _drilldownProbabilities = probabilitiesTask.Result.Points;
+            _drilldownOrderBook = orderBookTask.Result;
+
+            MarketPricePointDto? latestPrice = _drilldownPrices.LastOrDefault();
+            ProbabilityPointDto? latestSignal = _drilldownProbabilities
+                .LastOrDefault(point => point.Source == "signal");
+            DrilldownSummaryText.Text =
+                $"mid {Percent(latestPrice?.Midpoint)} · model {Percent(latestSignal?.ModelProbability)}"
+                + $" · edge {Percent(latestSignal?.Edge)}";
+            DrilldownMetaText.Text =
+                $"{_drilldownPrices.Count} price point(s) · {_drilldownProbabilities.Count} probability/signal point(s)"
+                + $" · book {_drilldownOrderBook.SourceStatus}";
+            if (!string.IsNullOrWhiteSpace(_drilldownOrderBook.Error))
+            {
+                DrilldownMetaText.Text += $" · {_drilldownOrderBook.Error}";
+            }
+            OrderBookBidsText.Text = FormatBookLevels(_drilldownOrderBook.Bids);
+            OrderBookAsksText.Text = FormatBookLevels(_drilldownOrderBook.Asks);
+            DrawDrilldownChart();
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            DrilldownSummaryText.Text = "Drill-down unavailable";
+            DrilldownMetaText.Text = ex.Message;
+            OrderBookBidsText.Text = "—";
+            OrderBookAsksText.Text = "—";
+        }
+    }
+
+    private static string FormatBookLevels(IReadOnlyList<OrderBookLevelDto> levels) =>
+        levels.Count == 0
+            ? "—"
+            : string.Join(
+                Environment.NewLine,
+                levels.Take(3).Select(level =>
+                    $"{level.Price:0.000} × {level.Size:0.##}  ${level.NotionalUsd:0.00}"));
+
     private void RenderMarkets(IReadOnlyList<MarketDto> markets)
     {
         SetCollection(markets.Select(market => new MonitoringListItem(
@@ -396,7 +526,8 @@ public sealed partial class MainPage : Page
                 ? "Station rules verified"
                 : $"Verification blocked{ReasonSuffix(HumanizeReasons(market.VerificationReason))}",
             $"Resolves {LocalTime(market.ResolvesAt)} · market #{market.Id}",
-            Pretty(market.Status))));
+            Pretty(market.Status),
+            MarketId: market.Id)));
     }
 
     private void RenderSignals(IReadOnlyList<SignalDto> signals)
@@ -407,7 +538,8 @@ public sealed partial class MainPage : Page
             $"Size {Usd(signal.SizeUsd)} · Kelly {Percent(signal.KellyFraction)} · confidence {signal.Confidence}",
             $"{LocalTime(signal.Timestamp)} · "
                 + (signal.SkipReason is null ? signal.PolymarketId : HumanizeReasons(signal.SkipReason)),
-            Pretty(signal.Status))));
+            Pretty(signal.Status),
+            MarketId: signal.MarketId)));
     }
 
     private string _positionsFilter = "Open";
@@ -479,7 +611,8 @@ public sealed partial class MainPage : Page
                     ? position.PolymarketId
                     : $"Closed {LocalTime(position.ClosedAt.Value)} · {position.PolymarketId}",
                 Pretty(position.Status),
-                PnlAccent(pnl));
+                PnlAccent(pnl),
+                position.MarketId);
         }));
         SetCollection(items);
 
@@ -964,6 +1097,28 @@ public sealed partial class MainPage : Page
         }
 
         DrawChartGrid(CockpitChartCanvas, width, height);
+        if (_cockpitMarketTitle is not null
+            && (_cockpitMarketPrices.Count >= 2
+                || _cockpitProbabilities.Count(point => point.ModelProbability is not null) >= 2
+                || _cockpitProbabilities.Count(point => point.MarketPrice is not null) >= 2))
+        {
+            DrawMarketOverlay(
+                CockpitChartCanvas,
+                _cockpitMarketPrices,
+                _cockpitProbabilities,
+                width,
+                height);
+            MarketPricePointDto? latestPrice = _cockpitMarketPrices.LastOrDefault();
+            ProbabilityPointDto? latestSignal = _cockpitProbabilities
+                .LastOrDefault(point => point.Source == "signal");
+            CockpitChartTitle.Text = $"Market drill-down · {_cockpitMarketTitle}";
+            CockpitChartSubtitle.Text =
+                $"mid {Percent(latestPrice?.Midpoint)} · model {Percent(latestSignal?.ModelProbability)}"
+                + $" · edge {Percent(latestSignal?.Edge)}";
+            CockpitLegendText.Text = "Cyan market midpoint · violet model probability";
+            return;
+        }
+
         if (_cockpitEquity.Count >= 2)
         {
             double[] values = _cockpitEquity.Select(p => p.CumulativePnlUsd).ToArray();
@@ -1034,6 +1189,161 @@ public sealed partial class MainPage : Page
                 StrokeThickness = 1,
             });
         }
+    }
+
+    private static void DrawMarketOverlay(
+        Canvas canvas,
+        IReadOnlyList<MarketPricePointDto> prices,
+        IReadOnlyList<ProbabilityPointDto> probabilities,
+        double width,
+        double height)
+    {
+        double[] midpointValues = prices.Select(point => point.Midpoint).ToArray();
+        double[] signalMarketValues = probabilities
+            .Where(point => point.MarketPrice is not null)
+            .Select(point => point.MarketPrice!.Value)
+            .ToArray();
+        double[] modelValues = probabilities
+            .Where(point => point.ModelProbability is not null)
+            .Select(point => point.ModelProbability!.Value)
+            .ToArray();
+
+        if (midpointValues.Length >= 2)
+        {
+            DrawUnitLineSeries(
+                canvas,
+                midpointValues,
+                width,
+                height,
+                new SolidColorBrush(Color.FromArgb(0xFF, 0x43, 0xD8, 0xFF)),
+                3);
+        }
+        else if (signalMarketValues.Length >= 2)
+        {
+            DrawUnitLineSeries(
+                canvas,
+                signalMarketValues,
+                width,
+                height,
+                new SolidColorBrush(Color.FromArgb(0xFF, 0x43, 0xD8, 0xFF)),
+                3);
+        }
+
+        if (modelValues.Length >= 2)
+        {
+            DrawUnitLineSeries(
+                canvas,
+                modelValues,
+                width,
+                height,
+                new SolidColorBrush(Color.FromArgb(0xFF, 0xB2, 0x7C, 0xFF)),
+                3);
+        }
+    }
+
+    private static void DrawUnitLineSeries(
+        Canvas canvas,
+        IReadOnlyList<double> values,
+        double width,
+        double height,
+        Brush brush,
+        double strokeThickness)
+    {
+        if (values.Count < 2)
+        {
+            return;
+        }
+
+        double X(int index) => index * (width / (values.Count - 1));
+        double Y(double value) => height - Math.Clamp(value, 0, 1) * height;
+        var line = new Polyline { Stroke = brush, StrokeThickness = strokeThickness };
+        for (int i = 0; i < values.Count; i++)
+        {
+            line.Points.Add(new Point(X(i), Y(values[i])));
+        }
+        canvas.Children.Add(line);
+    }
+
+    private void DrilldownSeriesBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (IsLoaded)
+        {
+            DrawDrilldownChart();
+        }
+    }
+
+    private void DrilldownChartCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        DrawDrilldownChart();
+    }
+
+    private void DrawDrilldownChart()
+    {
+        DrilldownChartCanvas.Children.Clear();
+        double width = DrilldownChartCanvas.ActualWidth;
+        double height = DrilldownChartCanvas.ActualHeight;
+        if (width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        DrawChartGrid(DrilldownChartCanvas, width, height);
+        int selectedIndex = DrilldownSeriesBox.SelectedIndex;
+        if (selectedIndex == 0)
+        {
+            double[] values = _drilldownPrices.Select(point => point.Midpoint).ToArray();
+            if (values.Length >= 2)
+            {
+                DrawUnitLineSeries(
+                    DrilldownChartCanvas,
+                    values,
+                    width,
+                    height,
+                    new SolidColorBrush(Color.FromArgb(0xFF, 0x43, 0xD8, 0xFF)),
+                    3);
+                return;
+            }
+        }
+        else if (selectedIndex == 1)
+        {
+            DrawMarketOverlay(
+                DrilldownChartCanvas,
+                _drilldownPrices,
+                _drilldownProbabilities,
+                width,
+                height);
+            if (_drilldownPrices.Count >= 2
+                || _drilldownProbabilities.Count(point => point.ModelProbability is not null) >= 2)
+            {
+                return;
+            }
+        }
+        else
+        {
+            double[] edgeValues = _drilldownProbabilities
+                .Where(point => point.Edge is not null)
+                .Select(point => point.Edge!.Value)
+                .ToArray();
+            if (edgeValues.Length >= 2)
+            {
+                DrawLineSeries(
+                    DrilldownChartCanvas,
+                    edgeValues,
+                    width,
+                    height,
+                    edgeValues[^1] >= 0 ? "positive" : "negative");
+                return;
+            }
+        }
+
+        AddCanvasText(
+            DrilldownChartCanvas,
+            "No series data yet",
+            16,
+            18,
+            new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
+            14,
+            new FontWeight { Weight = 600 });
     }
 
     private static void DrawLineSeries(
@@ -1231,11 +1541,23 @@ public sealed partial class MainPage : Page
     {
         // Only the Live page shows the equity chart; every other list hides it.
         EquityChartCard.Visibility = Visibility.Collapsed;
+        if (SupportsMarketDrilldown(_selectedDestination) && _selectedDrilldownItem?.MarketId is not null)
+        {
+            CollectionDetailColumn.Width = new GridLength(460);
+            MarketDrilldownPanel.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            HideMarketDrilldown();
+        }
         List<MonitoringListItem> materialized = items.ToList();
         CollectionList.ItemsSource = materialized;
         CollectionEmptyText.Text = "No records yet";
         CollectionEmptyState.Visibility = materialized.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    private static bool SupportsMarketDrilldown(string destination) =>
+        destination is "Markets" or "Signals" or "Positions";
 
     private void RenderMonitoringError(string error)
     {
@@ -1290,9 +1612,14 @@ public sealed partial class MainPage : Page
         NavigationView sender,
         NavigationViewSelectionChangedEventArgs args)
     {
+        string previousDestination = _selectedDestination;
         _selectedDestination = args.IsSettingsSelected
             ? "Settings"
             : (args.SelectedItemContainer?.Tag as string ?? "Dashboard");
+        if (previousDestination != _selectedDestination)
+        {
+            HideMarketDrilldown();
+        }
 
         bool dashboard = _selectedDestination == "Dashboard";
         DashboardView.Visibility = dashboard ? Visibility.Visible : Visibility.Collapsed;
