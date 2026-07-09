@@ -483,6 +483,78 @@ async def test_poll_falls_back_to_limit_price_on_trade_drift(
     assert position.size_shares == Decimal("40.000000")
 
 
+async def test_stale_live_signals_are_expired_not_left_pending(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    # A signal older than the 10-minute live TTL.
+    async with db_sessions.begin() as session:
+        station = Station(
+            icao="KLGA", name="LaGuardia", city="New York City",
+            lat=Decimal("40.77"), lon=Decimal("-73.87"), tz="America/New_York",
+        )
+        session.add(station)
+        await session.flush()
+        market = Market(
+            polymarket_id="pm-stale", event_id="ev-1", yes_token_id="yes-token",
+            no_token_id="no-token", station_id=station.id, market_date=NOW.date(),
+            kind=WeatherKind.HIGH, rules_raw="rules", resolves_at=NOW + timedelta(hours=6),
+            status=MarketStatus.ACTIVE, station_verified=True,
+        )
+        session.add(market)
+        await session.flush()
+        session.add(
+            Signal(
+                market_id=market.id, ts=NOW - timedelta(minutes=30), side=TradeSide.BUY_YES,
+                model_prob=Decimal("0.6"), market_price=Decimal("0.52"), edge=Decimal("0.08"),
+                kelly_frac=Decimal("0.01"), size_usd=Decimal("20"),
+                confidence=SignalConfidence.B, status=SignalStatus.PENDING,
+            )
+        )
+    trader = FakeTrader()
+
+    placed, failed, unconfirmed = await execute_live_signals(
+        _settings(migrated_database_url), db_sessions, trader=trader, geoblock=NOT_BLOCKED
+    )
+
+    assert (placed, failed, unconfirmed) == (0, 0, 0)
+    assert trader.placed == []
+    async with db_sessions() as session:
+        signal = (await session.execute(select(Signal))).scalar_one()
+    assert signal.status is SignalStatus.EXPIRED
+    assert signal.skip_reason == "live_execution_timeout"
+
+
+async def test_order_placed_into_active_kill_switch_is_queued_for_cancel(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await _pending_signal(db_sessions)
+
+    # A trader whose placement engages the kill switch mid-cycle, simulating a
+    # /stop that lands after the readiness check but during placement.
+    class KillMidPlacement(FakeTrader):
+        async def place_gtc_buy(self, **kwargs: object) -> PlacedOrder:
+            async with db_sessions.begin() as session:
+                await session.execute(
+                    RuntimeControl.__table__.update()
+                    .where(RuntimeControl.id == 1)
+                    .values(kill_switch=True)
+                )
+            return await super().place_gtc_buy(**kwargs)
+
+    trader = KillMidPlacement(result=PlacedOrder(order_id="0xrace", status="live"))
+    await execute_live_signals(
+        _settings(migrated_database_url), db_sessions, trader=trader, geoblock=NOT_BLOCKED
+    )
+
+    async with db_sessions() as session:
+        order = (await session.execute(select(Order))).scalar_one()
+    # The fresh order missed the kill switch's sweep; the re-check catches it.
+    assert order.clob_order_id == "0xrace"
+    assert order.status == "cancel_requested"
+
+
 async def test_in_flight_live_exposure_tracks_orders_without_a_position(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:

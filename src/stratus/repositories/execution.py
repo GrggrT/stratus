@@ -45,13 +45,18 @@ class PaperExecutionValue:
     filled_at: datetime
 
 
-async def expire_pending_signals(session: AsyncSession, signal_ids: list[int]) -> int:
+async def expire_pending_signals(
+    session: AsyncSession,
+    signal_ids: list[int],
+    *,
+    reason: str = "paper_execution_timeout",
+) -> int:
     if not signal_ids:
         return 0
     result = await session.execute(
         update(Signal)
         .where(Signal.id.in_(signal_ids), Signal.status == SignalStatus.PENDING)
-        .values(status=SignalStatus.EXPIRED, skip_reason="paper_execution_timeout")
+        .values(status=SignalStatus.EXPIRED, skip_reason=reason)
     )
     return dml_rowcount(result)
 

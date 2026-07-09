@@ -23,6 +23,7 @@ from stratus.db.models import (
 )
 from stratus.db.session import session_factory_scope
 from stratus.repositories.execution import (
+    LIVE_STATUS_CANCEL_REQUESTED,
     LIVE_STATUS_CANCELED,
     LIVE_STATUS_FILLED,
     LIVE_STATUS_SUBMIT_FAILED,
@@ -32,6 +33,7 @@ from stratus.repositories.execution import (
     OpenLiveOrder,
     claim_cancellable_live_orders,
     claim_live_order,
+    expire_pending_signals,
     mark_live_order,
     open_live_orders,
     record_live_bankroll,
@@ -165,6 +167,14 @@ async def execute_live_signals(
                     .order_by(Signal.ts)
                 )
             ).all()
+            # Expire signals too old to place, so they stop counting toward
+            # exposure. Paper does this; live must too or they linger forever.
+            stale_ids = [
+                signal.id for signal, _ in rows if now - signal.ts > LIVE_ORDER_TTL
+            ]
+            await expire_pending_signals(
+                session, stale_ids, reason="live_execution_timeout"
+            )
 
         active = [
             (signal, market) for signal, market in rows if now - signal.ts <= LIVE_ORDER_TTL
@@ -251,6 +261,20 @@ async def execute_live_signals(
                     status=placed_order_status(result.status),
                     placed_at=datetime.now(UTC),
                 )
+                # Close the kill-switch race: if a /stop fired after this
+                # loop's readiness check but before/while placing, the fresh
+                # order missed the kill switch's cancel sweep. Re-check and
+                # queue it for cancellation so it cannot rest unattended.
+                latest = await get_runtime_control(session)
+                if latest.kill_switch or latest.halted_reason:
+                    await mark_live_order(
+                        session, order_id, status=LIVE_STATUS_CANCEL_REQUESTED
+                    )
+                    logger.warning(
+                        "live order %s placed into an active kill switch; "
+                        "queued for cancellation",
+                        result.order_id,
+                    )
             placed += 1
             logger.info(
                 "live order placed: signal=%d order=%s status=%s",
