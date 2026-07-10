@@ -198,20 +198,38 @@ public sealed partial class MainPage : Page
                     RenderJobs((await _apiClient.GetJobsAsync(_lifetime.Token)).Items);
                     break;
                 case "Live":
+                    OverviewResponse liveOverview =
+                        await _apiClient.GetOverviewAsync(_lifetime.Token);
+                    CollectionResponse<CommandItem> liveCommandLog =
+                        await _apiClient.GetCommandsAsync(_lifetime.Token);
                     LiveSummaryDto liveSummary = await _apiClient.GetLiveSummaryAsync(_lifetime.Token);
                     EquityResponse liveEquity = await _apiClient.GetLiveEquityAsync(_lifetime.Token);
                     CollectionResponse<OrderDto> liveOrders =
                         await _apiClient.GetOrdersAsync(_lifetime.Token);
                     CollectionResponse<PositionDto> livePositions =
                         await _apiClient.GetPositionsAsync(_lifetime.Token);
-                    RenderLive(liveSummary, liveEquity.Points, liveOrders.Items, livePositions.Items);
+                    RenderLive(
+                        liveOverview,
+                        liveCommandLog.Items,
+                        liveSummary,
+                        liveEquity.Points,
+                        liveOrders.Items,
+                        livePositions.Items);
                     break;
                 case "Operations":
                     OverviewResponse operationsOverview =
                         await _apiClient.GetOverviewAsync(_lifetime.Token);
                     CollectionResponse<CommandItem> commandLog =
                         await _apiClient.GetCommandsAsync(_lifetime.Token);
-                    RenderOperations(operationsOverview, commandLog.Items);
+                    LiveSummaryDto operationsLiveSummary =
+                        await _apiClient.GetLiveSummaryAsync(_lifetime.Token);
+                    CollectionResponse<OrderDto> operationsOrders =
+                        await _apiClient.GetOrdersAsync(_lifetime.Token);
+                    RenderOperations(
+                        operationsOverview,
+                        commandLog.Items,
+                        operationsLiveSummary,
+                        operationsOrders.Items);
                     break;
                 case "Settings":
                     RenderSettings();
@@ -654,7 +672,9 @@ public sealed partial class MainPage : Page
 
     private void RenderOperations(
         OverviewResponse overview,
-        IReadOnlyList<CommandItem> commands)
+        IReadOnlyList<CommandItem> commands,
+        LiveSummaryDto liveSummary,
+        IReadOnlyList<OrderDto> orders)
     {
         _lastRuntime = overview.Runtime;
         List<MonitoringListItem> items =
@@ -694,7 +714,93 @@ public sealed partial class MainPage : Page
                     : $" · executed {LocalTime(command.ExecutedAt.Value)}"),
             Pretty(command.Status))));
         SetCollection(items);
+        RenderControlRoom(
+            "Risk & Live control room",
+            "Runtime, live readiness, command audit, and execution monitor",
+            overview,
+            commands,
+            liveSummary,
+            orders,
+            []);
     }
+
+    private void RenderControlRoom(
+        string title,
+        string subtitle,
+        OverviewResponse overview,
+        IReadOnlyList<CommandItem> commands,
+        LiveSummaryDto liveSummary,
+        IReadOnlyList<OrderDto> orders,
+        IReadOnlyList<PositionDto> positions)
+    {
+        ControlRoomPanel.Visibility = Visibility.Visible;
+        ControlRoomTitle.Text = title;
+        ControlRoomSubtitle.Text = subtitle;
+
+        bool killClear = !overview.Runtime.KillSwitch;
+        bool healthOk = string.Equals(
+            overview.HealthAudit?.Status,
+            "healthy",
+            StringComparison.OrdinalIgnoreCase);
+        bool gatePassed = overview.Validation?.Passed is true;
+        bool credentialConfigured = _credentialSource != "Not configured";
+        bool liveMode = string.Equals(overview.Runtime.Mode, "live", StringComparison.OrdinalIgnoreCase);
+
+        ControlRoomRuntimeText.Text = overview.Runtime.KillSwitch
+            ? "STOPPED"
+            : overview.Runtime.Mode.ToUpperInvariant();
+        ControlRoomRuntimeText.Foreground = AccentBrush(overview.Runtime.KillSwitch ? "negative" : "positive");
+        ControlRoomRuntimeDetailText.Text = overview.Runtime.KillSwitch
+            ? $"Kill switch active{ReasonSuffix(overview.Runtime.HaltedReason)}"
+            : $"Kill switch off · {overview.OpenPositions} open · {overview.PendingSignals} pending signal(s)";
+
+        ControlRoomReadinessText.Text = string.Join(
+            Environment.NewLine,
+            ReadinessLine(killClear, "No active kill switch"),
+            ReadinessLine(healthOk, $"Health audit {overview.HealthAudit?.Status ?? "missing"}"),
+            ReadinessLine(gatePassed, overview.Validation is null
+                ? "Paper gate missing"
+                : $"Paper gate day {overview.Validation.CheckpointDay}"),
+            ReadinessLine(
+                credentialConfigured,
+                credentialConfigured
+                    ? "API credential configured"
+                    : "API credential missing"),
+            ReadinessLine(
+                liveMode,
+                liveMode ? "Runtime LIVE" : "Runtime PAPER; live locked"),
+            "[…] Legal/tax/wallet: backend gated");
+
+        ControlRoomAuditText.Text = commands.Count == 0
+            ? "No operator commands recorded yet"
+            : string.Join(
+                Environment.NewLine,
+                commands.Take(5).Select(command =>
+                    $"{Pretty(command.Status)} · {Pretty(command.Command)} · {LocalTime(command.CreatedAt)}"
+                    + (command.Detail is null ? string.Empty : $" · {command.Detail}")));
+
+        List<OrderDto> liveOrders = orders
+            .Where(order => string.Equals(order.Mode, "live", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        int openLivePositions = positions.Count(position =>
+            string.Equals(position.Mode, "live", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(position.Status, "open", StringComparison.OrdinalIgnoreCase));
+        int redeemPending = positions.Count(position =>
+            string.Equals(position.Mode, "live", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(position.Status, "closed", StringComparison.OrdinalIgnoreCase)
+            && position.PnlUsd is > 0);
+        ControlRoomLiveText.Text = string.Join(
+            Environment.NewLine,
+            $"Positions {liveSummary.Positions} · open {liveSummary.Open} · closed {liveSummary.Closed}",
+            $"P&L {Usd(liveSummary.TotalPnlUsd)} · ROI {Percent(liveSummary.Roi)} · CLV {Number(liveSummary.AvgClv)}",
+            $"Orders {liveOrders.Count} · open positions {openLivePositions}",
+            redeemPending == 0
+                ? "Manual redeem queue clear"
+                : $"{redeemPending} winning position(s) need manual redeem");
+    }
+
+    private static string ReadinessLine(bool passed, string label) =>
+        $"{(passed ? "[OK]" : "[LOCK]")} {label}";
 
     private async void StopButton_Click(object sender, RoutedEventArgs e)
     {
@@ -1021,6 +1127,8 @@ public sealed partial class MainPage : Page
     }
 
     private void RenderLive(
+        OverviewResponse overview,
+        IReadOnlyList<CommandItem> commands,
         LiveSummaryDto summary,
         IReadOnlyList<EquityPointDto> equity,
         IReadOnlyList<OrderDto> orders,
@@ -1071,16 +1179,21 @@ public sealed partial class MainPage : Page
             $"price {Percent(position.AveragePrice)} · size {Usd(position.SizeUsd)}",
             $"P&L {Usd(position.PnlUsd)} · CLV {Percent(position.Clv)} · fees {Usd(position.FeeUsd)}",
             position.ClosedAt is null ? position.PolymarketId : $"Closed · {position.PolymarketId}",
-            Pretty(position.Status))));
+                Pretty(position.Status))));
         SetCollection(items);
+        RenderControlRoom(
+            "Live execution monitor",
+            "Live performance, executor state, pending orders, and manual redeem queue",
+            overview,
+            commands,
+            summary,
+            live,
+            livePositions);
 
         _equityPoints = equity;
-        if (equity.Count >= 2)
-        {
-            _equityChartLabel = "Live realised equity";
-            EquityChartCard.Visibility = Visibility.Visible;
-            DrawEquity();
-        }
+        _equityChartLabel = "Live realised equity";
+        EquityChartCard.Visibility = Visibility.Visible;
+        DrawEquity();
     }
 
     private IReadOnlyList<EquityPointDto> _equityPoints = [];
@@ -1668,8 +1781,29 @@ public sealed partial class MainPage : Page
         EquityCanvas.Children.Clear();
         double width = EquityCanvas.ActualWidth;
         double height = EquityCanvas.ActualHeight;
-        if (_equityPoints.Count < 2 || width <= 1 || height <= 1)
+        if (width <= 1 || height <= 1)
         {
+            return;
+        }
+
+        if (_equityPoints.Count < 2)
+        {
+            EquityChartTitle.Text = $"{_equityChartLabel} — waiting for closed live trades";
+            AddCanvasText(
+                EquityCanvas,
+                "No live equity curve yet",
+                20,
+                24,
+                new SolidColorBrush(Color.FromArgb(0xDD, 0xFF, 0xFF, 0xFF)),
+                18,
+                new FontWeight { Weight = 600 });
+            AddCanvasText(
+                EquityCanvas,
+                "The chart will draw cumulative realised P&L after live positions settle.",
+                20,
+                58,
+                new SolidColorBrush(Color.FromArgb(0xAA, 0xFF, 0xFF, 0xFF)),
+                13);
             return;
         }
 
@@ -1746,9 +1880,10 @@ public sealed partial class MainPage : Page
 
     private void SetCollection(IEnumerable<MonitoringListItem> items)
     {
-        // Only the Live page shows the equity chart; every other list hides it.
+        // Page-specific top panels opt in after SetCollection has reset shared surfaces.
         EquityChartCard.Visibility = Visibility.Collapsed;
         PortfolioAnalyticsPanel.Visibility = Visibility.Collapsed;
+        ControlRoomPanel.Visibility = Visibility.Collapsed;
         if (SupportsMarketDrilldown(_selectedDestination) && _selectedDrilldownItem?.MarketId is not null)
         {
             CollectionDetailColumn.Width = new GridLength(460);

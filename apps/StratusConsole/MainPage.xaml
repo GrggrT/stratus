@@ -460,8 +460,113 @@
                 </Grid.ColumnDefinitions>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
+                <Border
+                    x:Name="ControlRoomPanel"
+                    Grid.Row="0"
+                    Grid.ColumnSpan="2"
+                    Margin="32,0,32,12"
+                    Padding="16"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Visibility="Collapsed">
+                    <Grid RowSpacing="12">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <StackPanel Spacing="4">
+                            <TextBlock x:Name="ControlRoomTitle" FontSize="18" FontWeight="SemiBold" Text="Risk &amp; Live control room" />
+                            <TextBlock
+                                x:Name="ControlRoomSubtitle"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Runtime, live readiness, command audit, and live monitor"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Grid Grid.Row="1" ColumnSpacing="12" RowSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Border
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <StackPanel Spacing="8">
+                                    <TextBlock FontWeight="SemiBold" Text="Runtime state" />
+                                    <TextBlock x:Name="ControlRoomRuntimeText" FontSize="22" FontWeight="SemiBold" Text="Unknown" />
+                                    <TextBlock
+                                        x:Name="ControlRoomRuntimeDetailText"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Runtime data unavailable"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                            <Border
+                                Grid.Column="1"
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <StackPanel Spacing="8">
+                                    <TextBlock FontWeight="SemiBold" Text="Live readiness" />
+                                    <TextBlock
+                                        x:Name="ControlRoomReadinessText"
+                                        FontFamily="Consolas"
+                                        FontSize="13"
+                                        Text="No readiness data"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                            <Border
+                                Grid.Row="1"
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <StackPanel Spacing="8">
+                                    <TextBlock FontWeight="SemiBold" Text="Command audit" />
+                                    <TextBlock
+                                        x:Name="ControlRoomAuditText"
+                                        FontSize="13"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No command audit loaded"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                            <Border
+                                Grid.Row="1"
+                                Grid.Column="1"
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <StackPanel Spacing="8">
+                                    <TextBlock FontWeight="SemiBold" Text="Live monitor" />
+                                    <TextBlock
+                                        x:Name="ControlRoomLiveText"
+                                        FontSize="13"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No live monitor loaded"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </Grid>
+                </Border>
                 <Border
                     x:Name="PortfolioAnalyticsPanel"
                     Grid.Row="0"
@@ -559,7 +664,7 @@
                 </Border>
                 <Border
                     x:Name="EquityChartCard"
-                    Grid.Row="0"
+                    Grid.Row="1"
                     Grid.ColumnSpan="2"
                     Margin="32,0,32,12"
                     Padding="16"
@@ -575,7 +680,7 @@
                 </Border>
                 <ListView
                     x:Name="CollectionList"
-                    Grid.Row="1"
+                    Grid.Row="2"
                     Padding="32,0,32,32"
                     IsItemClickEnabled="True"
                     ItemClick="CollectionList_ItemClick"
