@@ -196,6 +196,21 @@
                             <ComboBoxItem Content="All" />
                         </ComboBox>
                     </AppBarElementContainer>
+                    <AppBarElementContainer
+                        x:Name="CalibrationFilterContainer"
+                        VerticalContentAlignment="Center"
+                        Visibility="Collapsed">
+                        <ComboBox
+                            x:Name="CalibrationFilterBox"
+                            MinWidth="130"
+                            SelectedIndex="0"
+                            SelectionChanged="CalibrationFilterBox_SelectionChanged">
+                            <ComboBoxItem Content="All" />
+                            <ComboBoxItem Content="Mature" />
+                            <ComboBoxItem Content="Needs data" />
+                            <ComboBoxItem Content="Review risk" />
+                        </ComboBox>
+                    </AppBarElementContainer>
                     <AppBarButton
                         x:Name="ApiKeyButton"
                         Click="ApiKeyButton_Click"
@@ -845,6 +860,133 @@
                                             x:Name="MarketNextResolveText"
                                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                             Text="No upcoming resolution loaded"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
+                        </Grid>
+                    </Grid>
+                </Border>
+                <Border
+                    x:Name="CalibrationLabPanel"
+                    Grid.Row="0"
+                    Grid.ColumnSpan="2"
+                    Margin="32,0,32,12"
+                    Padding="16"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Visibility="Collapsed">
+                    <Grid RowSpacing="12">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="4">
+                                <TextBlock FontSize="18" FontWeight="SemiBold" Text="Calibration lab" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Reliability evidence, sample maturity, bias, and Brier risk"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <TextBlock
+                                x:Name="CalibrationLabSummaryText"
+                                Grid.Column="1"
+                                VerticalAlignment="Top"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="No calibration data"
+                                TextWrapping="Wrap" />
+                        </Grid>
+                        <Grid Grid.Row="1" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.45*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <Grid RowSpacing="8">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="220" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <StackPanel>
+                                        <TextBlock FontWeight="SemiBold" Text="Reliability matrix" />
+                                        <TextBlock
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="Cells aggregate station × horizon evidence; green means enough sample and acceptable Brier."
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <Canvas
+                                        x:Name="CalibrationMatrixCanvas"
+                                        Grid.Row="1"
+                                        SizeChanged="CalibrationMatrixCanvas_SizeChanged" />
+                                    <TextBlock
+                                        x:Name="CalibrationMatrixSummaryText"
+                                        Grid.Row="2"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No reliability matrix loaded"
+                                        TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                            <Grid Grid.Column="1" RowSpacing="12">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+                                <Border
+                                    Padding="12"
+                                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                    <Grid RowSpacing="8">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="96" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock FontWeight="SemiBold" Text="Quality mix" />
+                                        <Canvas
+                                            x:Name="CalibrationQualityCanvas"
+                                            Grid.Row="1"
+                                            SizeChanged="CalibrationQualityCanvas_SizeChanged" />
+                                        <TextBlock
+                                            x:Name="CalibrationQualitySummaryText"
+                                            Grid.Row="2"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="No quality mix loaded"
+                                            TextWrapping="Wrap" />
+                                    </Grid>
+                                </Border>
+                                <Border
+                                    Grid.Row="1"
+                                    Padding="12"
+                                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                    <StackPanel Spacing="8">
+                                        <TextBlock FontWeight="SemiBold" Text="Readiness and outliers" />
+                                        <TextBlock
+                                            x:Name="CalibrationReadinessText"
+                                            FontSize="15"
+                                            Text="No readiness data loaded"
+                                            TextWrapping="Wrap" />
+                                        <TextBlock
+                                            x:Name="CalibrationOutlierText"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="No outliers loaded"
                                             TextWrapping="Wrap" />
                                     </StackPanel>
                                 </Border>

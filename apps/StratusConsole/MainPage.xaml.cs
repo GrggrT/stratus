@@ -38,6 +38,7 @@ public sealed partial class MainPage : Page
     private IReadOnlyList<EquityPointDto> _portfolioEquity = [];
     private IReadOnlyList<SignalDto> _signalPanelSignals = [];
     private IReadOnlyList<MarketDto> _marketBoardMarkets = [];
+    private IReadOnlyList<CalibrationDto> _calibrationLabItems = [];
 
     public MainPage()
     {
@@ -1213,14 +1214,383 @@ public sealed partial class MainPage : Page
         DrawPortfolioAnalytics();
     }
 
+    private string _calibrationFilter = "All";
+
+    private async void CalibrationFilterBox_SelectionChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        _calibrationFilter =
+            (CalibrationFilterBox.SelectedItem as ComboBoxItem)?.Content as string ?? "All";
+        await RefreshAsync();
+    }
+
     private void RenderCalibrations(IReadOnlyList<CalibrationDto> calibrations)
     {
-        SetCollection(calibrations.Select(calibration => new MonitoringListItem(
+        List<CalibrationDto> ordered = calibrations
+            .OrderBy(calibration => calibration.StationIcao)
+            .ThenBy(calibration => calibration.HorizonBucket)
+            .ThenBy(calibration => calibration.Kind)
+            .ToList();
+        List<CalibrationDto> filtered = FilterCalibrations(ordered).ToList();
+        _calibrationLabItems = ordered;
+
+        SetCollection(filtered.Select(calibration => new MonitoringListItem(
             $"{calibration.StationIcao} · {calibration.Model.ToUpperInvariant()} · {Pretty(calibration.Kind)}",
             $"Horizon {calibration.HorizonBucket} · n={calibration.SampleCount}",
             $"Bias {calibration.BiasC:+0.00;-0.00;0.00} °C · sigma {calibration.SigmaC:0.00} °C · Brier {Number(calibration.Brier)}",
             $"Updated {LocalTime(calibration.UpdatedAt)}",
-            calibration.SampleCount >= 100 ? "Mature" : "Collecting")));
+            CalibrationStatus(calibration),
+            CalibrationAccent(calibration))));
+        CollectionEmptyText.Text = _calibrationFilter == "All"
+            ? "No calibration records yet"
+            : "No calibration records match this filter";
+        RenderCalibrationLab(ordered, filtered);
+    }
+
+    private IEnumerable<CalibrationDto> FilterCalibrations(IReadOnlyList<CalibrationDto> calibrations) =>
+        _calibrationFilter switch
+        {
+            "Mature" => calibrations.Where(calibration => calibration.SampleCount >= 100),
+            "Needs data" => calibrations.Where(calibration => calibration.SampleCount < 100),
+            "Review risk" => calibrations.Where(IsCalibrationRisky),
+            _ => calibrations,
+        };
+
+    private static bool IsCalibrationRisky(CalibrationDto calibration) =>
+        calibration.Brier is null
+        || calibration.Brier > 0.18
+        || calibration.SampleCount < 30
+        || Math.Abs(calibration.BiasC) > 1.0;
+
+    private static string CalibrationStatus(CalibrationDto calibration)
+    {
+        if (calibration.SampleCount < 30)
+        {
+            return "Sparse";
+        }
+
+        if (calibration.Brier is null)
+        {
+            return "No Brier";
+        }
+
+        if (calibration.SampleCount >= 100 && calibration.Brier <= 0.18 && Math.Abs(calibration.BiasC) <= 1.0)
+        {
+            return "Gate ready";
+        }
+
+        return calibration.Brier <= 0.18 ? "Collecting" : "Review";
+    }
+
+    private static string? CalibrationAccent(CalibrationDto calibration) =>
+        CalibrationStatus(calibration) switch
+        {
+            "Gate ready" => "positive",
+            "Review" or "Sparse" or "No Brier" => "negative",
+            _ => null,
+        };
+
+    private void RenderCalibrationLab(
+        IReadOnlyList<CalibrationDto> calibrations,
+        IReadOnlyList<CalibrationDto> filtered)
+    {
+        CalibrationLabPanel.Visibility = Visibility.Visible;
+        int mature = calibrations.Count(calibration => calibration.SampleCount >= 100);
+        int gateReady = calibrations.Count(calibration => CalibrationStatus(calibration) == "Gate ready");
+        int risk = calibrations.Count(IsCalibrationRisky);
+        int totalSamples = calibrations.Sum(calibration => calibration.SampleCount);
+        double? averageBrier = calibrations
+            .Where(calibration => calibration.Brier is not null)
+            .Select(calibration => calibration.Brier!.Value)
+            .DefaultIfEmpty(double.NaN)
+            .Average();
+        if (double.IsNaN(averageBrier.Value))
+        {
+            averageBrier = null;
+        }
+
+        CalibrationLabSummaryText.Text =
+            $"{filtered.Count}/{calibrations.Count} shown · {gateReady} gate-ready · {risk} review";
+        CalibrationMatrixSummaryText.Text = calibrations.Count == 0
+            ? "No station/horizon calibration rows yet"
+            : $"{calibrations.Select(calibration => calibration.StationIcao).Distinct().Count()} station(s)"
+                + $" · {calibrations.Select(calibration => calibration.HorizonBucket).Distinct().Count()} horizon bucket(s)"
+                + $" · {totalSamples} samples · filter {_calibrationFilter}";
+        CalibrationQualitySummaryText.Text =
+            $"mature {mature} · gate-ready {gateReady} · review {risk} · avg Brier {Number(averageBrier)}";
+        CalibrationReadinessText.Text = calibrations.Count == 0
+            ? "No calibration rows available yet. Paper mode needs resolved markets before this lab can grade model reliability."
+            : $"Gate-ready rows {gateReady}/{calibrations.Count}"
+                + Environment.NewLine
+                + $"Mature rows {mature}/{calibrations.Count} · total samples {totalSamples}";
+
+        CalibrationDto? worstBrier = calibrations
+            .Where(calibration => calibration.Brier is not null)
+            .OrderByDescending(calibration => calibration.Brier)
+            .FirstOrDefault();
+        CalibrationDto? biggestBias = calibrations
+            .OrderByDescending(calibration => Math.Abs(calibration.BiasC))
+            .FirstOrDefault();
+        CalibrationOutlierText.Text = calibrations.Count == 0
+            ? "Expected here: worst Brier, largest absolute bias, and sparse station/horizon buckets."
+            : string.Join(
+                Environment.NewLine,
+                worstBrier is null
+                    ? "Worst Brier: not available"
+                    : $"Worst Brier · {worstBrier.StationIcao} · {worstBrier.HorizonBucket} · {Number(worstBrier.Brier)}",
+                biggestBias is null
+                    ? "Largest bias: not available"
+                    : $"Largest bias · {biggestBias.StationIcao} · {biggestBias.HorizonBucket} · {biggestBias.BiasC:+0.00;-0.00;0.00} °C");
+
+        DrawCalibrationMatrix();
+        DrawCalibrationQualityMix();
+    }
+
+    private void CalibrationMatrixCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (CalibrationLabPanel.Visibility == Visibility.Visible)
+        {
+            DrawCalibrationMatrix();
+        }
+    }
+
+    private void CalibrationQualityCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (CalibrationLabPanel.Visibility == Visibility.Visible)
+        {
+            DrawCalibrationQualityMix();
+        }
+    }
+
+    private void DrawCalibrationMatrix()
+    {
+        CalibrationMatrixCanvas.Children.Clear();
+        double width = CalibrationMatrixCanvas.ActualWidth;
+        double height = CalibrationMatrixCanvas.ActualHeight;
+        if (width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        if (_calibrationLabItems.Count == 0)
+        {
+            AddCanvasText(
+                CalibrationMatrixCanvas,
+                "No calibration evidence yet",
+                18,
+                20,
+                new SolidColorBrush(Color.FromArgb(0xDD, 0xFF, 0xFF, 0xFF)),
+                18,
+                new FontWeight { Weight = 600 });
+            AddCanvasText(
+                CalibrationMatrixCanvas,
+                "Resolved markets will populate station × horizon reliability here. Until then live mode should remain locked by the gate.",
+                18,
+                56,
+                new SolidColorBrush(Color.FromArgb(0xAA, 0xFF, 0xFF, 0xFF)),
+                13);
+            return;
+        }
+
+        var cells = _calibrationLabItems
+            .GroupBy(calibration => new
+            {
+                calibration.StationIcao,
+                calibration.HorizonBucket,
+            })
+            .Select(group => new
+            {
+                group.Key.StationIcao,
+                group.Key.HorizonBucket,
+                Samples = group.Sum(calibration => calibration.SampleCount),
+                AvgBrier = group
+                    .Where(calibration => calibration.Brier is not null)
+                    .Select(calibration => calibration.Brier!.Value)
+                    .DefaultIfEmpty(double.NaN)
+                    .Average(),
+                AvgAbsBias = group.Average(calibration => Math.Abs(calibration.BiasC)),
+                Count = group.Count(),
+            })
+            .OrderBy(cell => cell.StationIcao)
+            .ThenBy(cell => cell.HorizonBucket)
+            .ToList();
+        string[] stations = cells
+            .Select(cell => cell.StationIcao)
+            .Distinct()
+            .OrderBy(station => station)
+            .Take(6)
+            .ToArray();
+        string[] horizons = cells
+            .Select(cell => cell.HorizonBucket)
+            .Distinct()
+            .OrderBy(horizon => horizon)
+            .Take(7)
+            .ToArray();
+        if (stations.Length == 0 || horizons.Length == 0)
+        {
+            return;
+        }
+
+        double left = 76;
+        double top = 28;
+        double gap = 5;
+        double cellWidth = Math.Max(34, (width - left - 6 - gap * (horizons.Length - 1)) / horizons.Length);
+        double cellHeight = Math.Max(26, (height - top - 6 - gap * (stations.Length - 1)) / stations.Length);
+        int maxSamples = Math.Max(1, cells.Max(cell => cell.Samples));
+
+        for (int horizonIndex = 0; horizonIndex < horizons.Length; horizonIndex++)
+        {
+            AddCanvasText(
+                CalibrationMatrixCanvas,
+                horizons[horizonIndex],
+                left + horizonIndex * (cellWidth + gap),
+                4,
+                new SolidColorBrush(Color.FromArgb(0xAA, 0xFF, 0xFF, 0xFF)),
+                11);
+        }
+
+        for (int stationIndex = 0; stationIndex < stations.Length; stationIndex++)
+        {
+            string station = stations[stationIndex];
+            double y = top + stationIndex * (cellHeight + gap);
+            AddCanvasText(
+                CalibrationMatrixCanvas,
+                station,
+                4,
+                y + 6,
+                new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
+                11);
+
+            for (int horizonIndex = 0; horizonIndex < horizons.Length; horizonIndex++)
+            {
+                string horizon = horizons[horizonIndex];
+                var cell = cells.FirstOrDefault(item =>
+                    item.StationIcao == station && item.HorizonBucket == horizon);
+                double x = left + horizonIndex * (cellWidth + gap);
+                if (cell is null)
+                {
+                    var emptyRect = new Rectangle
+                    {
+                        Width = cellWidth,
+                        Height = cellHeight,
+                        RadiusX = 5,
+                        RadiusY = 5,
+                        Stroke = new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF)),
+                        StrokeThickness = 1,
+                        Fill = new SolidColorBrush(Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF)),
+                    };
+                    Canvas.SetLeft(emptyRect, x);
+                    Canvas.SetTop(emptyRect, y);
+                    CalibrationMatrixCanvas.Children.Add(emptyRect);
+                    continue;
+                }
+
+                bool hasBrier = !double.IsNaN(cell.AvgBrier);
+                bool gateReady = hasBrier && cell.Samples >= 100 && cell.AvgBrier <= 0.18 && cell.AvgAbsBias <= 1.0;
+                bool risky = !hasBrier || cell.Samples < 30 || cell.AvgBrier > 0.18 || cell.AvgAbsBias > 1.0;
+                byte alpha = (byte)Math.Clamp(80 + (double)cell.Samples / maxSamples * 150, 80, 230);
+                Brush fill = gateReady
+                    ? new SolidColorBrush(Color.FromArgb(alpha, 0x31, 0xC4, 0x8D))
+                    : risky
+                        ? new SolidColorBrush(Color.FromArgb(alpha, 0xD1, 0x49, 0x5B))
+                        : new SolidColorBrush(Color.FromArgb(alpha, 0x6D, 0x8D, 0xC7));
+                var rect = new Rectangle
+                {
+                    Width = cellWidth,
+                    Height = cellHeight,
+                    RadiusX = 5,
+                    RadiusY = 5,
+                    Fill = fill,
+                };
+                Canvas.SetLeft(rect, x);
+                Canvas.SetTop(rect, y);
+                CalibrationMatrixCanvas.Children.Add(rect);
+                AddCanvasText(
+                    CalibrationMatrixCanvas,
+                    cell.Samples.ToString(CultureInfo.InvariantCulture),
+                    x + 7,
+                    y + 5,
+                    new SolidColorBrush(Colors.White),
+                    11,
+                    new FontWeight { Weight = 600 });
+            }
+        }
+    }
+
+    private void DrawCalibrationQualityMix()
+    {
+        CalibrationQualityCanvas.Children.Clear();
+        double width = CalibrationQualityCanvas.ActualWidth;
+        double height = CalibrationQualityCanvas.ActualHeight;
+        if (width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        int gateReady = _calibrationLabItems.Count(calibration => CalibrationStatus(calibration) == "Gate ready");
+        int collecting = _calibrationLabItems.Count(calibration => CalibrationStatus(calibration) == "Collecting");
+        int mature = _calibrationLabItems.Count(calibration =>
+            calibration.SampleCount >= 100 && CalibrationStatus(calibration) != "Gate ready");
+        int review = _calibrationLabItems.Count(calibration =>
+            CalibrationStatus(calibration) is "Review" or "Sparse" or "No Brier");
+        int total = gateReady + collecting + mature + review;
+        if (total == 0)
+        {
+            AddCanvasText(
+                CalibrationQualityCanvas,
+                "No quality mix yet",
+                12,
+                16,
+                new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
+                13,
+                new FontWeight { Weight = 600 });
+            return;
+        }
+
+        double x = 0;
+        double y = 28;
+        double barHeight = 28;
+        (string Label, int Count, Brush Brush)[] segments =
+        [
+            ("Gate", gateReady, AccentBrush("positive")),
+            ("Collecting", collecting, new SolidColorBrush(Color.FromArgb(0xFF, 0x6D, 0x8D, 0xC7))),
+            ("Mature review", mature, new SolidColorBrush(Color.FromArgb(0xFF, 0xC7, 0x9A, 0x3D))),
+            ("Risk", review, AccentBrush("negative")),
+        ];
+        foreach ((string label, int count, Brush brush) in segments.Where(segment => segment.Count > 0))
+        {
+            double segmentWidth = Math.Max(3, width * count / total);
+            var rect = new Rectangle
+            {
+                Width = segmentWidth,
+                Height = barHeight,
+                RadiusX = 4,
+                RadiusY = 4,
+                Fill = brush,
+            };
+            Canvas.SetLeft(rect, x);
+            Canvas.SetTop(rect, y);
+            CalibrationQualityCanvas.Children.Add(rect);
+            if (segmentWidth > 72)
+            {
+                AddCanvasText(
+                    CalibrationQualityCanvas,
+                    $"{label} {count}",
+                    x + 8,
+                    y + 5,
+                    new SolidColorBrush(Colors.White),
+                    11,
+                    new FontWeight { Weight = 600 });
+            }
+
+            x += segmentWidth;
+        }
     }
 
     private void RenderJobs(IReadOnlyList<JobDto> jobs)
@@ -2449,6 +2819,7 @@ public sealed partial class MainPage : Page
         ControlRoomPanel.Visibility = Visibility.Collapsed;
         SignalIntelligencePanel.Visibility = Visibility.Collapsed;
         MarketBoardPanel.Visibility = Visibility.Collapsed;
+        CalibrationLabPanel.Visibility = Visibility.Collapsed;
         if (SupportsMarketDrilldown(_selectedDestination) && _selectedDrilldownItem?.MarketId is not null)
         {
             CollectionDetailColumn.Width = new GridLength(460);
@@ -2549,6 +2920,8 @@ public sealed partial class MainPage : Page
             _selectedDestination == "Signals" ? Visibility.Visible : Visibility.Collapsed;
         MarketsFilterContainer.Visibility =
             _selectedDestination == "Markets" ? Visibility.Visible : Visibility.Collapsed;
+        CalibrationFilterContainer.Visibility =
+            _selectedDestination == "Calibration" ? Visibility.Visible : Visibility.Collapsed;
         ApiKeyButton.Visibility =
             _selectedDestination == "Settings" ? Visibility.Visible : Visibility.Collapsed;
 
