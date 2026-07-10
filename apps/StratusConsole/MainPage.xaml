@@ -463,6 +463,101 @@
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
                 <Border
+                    x:Name="PortfolioAnalyticsPanel"
+                    Grid.Row="0"
+                    Grid.ColumnSpan="2"
+                    Margin="32,0,32,12"
+                    Padding="16"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Visibility="Collapsed">
+                    <Grid RowSpacing="12">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <StackPanel Spacing="4">
+                            <TextBlock FontSize="18" FontWeight="SemiBold" Text="Portfolio analytics" />
+                            <TextBlock
+                                x:Name="PortfolioAnalyticsSubtitle"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Open exposure, realised equity, and mark-to-market risk"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Grid Grid.Row="1" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.35*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <Grid RowSpacing="8">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="220" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <StackPanel>
+                                        <TextBlock FontWeight="SemiBold" Text="Equity and open P&amp;L" />
+                                        <TextBlock
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="Realised curve plus current unrealised mark"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <Canvas
+                                        x:Name="PortfolioEquityCanvas"
+                                        Grid.Row="1"
+                                        SizeChanged="PortfolioEquityCanvas_SizeChanged" />
+                                    <TextBlock
+                                        x:Name="PortfolioEquitySummaryText"
+                                        Grid.Row="2"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No portfolio series loaded"
+                                        TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                            <Border
+                                Grid.Column="1"
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <Grid RowSpacing="8">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="220" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <StackPanel>
+                                        <TextBlock FontWeight="SemiBold" Text="Exposure heatmap" />
+                                        <TextBlock
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="Station × date open cost, coloured by unrealised P&amp;L"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <Canvas
+                                        x:Name="PortfolioExposureCanvas"
+                                        Grid.Row="1"
+                                        SizeChanged="PortfolioExposureCanvas_SizeChanged" />
+                                    <TextBlock
+                                        x:Name="PortfolioExposureSummaryText"
+                                        Grid.Row="2"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No open exposure"
+                                        TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                        </Grid>
+                    </Grid>
+                </Border>
+                <Border
                     x:Name="EquityChartCard"
                     Grid.Row="0"
                     Grid.ColumnSpan="2"

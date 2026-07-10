@@ -34,6 +34,8 @@ public sealed partial class MainPage : Page
     private IReadOnlyList<ProbabilityPointDto> _drilldownProbabilities = [];
     private OrderBookResponse? _drilldownOrderBook;
     private MonitoringListItem? _selectedDrilldownItem;
+    private IReadOnlyList<PositionDto> _portfolioPositions = [];
+    private IReadOnlyList<EquityPointDto> _portfolioEquity = [];
 
     public MainPage()
     {
@@ -302,6 +304,8 @@ public sealed partial class MainPage : Page
             ? open.Sum(p => p.UnrealizedPnlUsd ?? 0)
             : null;
         double realized = closed.Sum(p => p.PnlUsd ?? 0);
+        _portfolioPositions = positions;
+        _portfolioEquity = paperEquity;
 
         CockpitUnrealizedText.Text = Signed(unrealized);
         CockpitUnrealizedText.Foreground = AccentBrush(PnlAccent(unrealized));
@@ -615,14 +619,17 @@ public sealed partial class MainPage : Page
                 position.MarketId);
         }));
         SetCollection(items);
-
-        _equityPoints = paperEquity;
-        if (paperEquity.Count >= 2)
-        {
-            _equityChartLabel = "Paper realised equity";
-            EquityChartCard.Visibility = Visibility.Visible;
-            DrawEquity();
-        }
+        PortfolioAnalyticsPanel.Visibility = Visibility.Visible;
+        PortfolioAnalyticsSubtitle.Text =
+            $"{open.Count} open · {closed.Count} closed · open cost {Usd(openCost)}"
+            + $" · unrealised {Signed(unrealized)} · realised {Signed(realized)}";
+        PortfolioEquitySummaryText.Text =
+            $"Realised {Signed(realized)} · unrealised {Signed(unrealized)}"
+            + $" · total mark {Signed((unrealized ?? 0) + realized)}";
+        PortfolioExposureSummaryText.Text =
+            $"{open.Count} open position(s) across "
+            + $"{open.Select(p => p.StationIcao ?? "Unmapped").Distinct().Count()} station(s)";
+        DrawPortfolioAnalytics();
     }
 
     private void RenderCalibrations(IReadOnlyList<CalibrationDto> calibrations)
@@ -1448,6 +1455,206 @@ public sealed partial class MainPage : Page
         canvas.Children.Add(block);
     }
 
+    private void PortfolioEquityCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (PortfolioAnalyticsPanel.Visibility == Visibility.Visible)
+        {
+            DrawPortfolioEquity();
+        }
+    }
+
+    private void PortfolioExposureCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (PortfolioAnalyticsPanel.Visibility == Visibility.Visible)
+        {
+            DrawPortfolioExposureHeatmap();
+        }
+    }
+
+    private void DrawPortfolioAnalytics()
+    {
+        DrawPortfolioEquity();
+        DrawPortfolioExposureHeatmap();
+    }
+
+    private void DrawPortfolioEquity()
+    {
+        PortfolioEquityCanvas.Children.Clear();
+        double width = PortfolioEquityCanvas.ActualWidth;
+        double height = PortfolioEquityCanvas.ActualHeight;
+        if (width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        DrawChartGrid(PortfolioEquityCanvas, width, height);
+        List<double> realised = _portfolioEquity
+            .Select(point => point.CumulativePnlUsd)
+            .ToList();
+        double unrealised = _portfolioPositions
+            .Where(position => string.Equals(position.Status, "open", StringComparison.OrdinalIgnoreCase))
+            .Sum(position => position.UnrealizedPnlUsd ?? 0);
+        double lastRealised = realised.Count == 0 ? 0 : realised[^1];
+        double markToMarket = lastRealised + unrealised;
+        List<double> values = realised.Count >= 2 ? realised : [0, lastRealised];
+        values.Add(markToMarket);
+
+        DrawLineSeries(
+            PortfolioEquityCanvas,
+            values,
+            width,
+            height,
+            PnlAccent(markToMarket));
+        AddCanvasText(
+            PortfolioEquityCanvas,
+            $"mark {Signed(markToMarket)}",
+            16,
+            14,
+            AccentBrush(PnlAccent(markToMarket)),
+            14,
+            new FontWeight { Weight = 600 });
+        AddCanvasText(
+            PortfolioEquityCanvas,
+            $"realised {Signed(lastRealised)} · unrealised {Signed(unrealised)}",
+            16,
+            36,
+            new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
+            12);
+    }
+
+    private void DrawPortfolioExposureHeatmap()
+    {
+        PortfolioExposureCanvas.Children.Clear();
+        double width = PortfolioExposureCanvas.ActualWidth;
+        double height = PortfolioExposureCanvas.ActualHeight;
+        if (width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        List<PositionDto> open = _portfolioPositions
+            .Where(position => string.Equals(position.Status, "open", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (open.Count == 0)
+        {
+            AddCanvasText(
+                PortfolioExposureCanvas,
+                "No open exposure",
+                16,
+                18,
+                new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
+                14,
+                new FontWeight { Weight = 600 });
+            return;
+        }
+
+        var cells = open
+            .GroupBy(position => new
+            {
+                Station = position.StationIcao ?? "Unmapped",
+                position.MarketDate,
+            })
+            .Select(group => new
+            {
+                group.Key.Station,
+                group.Key.MarketDate,
+                Cost = group.Sum(position => position.SizeUsd),
+                Pnl = group.Sum(position => position.UnrealizedPnlUsd ?? 0),
+                Count = group.Count(),
+            })
+            .OrderBy(cell => cell.Station)
+            .ThenBy(cell => cell.MarketDate)
+            .ToList();
+        string[] stations = cells.Select(cell => cell.Station).Distinct().Take(5).ToArray();
+        DateOnly[] dates = cells.Select(cell => cell.MarketDate).Distinct().Order().Take(6).ToArray();
+        if (stations.Length == 0 || dates.Length == 0)
+        {
+            return;
+        }
+
+        double left = 58;
+        double top = 28;
+        double cellGap = 5;
+        double cellWidth = Math.Max(28, (width - left - 6 - cellGap * (dates.Length - 1)) / dates.Length);
+        double cellHeight = Math.Max(28, (height - top - 6 - cellGap * (stations.Length - 1)) / stations.Length);
+        double maxCost = Math.Max(1, cells.Max(cell => cell.Cost));
+
+        for (int dateIndex = 0; dateIndex < dates.Length; dateIndex++)
+        {
+            AddCanvasText(
+                PortfolioExposureCanvas,
+                dates[dateIndex].ToString("MM-dd", CultureInfo.InvariantCulture),
+                left + dateIndex * (cellWidth + cellGap),
+                4,
+                new SolidColorBrush(Color.FromArgb(0xAA, 0xFF, 0xFF, 0xFF)),
+                11);
+        }
+
+        for (int stationIndex = 0; stationIndex < stations.Length; stationIndex++)
+        {
+            string station = stations[stationIndex];
+            double y = top + stationIndex * (cellHeight + cellGap);
+            AddCanvasText(
+                PortfolioExposureCanvas,
+                station,
+                4,
+                y + 6,
+                new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
+                11);
+            for (int dateIndex = 0; dateIndex < dates.Length; dateIndex++)
+            {
+                DateOnly date = dates[dateIndex];
+                var cell = cells.FirstOrDefault(item =>
+                    item.Station == station && item.MarketDate == date);
+                double x = left + dateIndex * (cellWidth + cellGap);
+                if (cell is null)
+                {
+                    var emptyRect = new Rectangle
+                    {
+                        Width = cellWidth,
+                        Height = cellHeight,
+                        RadiusX = 5,
+                        RadiusY = 5,
+                        Stroke = new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF)),
+                        StrokeThickness = 1,
+                        Fill = new SolidColorBrush(Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF)),
+                    };
+                    Canvas.SetLeft(emptyRect, x);
+                    Canvas.SetTop(emptyRect, y);
+                    PortfolioExposureCanvas.Children.Add(emptyRect);
+                    continue;
+                }
+
+                byte alpha = (byte)Math.Clamp(70 + cell.Cost / maxCost * 160, 70, 230);
+                Color baseColor = cell.Pnl switch
+                {
+                    > 0 => Color.FromArgb(alpha, 0x31, 0xC4, 0x8D),
+                    < 0 => Color.FromArgb(alpha, 0xF8, 0x51, 0x49),
+                    _ => Color.FromArgb(alpha, 0x4C, 0xB3, 0xFF),
+                };
+                var rect = new Rectangle
+                {
+                    Width = cellWidth,
+                    Height = cellHeight,
+                    RadiusX = 5,
+                    RadiusY = 5,
+                    Fill = new SolidColorBrush(baseColor),
+                };
+                Canvas.SetLeft(rect, x);
+                Canvas.SetTop(rect, y);
+                PortfolioExposureCanvas.Children.Add(rect);
+
+                AddCanvasText(
+                    PortfolioExposureCanvas,
+                    $"{Usd(cell.Cost)}\n{Signed(cell.Pnl)}",
+                    x + 5,
+                    y + 4,
+                    new SolidColorBrush(Colors.White),
+                    10);
+            }
+        }
+    }
+
     private void EquityCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (EquityChartCard.Visibility == Visibility.Visible)
@@ -1541,6 +1748,7 @@ public sealed partial class MainPage : Page
     {
         // Only the Live page shows the equity chart; every other list hides it.
         EquityChartCard.Visibility = Visibility.Collapsed;
+        PortfolioAnalyticsPanel.Visibility = Visibility.Collapsed;
         if (SupportsMarketDrilldown(_selectedDestination) && _selectedDrilldownItem?.MarketId is not null)
         {
             CollectionDetailColumn.Width = new GridLength(460);
