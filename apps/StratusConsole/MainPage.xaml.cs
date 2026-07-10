@@ -37,6 +37,7 @@ public sealed partial class MainPage : Page
     private IReadOnlyList<PositionDto> _portfolioPositions = [];
     private IReadOnlyList<EquityPointDto> _portfolioEquity = [];
     private IReadOnlyList<SignalDto> _signalPanelSignals = [];
+    private IReadOnlyList<MarketDto> _marketBoardMarkets = [];
 
     public MainPage()
     {
@@ -542,7 +543,13 @@ public sealed partial class MainPage : Page
 
     private void RenderMarkets(IReadOnlyList<MarketDto> markets)
     {
-        SetCollection(markets.Select(market => new MonitoringListItem(
+        List<MarketDto> ordered = markets
+            .OrderBy(market => market.ResolvesAt)
+            .ToList();
+        List<MarketDto> filtered = FilterMarkets(ordered).ToList();
+        _marketBoardMarkets = ordered;
+
+        SetCollection(filtered.Select(market => new MonitoringListItem(
             $"{market.StationIcao ?? "Unmapped"} · {market.MarketDate:yyyy-MM-dd} · {Pretty(market.Kind)}",
             $"{market.City ?? "Unknown city"} · bucket {TemperatureRange(market.BucketLowC, market.BucketHighC)}",
             market.StationVerified
@@ -550,7 +557,341 @@ public sealed partial class MainPage : Page
                 : $"Verification blocked{ReasonSuffix(HumanizeReasons(market.VerificationReason))}",
             $"Resolves {LocalTime(market.ResolvesAt)} · market #{market.Id}",
             Pretty(market.Status),
-            MarketId: market.Id)));
+            MarketAccent(market),
+            market.Id)));
+        RenderMarketBoard(ordered, filtered);
+    }
+
+    private string _marketsFilter = "Active";
+
+    private async void MarketsFilterBox_SelectionChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        _marketsFilter =
+            (MarketsFilterBox.SelectedItem as ComboBoxItem)?.Content as string ?? "Active";
+        await RefreshAsync();
+    }
+
+    private IEnumerable<MarketDto> FilterMarkets(IReadOnlyList<MarketDto> markets)
+    {
+        DateTimeOffset soon = DateTimeOffset.Now.AddHours(36);
+        return _marketsFilter switch
+        {
+            "Resolving soon" => markets.Where(market =>
+                IsMarketStatus(market, "active") && market.ResolvesAt <= soon),
+            "Needs verify" => markets.Where(market => !market.StationVerified),
+            "Blocked" => markets.Where(market => IsMarketStatus(market, "blocked")),
+            "All" => markets,
+            _ => markets.Where(market => IsMarketStatus(market, "active")),
+        };
+    }
+
+    private static bool IsMarketStatus(MarketDto market, string status) =>
+        market.Status.Equals(status, StringComparison.OrdinalIgnoreCase);
+
+    private static string? MarketAccent(MarketDto market) =>
+        !market.StationVerified || IsMarketStatus(market, "blocked")
+            ? "negative"
+            : IsMarketStatus(market, "active")
+                ? "positive"
+                : null;
+
+    private void RenderMarketBoard(
+        IReadOnlyList<MarketDto> markets,
+        IReadOnlyList<MarketDto> filtered)
+    {
+        MarketBoardPanel.Visibility = Visibility.Visible;
+        int active = markets.Count(market => IsMarketStatus(market, "active"));
+        int blocked = markets.Count(market => IsMarketStatus(market, "blocked"));
+        int resolved = markets.Count(market => IsMarketStatus(market, "resolved"));
+        int verified = markets.Count(market => market.StationVerified);
+        MarketBoardSummaryText.Text =
+            $"{filtered.Count}/{markets.Count} shown · {active} active · {blocked} blocked · {verified} verified";
+
+        MarketCoverageSummaryText.Text = markets.Count == 0
+            ? "No market coverage loaded"
+            : $"{markets.Select(market => market.StationIcao ?? "Unmapped").Distinct().Count()} station(s)"
+                + $" · {markets.Select(market => market.MarketDate).Distinct().Count()} date(s)"
+                + $" · filter {_marketsFilter}";
+
+        MarketStatusSummaryText.Text =
+            $"active {active} · blocked {blocked} · resolved {resolved} · other {Math.Max(0, markets.Count - active - blocked - resolved)}";
+
+        List<MarketDto> needsVerify = markets
+            .Where(market => !market.StationVerified)
+            .Take(4)
+            .ToList();
+        MarketVerificationQueueText.Text = needsVerify.Count == 0
+            ? "Verification queue clear."
+            : string.Join(
+                Environment.NewLine,
+                needsVerify.Select(market =>
+                    $"{market.StationIcao ?? "Unmapped"} · market #{market.Id} · {HumanizeReasons(market.VerificationReason)}"));
+
+        MarketDto? next = markets
+            .Where(market => IsMarketStatus(market, "active"))
+            .OrderBy(market => market.ResolvesAt)
+            .FirstOrDefault();
+        MarketNextResolveText.Text = next is null
+            ? "No active market resolution is queued."
+            : $"Next resolve · {next.StationIcao ?? "Unmapped"} · {next.MarketDate:yyyy-MM-dd}"
+                + $" · {Pretty(next.Kind)} · {LocalTime(next.ResolvesAt)}";
+
+        DrawMarketCoverage();
+        DrawMarketStatusMix();
+    }
+
+    private void MarketCoverageCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (MarketBoardPanel.Visibility == Visibility.Visible)
+        {
+            DrawMarketCoverage();
+        }
+    }
+
+    private void MarketStatusCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (MarketBoardPanel.Visibility == Visibility.Visible)
+        {
+            DrawMarketStatusMix();
+        }
+    }
+
+    private void DrawMarketCoverage()
+    {
+        MarketCoverageCanvas.Children.Clear();
+        double width = MarketCoverageCanvas.ActualWidth;
+        double height = MarketCoverageCanvas.ActualHeight;
+        if (width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        List<MarketDto> markets = _marketBoardMarkets.ToList();
+        if (markets.Count == 0)
+        {
+            AddCanvasText(
+                MarketCoverageCanvas,
+                "No markets yet",
+                18,
+                20,
+                new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
+                16,
+                new FontWeight { Weight = 600 });
+            AddCanvasText(
+                MarketCoverageCanvas,
+                "Run discovery to populate station/date market coverage.",
+                18,
+                52,
+                new SolidColorBrush(Color.FromArgb(0xAA, 0xFF, 0xFF, 0xFF)),
+                13);
+            return;
+        }
+
+        var cells = markets
+            .GroupBy(market => new
+            {
+                Station = market.StationIcao ?? "Unmapped",
+                market.MarketDate,
+            })
+            .Select(group => new
+            {
+                group.Key.Station,
+                group.Key.MarketDate,
+                Count = group.Count(),
+                Verified = group.Count(market => market.StationVerified),
+                Blocked = group.Count(market => IsMarketStatus(market, "blocked")),
+                Active = group.Count(market => IsMarketStatus(market, "active")),
+                Sample = group.OrderBy(market => market.ResolvesAt).First(),
+            })
+            .OrderBy(cell => cell.Station)
+            .ThenBy(cell => cell.MarketDate)
+            .ToList();
+        string[] stations = cells
+            .Select(cell => cell.Station)
+            .Distinct()
+            .OrderBy(station => station)
+            .Take(6)
+            .ToArray();
+        DateOnly[] dates = cells
+            .Select(cell => cell.MarketDate)
+            .Distinct()
+            .OrderBy(date => date)
+            .Take(7)
+            .ToArray();
+        if (stations.Length == 0 || dates.Length == 0)
+        {
+            return;
+        }
+
+        double left = 64;
+        double top = 28;
+        double gap = 5;
+        double cellWidth = Math.Max(32, (width - left - 6 - gap * (dates.Length - 1)) / dates.Length);
+        double cellHeight = Math.Max(26, (height - top - 6 - gap * (stations.Length - 1)) / stations.Length);
+        int maxCount = Math.Max(1, cells.Max(cell => cell.Count));
+
+        for (int dateIndex = 0; dateIndex < dates.Length; dateIndex++)
+        {
+            AddCanvasText(
+                MarketCoverageCanvas,
+                dates[dateIndex].ToString("MM-dd", CultureInfo.InvariantCulture),
+                left + dateIndex * (cellWidth + gap),
+                4,
+                new SolidColorBrush(Color.FromArgb(0xAA, 0xFF, 0xFF, 0xFF)),
+                11);
+        }
+
+        for (int stationIndex = 0; stationIndex < stations.Length; stationIndex++)
+        {
+            string station = stations[stationIndex];
+            double y = top + stationIndex * (cellHeight + gap);
+            AddCanvasText(
+                MarketCoverageCanvas,
+                station,
+                4,
+                y + 6,
+                new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
+                11);
+
+            for (int dateIndex = 0; dateIndex < dates.Length; dateIndex++)
+            {
+                DateOnly date = dates[dateIndex];
+                var cell = cells.FirstOrDefault(item =>
+                    item.Station == station && item.MarketDate == date);
+                double x = left + dateIndex * (cellWidth + gap);
+                if (cell is null)
+                {
+                    var emptyRect = new Rectangle
+                    {
+                        Width = cellWidth,
+                        Height = cellHeight,
+                        RadiusX = 5,
+                        RadiusY = 5,
+                        Stroke = new SolidColorBrush(Color.FromArgb(0x22, 0xFF, 0xFF, 0xFF)),
+                        StrokeThickness = 1,
+                        Fill = new SolidColorBrush(Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF)),
+                    };
+                    Canvas.SetLeft(emptyRect, x);
+                    Canvas.SetTop(emptyRect, y);
+                    MarketCoverageCanvas.Children.Add(emptyRect);
+                    continue;
+                }
+
+                byte alpha = (byte)Math.Clamp(80 + (double)cell.Count / maxCount * 150, 80, 230);
+                Brush fill = cell.Blocked > 0 || cell.Verified < cell.Count
+                    ? new SolidColorBrush(Color.FromArgb(alpha, 0xD1, 0x49, 0x5B))
+                    : cell.Active > 0
+                        ? new SolidColorBrush(Color.FromArgb(alpha, 0x31, 0xC4, 0x8D))
+                        : new SolidColorBrush(Color.FromArgb(alpha, 0x8A, 0x8A, 0x8A));
+                var rect = new Rectangle
+                {
+                    Width = cellWidth,
+                    Height = cellHeight,
+                    RadiusX = 5,
+                    RadiusY = 5,
+                    Fill = fill,
+                };
+                Canvas.SetLeft(rect, x);
+                Canvas.SetTop(rect, y);
+                MarketCoverageCanvas.Children.Add(rect);
+                AddCanvasText(
+                    MarketCoverageCanvas,
+                    cell.Count.ToString(CultureInfo.InvariantCulture),
+                    x + 7,
+                    y + 5,
+                    new SolidColorBrush(Colors.White),
+                    11,
+                    new FontWeight { Weight = 600 });
+            }
+        }
+    }
+
+    private void DrawMarketStatusMix()
+    {
+        MarketStatusCanvas.Children.Clear();
+        double width = MarketStatusCanvas.ActualWidth;
+        double height = MarketStatusCanvas.ActualHeight;
+        if (width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        int active = _marketBoardMarkets.Count(market => IsMarketStatus(market, "active"));
+        int blocked = _marketBoardMarkets.Count(market => IsMarketStatus(market, "blocked"));
+        int resolved = _marketBoardMarkets.Count(market => IsMarketStatus(market, "resolved"));
+        int unverified = _marketBoardMarkets.Count(market => !market.StationVerified);
+        int other = Math.Max(0, _marketBoardMarkets.Count - active - blocked - resolved);
+        int total = active + blocked + resolved + other;
+        if (total == 0)
+        {
+            AddCanvasText(
+                MarketStatusCanvas,
+                "No status mix yet",
+                12,
+                16,
+                new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
+                13,
+                new FontWeight { Weight = 600 });
+            return;
+        }
+
+        double x = 0;
+        double y = 28;
+        double barHeight = 28;
+        (string Label, int Count, Brush Brush)[] segments =
+        [
+            ("Active", active, AccentBrush("positive")),
+            ("Blocked", blocked, AccentBrush("negative")),
+            ("Resolved", resolved, new SolidColorBrush(Color.FromArgb(0xFF, 0x8A, 0x8A, 0x8A))),
+            ("Other", other, new SolidColorBrush(Color.FromArgb(0xFF, 0x6D, 0x8D, 0xC7))),
+        ];
+        foreach ((string label, int count, Brush brush) in segments.Where(segment => segment.Count > 0))
+        {
+            double segmentWidth = Math.Max(3, width * count / total);
+            var rect = new Rectangle
+            {
+                Width = segmentWidth,
+                Height = barHeight,
+                RadiusX = 4,
+                RadiusY = 4,
+                Fill = brush,
+            };
+            Canvas.SetLeft(rect, x);
+            Canvas.SetTop(rect, y);
+            MarketStatusCanvas.Children.Add(rect);
+            if (segmentWidth > 70)
+            {
+                AddCanvasText(
+                    MarketStatusCanvas,
+                    $"{label} {count}",
+                    x + 8,
+                    y + 5,
+                    new SolidColorBrush(Colors.White),
+                    11,
+                    new FontWeight { Weight = 600 });
+            }
+
+            x += segmentWidth;
+        }
+
+        if (unverified > 0)
+        {
+            AddCanvasText(
+                MarketStatusCanvas,
+                $"{unverified} unverified",
+                0,
+                68,
+                AccentBrush("negative"),
+                12,
+                new FontWeight { Weight = 600 });
+        }
     }
 
     private string _signalsFilter = "All";
@@ -2107,6 +2448,7 @@ public sealed partial class MainPage : Page
         PortfolioAnalyticsPanel.Visibility = Visibility.Collapsed;
         ControlRoomPanel.Visibility = Visibility.Collapsed;
         SignalIntelligencePanel.Visibility = Visibility.Collapsed;
+        MarketBoardPanel.Visibility = Visibility.Collapsed;
         if (SupportsMarketDrilldown(_selectedDestination) && _selectedDrilldownItem?.MarketId is not null)
         {
             CollectionDetailColumn.Width = new GridLength(460);
@@ -2205,6 +2547,8 @@ public sealed partial class MainPage : Page
             _selectedDestination == "Positions" ? Visibility.Visible : Visibility.Collapsed;
         SignalsFilterContainer.Visibility =
             _selectedDestination == "Signals" ? Visibility.Visible : Visibility.Collapsed;
+        MarketsFilterContainer.Visibility =
+            _selectedDestination == "Markets" ? Visibility.Visible : Visibility.Collapsed;
         ApiKeyButton.Visibility =
             _selectedDestination == "Settings" ? Visibility.Visible : Visibility.Collapsed;
 

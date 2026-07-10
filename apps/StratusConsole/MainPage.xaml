@@ -180,6 +180,22 @@
                             <ComboBoxItem Content="All" />
                         </ComboBox>
                     </AppBarElementContainer>
+                    <AppBarElementContainer
+                        x:Name="MarketsFilterContainer"
+                        VerticalContentAlignment="Center"
+                        Visibility="Collapsed">
+                        <ComboBox
+                            x:Name="MarketsFilterBox"
+                            MinWidth="140"
+                            SelectedIndex="0"
+                            SelectionChanged="MarketsFilterBox_SelectionChanged">
+                            <ComboBoxItem Content="Active" />
+                            <ComboBoxItem Content="Resolving soon" />
+                            <ComboBoxItem Content="Needs verify" />
+                            <ComboBoxItem Content="Blocked" />
+                            <ComboBoxItem Content="All" />
+                        </ComboBox>
+                    </AppBarElementContainer>
                     <AppBarButton
                         x:Name="ApiKeyButton"
                         Click="ApiKeyButton_Click"
@@ -702,6 +718,133 @@
                                             x:Name="SignalSkipSummaryText"
                                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                             Text="No skip summary loaded"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
+                        </Grid>
+                    </Grid>
+                </Border>
+                <Border
+                    x:Name="MarketBoardPanel"
+                    Grid.Row="0"
+                    Grid.ColumnSpan="2"
+                    Margin="32,0,32,12"
+                    Padding="16"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Visibility="Collapsed">
+                    <Grid RowSpacing="12">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="4">
+                                <TextBlock FontSize="18" FontWeight="SemiBold" Text="Market board" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Station/date coverage, verification state, and resolution queue"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <TextBlock
+                                x:Name="MarketBoardSummaryText"
+                                Grid.Column="1"
+                                VerticalAlignment="Top"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="No market data"
+                                TextWrapping="Wrap" />
+                        </Grid>
+                        <Grid Grid.Row="1" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.45*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <Grid RowSpacing="8">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="220" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <StackPanel>
+                                        <TextBlock FontWeight="SemiBold" Text="Station/date coverage" />
+                                        <TextBlock
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="Cells show available markets by station and market date; color follows market state."
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <Canvas
+                                        x:Name="MarketCoverageCanvas"
+                                        Grid.Row="1"
+                                        SizeChanged="MarketCoverageCanvas_SizeChanged" />
+                                    <TextBlock
+                                        x:Name="MarketCoverageSummaryText"
+                                        Grid.Row="2"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No coverage loaded"
+                                        TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                            <Grid Grid.Column="1" RowSpacing="12">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+                                <Border
+                                    Padding="12"
+                                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                    <Grid RowSpacing="8">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="96" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock FontWeight="SemiBold" Text="Status mix" />
+                                        <Canvas
+                                            x:Name="MarketStatusCanvas"
+                                            Grid.Row="1"
+                                            SizeChanged="MarketStatusCanvas_SizeChanged" />
+                                        <TextBlock
+                                            x:Name="MarketStatusSummaryText"
+                                            Grid.Row="2"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="No status mix loaded"
+                                            TextWrapping="Wrap" />
+                                    </Grid>
+                                </Border>
+                                <Border
+                                    Grid.Row="1"
+                                    Padding="12"
+                                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                    <StackPanel Spacing="8">
+                                        <TextBlock FontWeight="SemiBold" Text="Verification and resolution" />
+                                        <TextBlock
+                                            x:Name="MarketVerificationQueueText"
+                                            FontSize="15"
+                                            Text="No verification queue loaded"
+                                            TextWrapping="Wrap" />
+                                        <TextBlock
+                                            x:Name="MarketNextResolveText"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="No upcoming resolution loaded"
                                             TextWrapping="Wrap" />
                                     </StackPanel>
                                 </Border>
