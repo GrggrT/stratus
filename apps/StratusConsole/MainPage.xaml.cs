@@ -36,6 +36,7 @@ public sealed partial class MainPage : Page
     private MonitoringListItem? _selectedDrilldownItem;
     private IReadOnlyList<PositionDto> _portfolioPositions = [];
     private IReadOnlyList<EquityPointDto> _portfolioEquity = [];
+    private IReadOnlyList<SignalDto> _signalPanelSignals = [];
 
     public MainPage()
     {
@@ -552,16 +553,237 @@ public sealed partial class MainPage : Page
             MarketId: market.Id)));
     }
 
+    private string _signalsFilter = "All";
+
+    private async void SignalsFilterBox_SelectionChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        _signalsFilter =
+            (SignalsFilterBox.SelectedItem as ComboBoxItem)?.Content as string ?? "All";
+        await RefreshAsync();
+    }
+
     private void RenderSignals(IReadOnlyList<SignalDto> signals)
     {
-        SetCollection(signals.Select(signal => new MonitoringListItem(
+        List<SignalDto> recent = signals
+            .OrderByDescending(signal => signal.Timestamp)
+            .ToList();
+        List<SignalDto> filtered = FilterSignals(recent).ToList();
+        _signalPanelSignals = recent;
+
+        SetCollection(filtered.Select(signal => new MonitoringListItem(
             $"{signal.StationIcao ?? "Unmapped"} · {Pretty(signal.Side)}",
             $"Model {Percent(signal.ModelProbability)} · market {Percent(signal.MarketPrice)} · edge {Percent(signal.Edge)}",
             $"Size {Usd(signal.SizeUsd)} · Kelly {Percent(signal.KellyFraction)} · confidence {signal.Confidence}",
             $"{LocalTime(signal.Timestamp)} · "
                 + (signal.SkipReason is null ? signal.PolymarketId : HumanizeReasons(signal.SkipReason)),
             Pretty(signal.Status),
-            MarketId: signal.MarketId)));
+            IsActionableSignal(signal) ? PnlAccent(signal.Edge) : null,
+            signal.MarketId)));
+        RenderSignalIntelligence(recent, filtered);
+    }
+
+    private IEnumerable<SignalDto> FilterSignals(IReadOnlyList<SignalDto> signals) =>
+        _signalsFilter switch
+        {
+            "Skipped" => signals.Where(signal => !IsActionableSignal(signal)),
+            "A+B" => signals.Where(signal => signal.Confidence is "A" or "B"),
+            "All" => signals,
+            _ => signals.Where(IsActionableSignal),
+        };
+
+    private static bool IsActionableSignal(SignalDto signal) =>
+        signal.SkipReason is null
+        && !signal.Status.Equals("skipped", StringComparison.OrdinalIgnoreCase)
+        && !signal.Status.Equals("expired", StringComparison.OrdinalIgnoreCase);
+
+    private void RenderSignalIntelligence(
+        IReadOnlyList<SignalDto> signals,
+        IReadOnlyList<SignalDto> filtered)
+    {
+        SignalIntelligencePanel.Visibility = Visibility.Visible;
+        int actionable = signals.Count(IsActionableSignal);
+        int skipped = signals.Count - actionable;
+        double averageAbsEdge = signals.Count == 0 ? 0 : signals.Average(signal => Math.Abs(signal.Edge));
+        double actionableSize = signals.Where(IsActionableSignal).Sum(signal => signal.SizeUsd);
+        SignalIntelligenceSummaryText.Text =
+            $"{filtered.Count}/{signals.Count} shown · {actionable} actionable · {skipped} blocked";
+
+        SignalEdgeSummaryText.Text = signals.Count == 0
+            ? "No signal tape loaded"
+            : $"avg |edge| {Percent(averageAbsEdge)} · actionable size {Usd(actionableSize)} · filter {_signalsFilter}";
+
+        int pending = signals.Count(signal => signal.Status.Equals("pending", StringComparison.OrdinalIgnoreCase));
+        int executed = signals.Count(signal => signal.Status.Equals("executed", StringComparison.OrdinalIgnoreCase));
+        int expired = signals.Count(signal => signal.Status.Equals("expired", StringComparison.OrdinalIgnoreCase));
+        SignalMixSummaryText.Text =
+            $"pending {pending} · executed {executed} · skipped {skipped} · expired {expired}";
+
+        SignalDto? top = signals
+            .Where(IsActionableSignal)
+            .OrderByDescending(signal => Math.Abs(signal.Edge))
+            .FirstOrDefault();
+        SignalTopOpportunityText.Text = top is null
+            ? "No actionable signal in the current window."
+            : $"{top.StationIcao ?? "Unmapped"} · {Pretty(top.Side)} · edge {Percent(top.Edge)}"
+                + Environment.NewLine
+                + $"model {Percent(top.ModelProbability)} vs market {Percent(top.MarketPrice)}"
+                + Environment.NewLine
+                + $"size {Usd(top.SizeUsd)} · Kelly {Percent(top.KellyFraction)} · confidence {top.Confidence}";
+
+        List<string> skipReasons = signals
+            .Where(signal => signal.SkipReason is not null)
+            .GroupBy(signal => HumanizeReasons(signal.SkipReason))
+            .OrderByDescending(group => group.Count())
+            .ThenBy(group => group.Key)
+            .Take(3)
+            .Select(group => $"{group.Key}: {group.Count()}")
+            .ToList();
+        SignalSkipSummaryText.Text = skipReasons.Count == 0
+            ? "No structured skip reasons in the current signal window."
+            : "Top blocks · " + string.Join(" · ", skipReasons);
+
+        DrawSignalEdgeTape();
+        DrawSignalDecisionMix();
+    }
+
+    private void SignalEdgeCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (SignalIntelligencePanel.Visibility == Visibility.Visible)
+        {
+            DrawSignalEdgeTape();
+        }
+    }
+
+    private void SignalMixCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (SignalIntelligencePanel.Visibility == Visibility.Visible)
+        {
+            DrawSignalDecisionMix();
+        }
+    }
+
+    private void DrawSignalEdgeTape()
+    {
+        SignalEdgeCanvas.Children.Clear();
+        double width = SignalEdgeCanvas.ActualWidth;
+        double height = SignalEdgeCanvas.ActualHeight;
+        if (width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        List<double> edges = _signalPanelSignals
+            .OrderBy(signal => signal.Timestamp)
+            .TakeLast(40)
+            .Select(signal => signal.Edge)
+            .ToList();
+        if (edges.Count == 0)
+        {
+            AddCanvasText(
+                SignalEdgeCanvas,
+                "No signals yet",
+                18,
+                20,
+                new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
+                16,
+                new FontWeight { Weight = 600 });
+            AddCanvasText(
+                SignalEdgeCanvas,
+                "The tape will fill after signal generation runs.",
+                18,
+                52,
+                new SolidColorBrush(Color.FromArgb(0xAA, 0xFF, 0xFF, 0xFF)),
+                13);
+            return;
+        }
+
+        DrawBarSeries(SignalEdgeCanvas, edges, width, height);
+        SignalDto latest = _signalPanelSignals.OrderByDescending(signal => signal.Timestamp).First();
+        AddCanvasText(
+            SignalEdgeCanvas,
+            $"latest {Percent(latest.Edge)} · {latest.StationIcao ?? "Unmapped"} · {Pretty(latest.Side)}",
+            16,
+            12,
+            new SolidColorBrush(Color.FromArgb(0xDD, 0xFF, 0xFF, 0xFF)),
+            13,
+            new FontWeight { Weight = 600 });
+    }
+
+    private void DrawSignalDecisionMix()
+    {
+        SignalMixCanvas.Children.Clear();
+        double width = SignalMixCanvas.ActualWidth;
+        double height = SignalMixCanvas.ActualHeight;
+        if (width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        int actionable = _signalPanelSignals.Count(IsActionableSignal);
+        int skipped = _signalPanelSignals.Count(signal =>
+            signal.Status.Equals("skipped", StringComparison.OrdinalIgnoreCase));
+        int expired = _signalPanelSignals.Count(signal =>
+            signal.Status.Equals("expired", StringComparison.OrdinalIgnoreCase));
+        int other = Math.Max(0, _signalPanelSignals.Count - actionable - skipped - expired);
+        int total = actionable + skipped + expired + other;
+        if (total == 0)
+        {
+            AddCanvasText(
+                SignalMixCanvas,
+                "No decision mix yet",
+                12,
+                16,
+                new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
+                13,
+                new FontWeight { Weight = 600 });
+            return;
+        }
+
+        double x = 0;
+        double y = 28;
+        double barHeight = 28;
+        (string Label, int Count, Brush Brush)[] segments =
+        [
+            ("Actionable", actionable, AccentBrush("positive")),
+            ("Skipped", skipped, new SolidColorBrush(Color.FromArgb(0xFF, 0x8A, 0x8A, 0x8A))),
+            ("Expired", expired, AccentBrush("negative")),
+            ("Other", other, new SolidColorBrush(Color.FromArgb(0xFF, 0x6D, 0x8D, 0xC7))),
+        ];
+        foreach ((string label, int count, Brush brush) in segments.Where(segment => segment.Count > 0))
+        {
+            double segmentWidth = Math.Max(3, width * count / total);
+            var rect = new Rectangle
+            {
+                Width = segmentWidth,
+                Height = barHeight,
+                RadiusX = 4,
+                RadiusY = 4,
+                Fill = brush,
+            };
+            Canvas.SetLeft(rect, x);
+            Canvas.SetTop(rect, y);
+            SignalMixCanvas.Children.Add(rect);
+            if (segmentWidth > 70)
+            {
+                AddCanvasText(
+                    SignalMixCanvas,
+                    $"{label} {count}",
+                    x + 8,
+                    y + 5,
+                    new SolidColorBrush(Colors.White),
+                    11,
+                    new FontWeight { Weight = 600 });
+            }
+
+            x += segmentWidth;
+        }
     }
 
     private string _positionsFilter = "Open";
@@ -1884,6 +2106,7 @@ public sealed partial class MainPage : Page
         EquityChartCard.Visibility = Visibility.Collapsed;
         PortfolioAnalyticsPanel.Visibility = Visibility.Collapsed;
         ControlRoomPanel.Visibility = Visibility.Collapsed;
+        SignalIntelligencePanel.Visibility = Visibility.Collapsed;
         if (SupportsMarketDrilldown(_selectedDestination) && _selectedDrilldownItem?.MarketId is not null)
         {
             CollectionDetailColumn.Width = new GridLength(460);
@@ -1980,6 +2203,8 @@ public sealed partial class MainPage : Page
             _selectedDestination == "Operations" ? Visibility.Visible : Visibility.Collapsed;
         PositionsFilterContainer.Visibility =
             _selectedDestination == "Positions" ? Visibility.Visible : Visibility.Collapsed;
+        SignalsFilterContainer.Visibility =
+            _selectedDestination == "Signals" ? Visibility.Visible : Visibility.Collapsed;
         ApiKeyButton.Visibility =
             _selectedDestination == "Settings" ? Visibility.Visible : Visibility.Collapsed;
 

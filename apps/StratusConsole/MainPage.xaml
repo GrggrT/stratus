@@ -165,6 +165,21 @@
                             <ComboBoxItem Content="All" />
                         </ComboBox>
                     </AppBarElementContainer>
+                    <AppBarElementContainer
+                        x:Name="SignalsFilterContainer"
+                        VerticalContentAlignment="Center"
+                        Visibility="Collapsed">
+                        <ComboBox
+                            x:Name="SignalsFilterBox"
+                            MinWidth="130"
+                            SelectedIndex="3"
+                            SelectionChanged="SignalsFilterBox_SelectionChanged">
+                            <ComboBoxItem Content="Actionable" />
+                            <ComboBoxItem Content="Skipped" />
+                            <ComboBoxItem Content="A+B" />
+                            <ComboBoxItem Content="All" />
+                        </ComboBox>
+                    </AppBarElementContainer>
                     <AppBarButton
                         x:Name="ApiKeyButton"
                         Click="ApiKeyButton_Click"
@@ -564,6 +579,133 @@
                                         TextWrapping="Wrap" />
                                 </StackPanel>
                             </Border>
+                        </Grid>
+                    </Grid>
+                </Border>
+                <Border
+                    x:Name="SignalIntelligencePanel"
+                    Grid.Row="0"
+                    Grid.ColumnSpan="2"
+                    Margin="32,0,32,12"
+                    Padding="16"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Visibility="Collapsed">
+                    <Grid RowSpacing="12">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="4">
+                                <TextBlock FontSize="18" FontWeight="SemiBold" Text="Signal intelligence" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Edge tape, decision mix, and current opportunity queue"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <TextBlock
+                                x:Name="SignalIntelligenceSummaryText"
+                                Grid.Column="1"
+                                VerticalAlignment="Top"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="No signal data"
+                                TextWrapping="Wrap" />
+                        </Grid>
+                        <Grid Grid.Row="1" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.4*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <Grid RowSpacing="8">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="220" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <StackPanel>
+                                        <TextBlock FontWeight="SemiBold" Text="Recent edge tape" />
+                                        <TextBlock
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="Positive bars indicate model edge over market; negative bars indicate avoid/other side."
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <Canvas
+                                        x:Name="SignalEdgeCanvas"
+                                        Grid.Row="1"
+                                        SizeChanged="SignalEdgeCanvas_SizeChanged" />
+                                    <TextBlock
+                                        x:Name="SignalEdgeSummaryText"
+                                        Grid.Row="2"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No edge series loaded"
+                                        TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                            <Grid Grid.Column="1" RowSpacing="12">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+                                <Border
+                                    Padding="12"
+                                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                    <Grid RowSpacing="8">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="96" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock FontWeight="SemiBold" Text="Decision mix" />
+                                        <Canvas
+                                            x:Name="SignalMixCanvas"
+                                            Grid.Row="1"
+                                            SizeChanged="SignalMixCanvas_SizeChanged" />
+                                        <TextBlock
+                                            x:Name="SignalMixSummaryText"
+                                            Grid.Row="2"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="No decision mix loaded"
+                                            TextWrapping="Wrap" />
+                                    </Grid>
+                                </Border>
+                                <Border
+                                    Grid.Row="1"
+                                    Padding="12"
+                                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                    <StackPanel Spacing="8">
+                                        <TextBlock FontWeight="SemiBold" Text="Opportunity queue" />
+                                        <TextBlock
+                                            x:Name="SignalTopOpportunityText"
+                                            FontSize="15"
+                                            Text="No actionable signal loaded"
+                                            TextWrapping="Wrap" />
+                                        <TextBlock
+                                            x:Name="SignalSkipSummaryText"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="No skip summary loaded"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
                         </Grid>
                     </Grid>
                 </Border>
