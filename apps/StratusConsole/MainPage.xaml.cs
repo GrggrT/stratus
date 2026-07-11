@@ -32,6 +32,8 @@ public sealed partial class MainPage : Page
     private string? _cockpitMarketTitle;
     private IReadOnlyList<MarketPricePointDto> _cockpitMarketPrices = [];
     private IReadOnlyList<ProbabilityPointDto> _cockpitProbabilities = [];
+    private Point? _cockpitHoverPoint;
+    private string _cockpitBaseChartSubtitle = "Realised curve when available; otherwise open mark-to-market distribution";
     private IReadOnlyList<MarketPricePointDto> _drilldownPrices = [];
     private IReadOnlyList<ProbabilityPointDto> _drilldownProbabilities = [];
     private OrderBookResponse? _drilldownOrderBook;
@@ -649,6 +651,7 @@ public sealed partial class MainPage : Page
         RenderOverview(overview);
         _cockpitPositions = positions;
         _cockpitEquity = paperEquity;
+        _cockpitHoverPoint = null;
 
         List<PositionDto> open = positions
             .Where(p => string.Equals(p.Status, "open", StringComparison.OrdinalIgnoreCase))
@@ -1002,6 +1005,7 @@ public sealed partial class MainPage : Page
             _cockpitMarketTitle = item.Title;
             _cockpitMarketPrices = prices.Points;
             _cockpitProbabilities = probabilities.Points;
+            _cockpitHoverPoint = null;
             DrawCockpitChart();
         }
         catch (OperationCanceledException)
@@ -2996,6 +3000,19 @@ public sealed partial class MainPage : Page
         }
     }
 
+    private void CockpitChartCanvas_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        _cockpitHoverPoint = e.GetCurrentPoint(CockpitChartCanvas).Position;
+        DrawCockpitChart();
+    }
+
+    private void CockpitChartCanvas_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        _cockpitHoverPoint = null;
+        CockpitChartSubtitle.Text = _cockpitBaseChartSubtitle;
+        DrawCockpitChart();
+    }
+
     private void DrawCockpitChart()
     {
         CockpitChartCanvas.Children.Clear();
@@ -3022,10 +3039,12 @@ public sealed partial class MainPage : Page
             ProbabilityPointDto? latestSignal = _cockpitProbabilities
                 .LastOrDefault(point => point.Source == "signal");
             CockpitChartTitle.Text = $"Market drill-down · {_cockpitMarketTitle}";
-            CockpitChartSubtitle.Text =
+            _cockpitBaseChartSubtitle =
                 $"mid {Percent(latestPrice?.Midpoint)} · model {Percent(latestSignal?.ModelProbability)}"
                 + $" · edge {Percent(latestSignal?.Edge)}";
+            CockpitChartSubtitle.Text = _cockpitBaseChartSubtitle;
             CockpitLegendText.Text = "Cyan market midpoint · violet model probability";
+            DrawCockpitHoverOverlay(width, height, "market");
             return;
         }
 
@@ -3039,9 +3058,11 @@ public sealed partial class MainPage : Page
                 height,
                 values[^1] >= 0 ? "positive" : "negative");
             CockpitChartTitle.Text = "Paper realised equity";
-            CockpitChartSubtitle.Text =
+            _cockpitBaseChartSubtitle =
                 $"{Usd(values[^1])} over {_cockpitEquity.Count} closed trade points";
+            CockpitChartSubtitle.Text = _cockpitBaseChartSubtitle;
             CockpitLegendText.Text = "Realised P&L curve";
+            DrawCockpitHoverOverlay(width, height, "equity");
             return;
         }
 
@@ -3069,7 +3090,8 @@ public sealed partial class MainPage : Page
                 new SolidColorBrush(Color.FromArgb(0xAA, 0xFF, 0xFF, 0xFF)),
                 13);
             CockpitChartTitle.Text = "Paper equity and open P&L";
-            CockpitChartSubtitle.Text = "Waiting for mark-to-market or realised trade history";
+            _cockpitBaseChartSubtitle = "Waiting for mark-to-market or realised trade history";
+            CockpitChartSubtitle.Text = _cockpitBaseChartSubtitle;
             CockpitLegendText.Text = "No series";
             return;
         }
@@ -3078,9 +3100,137 @@ public sealed partial class MainPage : Page
         DrawBarSeries(CockpitChartCanvas, pnl, width, height);
         double total = pnl.Sum();
         CockpitChartTitle.Text = "Open mark-to-market distribution";
-        CockpitChartSubtitle.Text =
+        _cockpitBaseChartSubtitle =
             $"{Signed(total)} across {marked.Count} marked open position(s)";
+        CockpitChartSubtitle.Text = _cockpitBaseChartSubtitle;
         CockpitLegendText.Text = "Green positive · red negative";
+        DrawCockpitHoverOverlay(width, height, "pnl");
+    }
+
+    private void DrawCockpitHoverOverlay(double width, double height, string chartMode)
+    {
+        if (_cockpitHoverPoint is not Point point || width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        DrilldownHoverReadout? readout = chartMode switch
+        {
+            "market" => CockpitMarketHoverReadout(point, width, height),
+            "equity" => CockpitEquityHoverReadout(point, width, height),
+            "pnl" => CockpitPnlHoverReadout(point, width, height),
+            _ => null,
+        };
+        if (readout is null)
+        {
+            return;
+        }
+
+        DrawHoverCrosshair(CockpitChartCanvas, readout, width, height);
+        CockpitChartSubtitle.Text = readout.Meta;
+    }
+
+    private DrilldownHoverReadout? CockpitMarketHoverReadout(Point point, double width, double height)
+    {
+        if (_cockpitMarketPrices.Count >= 2)
+        {
+            int index = NearestSeriesIndex(point.X, width, _cockpitMarketPrices.Count);
+            MarketPricePointDto price = _cockpitMarketPrices[index];
+            ProbabilityPointDto? probability = NearestProbabilityByTime(price.T);
+            double x = SeriesX(index, width, _cockpitMarketPrices.Count);
+            double y = height - Math.Clamp(price.Midpoint, 0, 1) * height;
+            string text =
+                $"{LocalTime(price.T)}\nmid {Percent(price.Midpoint)} · model {Percent(probability?.ModelProbability)} · edge {Percent(probability?.Edge)}";
+            string meta =
+                $"Hover market · {LocalTime(price.T)} · bid {Percent(price.BestBid)} · ask {Percent(price.BestAsk)}"
+                + (probability is null ? string.Empty : $" · model {Percent(probability.ModelProbability)}");
+            return new DrilldownHoverReadout(
+                x,
+                y,
+                text,
+                meta,
+                new SolidColorBrush(Color.FromArgb(0xFF, 0x43, 0xD8, 0xFF)));
+        }
+
+        List<ProbabilityPointDto> points = _cockpitProbabilities
+            .Where(p => p.ModelProbability is not null || p.MarketPrice is not null)
+            .ToList();
+        if (points.Count < 2)
+        {
+            return null;
+        }
+
+        int probabilityIndex = NearestSeriesIndex(point.X, width, points.Count);
+        ProbabilityPointDto probabilityOnly = points[probabilityIndex];
+        double value = probabilityOnly.ModelProbability ?? probabilityOnly.MarketPrice ?? 0;
+        double px = SeriesX(probabilityIndex, width, points.Count);
+        double py = height - Math.Clamp(value, 0, 1) * height;
+        return new DrilldownHoverReadout(
+            px,
+            py,
+            $"{LocalTime(probabilityOnly.T)}\nmodel {Percent(probabilityOnly.ModelProbability)} · market {Percent(probabilityOnly.MarketPrice)} · edge {Percent(probabilityOnly.Edge)}",
+            $"Hover probability · {LocalTime(probabilityOnly.T)} · {probabilityOnly.Source}",
+            new SolidColorBrush(Color.FromArgb(0xFF, 0xB2, 0x7C, 0xFF)));
+    }
+
+    private ProbabilityPointDto? NearestProbabilityByTime(DateTimeOffset timestamp) =>
+        _cockpitProbabilities
+            .Where(p => p.ModelProbability is not null || p.Edge is not null)
+            .OrderBy(p => Math.Abs((p.T - timestamp).TotalSeconds))
+            .FirstOrDefault();
+
+    private DrilldownHoverReadout? CockpitEquityHoverReadout(Point point, double width, double height)
+    {
+        if (_cockpitEquity.Count < 2)
+        {
+            return null;
+        }
+
+        int index = NearestSeriesIndex(point.X, width, _cockpitEquity.Count);
+        EquityPointDto equity = _cockpitEquity[index];
+        double[] values = _cockpitEquity.Select(p => p.CumulativePnlUsd).ToArray();
+        double lo = Math.Min(0, values.Min());
+        double hi = Math.Max(0, values.Max());
+        double span = hi - lo <= 0 ? 1 : hi - lo;
+        double x = SeriesX(index, width, _cockpitEquity.Count);
+        double y = height - ((equity.CumulativePnlUsd - lo) / span * height);
+        return new DrilldownHoverReadout(
+            x,
+            y,
+            $"{LocalTime(equity.T)}\nrealised {Signed(equity.CumulativePnlUsd)}",
+            $"Hover equity · {LocalTime(equity.T)} · realised {Signed(equity.CumulativePnlUsd)} · point {index + 1}/{_cockpitEquity.Count}",
+            AccentBrush(PnlAccent(equity.CumulativePnlUsd)));
+    }
+
+    private DrilldownHoverReadout? CockpitPnlHoverReadout(Point point, double width, double height)
+    {
+        List<PositionDto> marked = _cockpitPositions
+            .Where(p => string.Equals(p.Status, "open", StringComparison.OrdinalIgnoreCase)
+                && p.UnrealizedPnlUsd is not null)
+            .OrderBy(p => p.UnrealizedPnlUsd)
+            .Take(18)
+            .ToList();
+        if (marked.Count == 0)
+        {
+            return null;
+        }
+
+        double gap = 4;
+        double barWidth = Math.Max(8, (width - gap * (marked.Count - 1)) / marked.Count);
+        int index = Math.Clamp((int)Math.Floor(point.X / Math.Max(1, barWidth + gap)), 0, marked.Count - 1);
+        PositionDto position = marked[index];
+        double value = position.UnrealizedPnlUsd ?? 0;
+        double absMax = Math.Max(1, marked.Select(p => Math.Abs(p.UnrealizedPnlUsd ?? 0)).Max());
+        double baseline = height / 2;
+        double barHeight = Math.Abs(value) / absMax * (height * 0.42);
+        double x = index * (barWidth + gap) + barWidth / 2;
+        double y = value >= 0 ? baseline - barHeight : baseline + barHeight;
+        return new DrilldownHoverReadout(
+            x,
+            y,
+            $"{position.StationIcao ?? "Unmapped"} · {Pretty(position.Side)}\nPnL {Signed(value)} · mark {Percent(position.MarkPrice)}",
+            $"Hover position · {position.StationIcao ?? "Unmapped"} · {position.MarketDate:yyyy-MM-dd} · size {Usd(position.SizeUsd)} · unrealised {Signed(value)}",
+            AccentBrush(PnlAccent(value)));
     }
 
     private static void DrawChartGrid(Canvas canvas, double width, double height)

@@ -435,6 +435,11 @@
                                 <Canvas
                                     x:Name="CockpitChartCanvas"
                                     Grid.Row="1"
+                                    AutomationProperties.Name="Interactive cockpit chart"
+                                    Background="Transparent"
+                                    PointerEntered="CockpitChartCanvas_PointerMoved"
+                                    PointerExited="CockpitChartCanvas_PointerExited"
+                                    PointerMoved="CockpitChartCanvas_PointerMoved"
                                     SizeChanged="CockpitChartCanvas_SizeChanged" />
                                 <TextBlock
                                     x:Name="ActivityText"
@@ -1650,6 +1655,8 @@
                             x:Name="DrilldownChartCanvas"
                             Grid.Row="2"
                             AutomationProperties.Name="Interactive market drill-down chart"
+                            Background="Transparent"
+                            PointerEntered="DrilldownChartCanvas_PointerMoved"
                             PointerExited="DrilldownChartCanvas_PointerExited"
                             PointerMoved="DrilldownChartCanvas_PointerMoved"
                             SizeChanged="DrilldownChartCanvas_SizeChanged" />
