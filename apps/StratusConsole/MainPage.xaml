@@ -227,6 +227,16 @@
                             <ComboBoxItem Content="Execution" />
                         </ComboBox>
                     </AppBarElementContainer>
+                    <AppBarElementContainer
+                        x:Name="CollectionSearchContainer"
+                        VerticalContentAlignment="Center"
+                        Visibility="Collapsed">
+                        <TextBox
+                            x:Name="CollectionSearchBox"
+                            Width="220"
+                            PlaceholderText="Search current list"
+                            TextChanged="CollectionSearchBox_TextChanged" />
+                    </AppBarElementContainer>
                     <AppBarButton
                         x:Name="ApiKeyButton"
                         Click="ApiKeyButton_Click"

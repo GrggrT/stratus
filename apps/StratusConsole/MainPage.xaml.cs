@@ -41,6 +41,9 @@ public sealed partial class MainPage : Page
     private IReadOnlyList<MarketDto> _marketBoardMarkets = [];
     private IReadOnlyList<CalibrationDto> _calibrationLabItems = [];
     private IReadOnlyList<JobDto> _jobsBoardItems = [];
+    private IReadOnlyList<MonitoringListItem> _collectionAllItems = [];
+    private string _collectionSearchQuery = string.Empty;
+    private string _collectionDefaultEmptyText = "No records yet";
 
     public MainPage()
     {
@@ -1251,10 +1254,10 @@ public sealed partial class MainPage : Page
             $"Bias {calibration.BiasC:+0.00;-0.00;0.00} °C · sigma {calibration.SigmaC:0.00} °C · Brier {Number(calibration.Brier)}",
             $"Updated {LocalTime(calibration.UpdatedAt)}",
             CalibrationStatus(calibration),
-            CalibrationAccent(calibration))));
-        CollectionEmptyText.Text = _calibrationFilter == "All"
-            ? "No calibration records yet"
-            : "No calibration records match this filter";
+            CalibrationAccent(calibration))),
+            _calibrationFilter == "All"
+                ? "No calibration records yet"
+                : "No calibration records match this filter");
         RenderCalibrationLab(ordered, filtered);
     }
 
@@ -1628,10 +1631,10 @@ public sealed partial class MainPage : Page
             $"Duration {JobDurationSeconds(job):0.0}s{ReasonSuffix(job.Error)}",
             $"Finished {LocalTime(job.FinishedAt)} · {RelativeAge(job.FinishedAt)} ago",
             Pretty(job.Status),
-            JobAccent(job))));
-        CollectionEmptyText.Text = _jobsFilter == "All"
-            ? "No job runs yet"
-            : "No job runs match this filter";
+            JobAccent(job))),
+            _jobsFilter == "All"
+                ? "No job runs yet"
+                : "No job runs match this filter");
         RenderJobsBoard(ordered, filtered);
     }
 
@@ -3184,7 +3187,7 @@ public sealed partial class MainPage : Page
             "[…] Legal/tax/wallet: backend gated");
     }
 
-    private void SetCollection(IEnumerable<MonitoringListItem> items)
+    private void SetCollection(IEnumerable<MonitoringListItem> items, string emptyText = "No records yet")
     {
         // Page-specific top panels opt in after SetCollection has reset shared surfaces.
         EquityChartCard.Visibility = Visibility.Collapsed;
@@ -3204,11 +3207,47 @@ public sealed partial class MainPage : Page
         {
             HideMarketDrilldown();
         }
-        List<MonitoringListItem> materialized = items.ToList();
-        CollectionList.ItemsSource = materialized;
-        CollectionEmptyText.Text = "No records yet";
-        CollectionEmptyState.Visibility = materialized.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        _collectionAllItems = items.ToList();
+        _collectionDefaultEmptyText = emptyText;
+        ApplyCollectionSearch();
     }
+
+    private void CollectionSearchBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        _collectionSearchQuery = CollectionSearchBox.Text.Trim();
+        ApplyCollectionSearch();
+    }
+
+    private void ApplyCollectionSearch()
+    {
+        IReadOnlyList<MonitoringListItem> source = _collectionAllItems;
+        List<MonitoringListItem> visible = string.IsNullOrWhiteSpace(_collectionSearchQuery)
+            ? source.ToList()
+            : source.Where(MatchesCollectionSearch).ToList();
+        CollectionList.ItemsSource = visible;
+        CollectionEmptyText.Text = string.IsNullOrWhiteSpace(_collectionSearchQuery)
+            ? _collectionDefaultEmptyText
+            : $"No matches for \"{_collectionSearchQuery}\"";
+        CollectionEmptyState.Visibility = visible.Count == 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private bool MatchesCollectionSearch(MonitoringListItem item)
+    {
+        string query = _collectionSearchQuery;
+        return ContainsSearch(item.Title, query)
+            || ContainsSearch(item.Subtitle, query)
+            || ContainsSearch(item.Detail, query)
+            || ContainsSearch(item.Meta, query)
+            || ContainsSearch(item.Status, query)
+            || ContainsSearch(item.Accent, query)
+            || ContainsSearch(item.MarketId?.ToString(CultureInfo.InvariantCulture), query);
+    }
+
+    private static bool ContainsSearch(string? value, string query) =>
+        !string.IsNullOrWhiteSpace(value)
+        && value.Contains(query, StringComparison.OrdinalIgnoreCase);
 
     private static bool SupportsMarketDrilldown(string destination) =>
         destination is "Markets" or "Signals" or "Positions";
@@ -3221,6 +3260,8 @@ public sealed partial class MainPage : Page
         }
         else
         {
+            _collectionAllItems = [];
+            _collectionDefaultEmptyText = "Monitoring data is unavailable";
             CollectionList.ItemsSource = null;
             CollectionEmptyText.Text = "Monitoring data is unavailable";
             CollectionEmptyState.Visibility = Visibility.Visible;
@@ -3240,6 +3281,8 @@ public sealed partial class MainPage : Page
         ResetOverview();
         if (_selectedDestination != "Dashboard")
         {
+            _collectionAllItems = [];
+            _collectionDefaultEmptyText = "The local STRATUS API is unreachable";
             CollectionList.ItemsSource = null;
             CollectionEmptyText.Text = "The local STRATUS API is unreachable";
             CollectionEmptyState.Visibility = Visibility.Visible;
@@ -3273,6 +3316,11 @@ public sealed partial class MainPage : Page
         if (previousDestination != _selectedDestination)
         {
             HideMarketDrilldown();
+            if (!string.IsNullOrEmpty(CollectionSearchBox.Text))
+            {
+                _collectionSearchQuery = string.Empty;
+                CollectionSearchBox.Text = string.Empty;
+            }
         }
 
         bool dashboard = _selectedDestination == "Dashboard";
@@ -3299,6 +3347,8 @@ public sealed partial class MainPage : Page
             _selectedDestination == "Calibration" ? Visibility.Visible : Visibility.Collapsed;
         JobsFilterContainer.Visibility =
             _selectedDestination == "Jobs" ? Visibility.Visible : Visibility.Collapsed;
+        CollectionSearchContainer.Visibility =
+            dashboard ? Visibility.Collapsed : Visibility.Visible;
         ApiKeyButton.Visibility =
             _selectedDestination == "Settings" ? Visibility.Visible : Visibility.Collapsed;
 
