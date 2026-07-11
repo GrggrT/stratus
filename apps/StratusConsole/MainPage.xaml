@@ -503,15 +503,92 @@
                         </Border>
 
                         <Border Grid.Row="1" Grid.Column="1" Style="{StaticResource CockpitCardStyle}">
-                            <StackPanel Spacing="12">
+                            <Grid RowSpacing="12">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
                                 <TextBlock FontSize="18" FontWeight="SemiBold" Text="Risk rail" />
-                                <TextBlock x:Name="ApiStatusText" FontSize="16" FontWeight="SemiBold" Text="Connecting" />
-                                <TextBlock x:Name="ApiDetailText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Waiting for health checks" TextWrapping="Wrap" />
-                                <Rectangle Height="1" Fill="{ThemeResource CardStrokeColorDefaultBrush}" />
-                                <TextBlock x:Name="CockpitRiskRuntime" Text="Runtime state unavailable" TextWrapping="Wrap" />
-                                <TextBlock x:Name="CockpitRiskHealth" Text="Health audit unavailable" TextWrapping="Wrap" />
-                                <TextBlock x:Name="CockpitRiskActivity" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="No recent activity" TextWrapping="Wrap" />
-                            </StackPanel>
+                                <StackPanel Grid.Row="1" Spacing="6">
+                                    <TextBlock x:Name="ApiStatusText" FontSize="16" FontWeight="SemiBold" Text="Connecting" />
+                                    <TextBlock x:Name="ApiDetailText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Waiting for health checks" TextWrapping="Wrap" />
+                                    <TextBlock x:Name="CockpitRiskRuntime" Text="Runtime state unavailable" TextWrapping="Wrap" />
+                                    <TextBlock x:Name="CockpitRiskHealth" Text="Health audit unavailable" TextWrapping="Wrap" />
+                                    <TextBlock x:Name="CockpitRiskActivity" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="No recent activity" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Rectangle Grid.Row="2" Height="1" Fill="{ThemeResource CardStrokeColorDefaultBrush}" />
+                                <Grid Grid.Row="3">
+                                    <StackPanel>
+                                        <TextBlock FontSize="18" FontWeight="SemiBold" Text="Activity feed" />
+                                        <TextBlock
+                                            x:Name="CockpitActivitySubtitle"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="Latest commands, jobs, signals, and position changes"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Grid>
+                                <ListView
+                                    x:Name="CockpitActivityList"
+                                    Grid.Row="4"
+                                    MinHeight="220"
+                                    AutomationProperties.Name="Activity feed"
+                                    IsItemClickEnabled="True"
+                                    ItemClick="CockpitActivityList_ItemClick"
+                                    SelectionMode="Single"
+                                    ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                    ScrollViewer.HorizontalScrollMode="Disabled">
+                                    <ListView.ItemContainerStyle>
+                                        <Style TargetType="ListViewItem">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                            <Setter Property="Padding" Value="0" />
+                                            <Setter Property="Margin" Value="0,0,0,6" />
+                                            <Setter Property="MinHeight" Value="0" />
+                                        </Style>
+                                    </ListView.ItemContainerStyle>
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate x:DataType="models:MonitoringListItem">
+                                            <Border
+                                                Padding="10,8"
+                                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="8">
+                                                <Grid ColumnSpacing="10">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Spacing="2">
+                                                        <TextBlock FontSize="13" FontWeight="SemiBold" Text="{x:Bind Title}" TextWrapping="Wrap" />
+                                                        <TextBlock FontSize="12" Text="{x:Bind Subtitle}" TextWrapping="Wrap" />
+                                                        <TextBlock
+                                                            FontSize="11"
+                                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                            Text="{x:Bind Detail}"
+                                                            TextWrapping="Wrap" />
+                                                        <TextBlock
+                                                            FontSize="10"
+                                                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                            Text="{x:Bind Meta}"
+                                                            TextWrapping="Wrap" />
+                                                    </StackPanel>
+                                                    <Border
+                                                        Grid.Column="1"
+                                                        Padding="7,2"
+                                                        VerticalAlignment="Top"
+                                                        Background="{x:Bind Accent, Converter={StaticResource AccentToBrush}}"
+                                                        CornerRadius="8">
+                                                        <TextBlock FontSize="10" Text="{x:Bind Status}" />
+                                                    </Border>
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+                            </Grid>
                         </Border>
                     </Grid>
                 </StackPanel>

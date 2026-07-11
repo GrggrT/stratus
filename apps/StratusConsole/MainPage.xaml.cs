@@ -172,19 +172,32 @@ public sealed partial class MainPage : Page
             switch (destination)
             {
                 case "Dashboard":
-                    OverviewResponse cockpitOverview =
-                        await _apiClient.GetOverviewAsync(_lifetime.Token);
-                    CollectionResponse<SignalDto> cockpitSignals =
-                        await _apiClient.GetSignalsAsync(_lifetime.Token);
-                    CollectionResponse<PositionDto> cockpitPositions =
-                        await _apiClient.GetPositionsAsync(_lifetime.Token);
-                    EquityResponse cockpitEquity =
-                        await _apiClient.GetEquityAsync("paper", _lifetime.Token);
-                    RenderCockpit(
+                    Task<OverviewResponse> cockpitOverview =
+                        _apiClient.GetOverviewAsync(_lifetime.Token);
+                    Task<CollectionResponse<SignalDto>> cockpitSignals =
+                        _apiClient.GetSignalsAsync(_lifetime.Token);
+                    Task<CollectionResponse<PositionDto>> cockpitPositions =
+                        _apiClient.GetPositionsAsync(_lifetime.Token);
+                    Task<EquityResponse> cockpitEquity =
+                        _apiClient.GetEquityAsync("paper", _lifetime.Token);
+                    Task<CollectionResponse<CommandItem>> cockpitCommands =
+                        _apiClient.GetCommandsAsync(_lifetime.Token);
+                    Task<CollectionResponse<JobDto>> cockpitJobs =
+                        _apiClient.GetJobsAsync(_lifetime.Token);
+                    await Task.WhenAll(
                         cockpitOverview,
-                        cockpitSignals.Items,
-                        cockpitPositions.Items,
-                        cockpitEquity.Points);
+                        cockpitSignals,
+                        cockpitPositions,
+                        cockpitEquity,
+                        cockpitCommands,
+                        cockpitJobs);
+                    RenderCockpit(
+                        cockpitOverview.Result,
+                        cockpitSignals.Result.Items,
+                        cockpitPositions.Result.Items,
+                        cockpitEquity.Result.Points,
+                        cockpitCommands.Result.Items,
+                        cockpitJobs.Result.Items);
                     break;
                 case "Markets":
                     RenderMarkets((await _apiClient.GetMarketsAsync(_lifetime.Token)).Items);
@@ -317,7 +330,9 @@ public sealed partial class MainPage : Page
         OverviewResponse overview,
         IReadOnlyList<SignalDto> signals,
         IReadOnlyList<PositionDto> positions,
-        IReadOnlyList<EquityPointDto> paperEquity)
+        IReadOnlyList<EquityPointDto> paperEquity,
+        IReadOnlyList<CommandItem> commands,
+        IReadOnlyList<JobDto> jobs)
     {
         RenderOverview(overview);
         _cockpitPositions = positions;
@@ -349,8 +364,14 @@ public sealed partial class MainPage : Page
         CockpitRiskHealth.Text = overview.HealthAudit is null
             ? "No health audit available"
             : $"{Pretty(overview.HealthAudit.Status)} · {overview.HealthAudit.Issues.Count} issue(s)";
+        List<MonitoringListItem> activityItems =
+            BuildCockpitActivityFeed(overview, signals, positions, commands, jobs);
+        CockpitActivityList.ItemsSource = activityItems;
+        CockpitActivitySubtitle.Text =
+            $"{activityItems.Count} latest event(s) · click signal/position rows for market overlay";
         CockpitRiskActivity.Text =
-            $"{overview.ActiveMarkets} active markets · {overview.BlockedMarkets} blocked";
+            $"{overview.ActiveMarkets} active markets · {overview.BlockedMarkets} blocked · "
+            + $"{commands.Count} commands · {jobs.Count(job => !IsJobSuccess(job))} job issue(s)";
 
         List<MonitoringListItem> scannerItems = BuildCockpitScanner(signals, open);
         CockpitScannerList.ItemsSource = scannerItems;
@@ -406,7 +427,158 @@ public sealed partial class MainPage : Page
         return signalItems.Concat(positionItems).ToList();
     }
 
+    private static List<MonitoringListItem> BuildCockpitActivityFeed(
+        OverviewResponse overview,
+        IReadOnlyList<SignalDto> signals,
+        IReadOnlyList<PositionDto> positions,
+        IReadOnlyList<CommandItem> commands,
+        IReadOnlyList<JobDto> jobs)
+    {
+        List<(DateTimeOffset Timestamp, MonitoringListItem Item)> feed = [];
+
+        feed.Add((
+            overview.GeneratedAt,
+            new MonitoringListItem(
+                "System snapshot",
+                $"Mode {overview.Runtime.Mode.ToUpperInvariant()} · {overview.ActiveMarkets} active market(s)",
+                overview.Runtime.KillSwitch
+                    ? $"Kill switch active{ReasonSuffix(overview.Runtime.HaltedReason)}"
+                    : $"{overview.OpenPositions} open position(s) · {overview.PendingSignals} pending signal(s)",
+                LocalTime(overview.GeneratedAt),
+                overview.Runtime.KillSwitch ? "STOP" : "OK",
+                overview.Runtime.KillSwitch ? "negative" : "positive")));
+
+        if (overview.HealthAudit is not null)
+        {
+            bool healthy = string.Equals(
+                overview.HealthAudit.Status,
+                "healthy",
+                StringComparison.OrdinalIgnoreCase);
+            feed.Add((
+                overview.HealthAudit.Timestamp,
+                new MonitoringListItem(
+                    "Health audit",
+                    Pretty(overview.HealthAudit.Status),
+                    overview.HealthAudit.Issues.Count == 0
+                        ? "No recorded issues"
+                        : $"{overview.HealthAudit.Issues.Count} issue(s) need review",
+                    LocalTime(overview.HealthAudit.Timestamp),
+                    healthy ? "OK" : "Review",
+                    healthy ? "positive" : "warning")));
+        }
+
+        feed.AddRange(commands
+            .OrderByDescending(command => command.CreatedAt)
+            .Take(8)
+            .Select(command => (
+                command.ExecutedAt ?? command.CreatedAt,
+                new MonitoringListItem(
+                    $"Command · {Pretty(command.Command)}",
+                    Pretty(command.Status),
+                    command.Detail ?? command.Reason,
+                    $"{RelativeAge(command.CreatedAt)} ago · {command.Actor} · {command.RequestId}",
+                    Pretty(command.Status),
+                    CommandAccent(command)))));
+
+        feed.AddRange(jobs
+            .OrderByDescending(job => job.FinishedAt)
+            .Take(10)
+            .Select(job =>
+            {
+                double duration = JobDurationSeconds(job);
+                bool failed = !IsJobSuccess(job);
+                bool slow = IsJobSlow(job);
+                return (
+                    job.FinishedAt,
+                    new MonitoringListItem(
+                        $"Job · {job.JobId}",
+                        $"{Pretty(job.Status)} · {duration:0.00}s",
+                        job.Error ?? (slow ? "Slow scheduler run" : "Completed without recorded error"),
+                        $"{RelativeAge(job.FinishedAt)} ago · scheduled {LocalTime(job.ScheduledAt)}",
+                        failed ? "Failed" : slow ? "Slow" : "OK",
+                        JobAccent(job)));
+            }));
+
+        feed.AddRange(signals
+            .OrderByDescending(signal => signal.Timestamp)
+            .Take(10)
+            .Select(signal => (
+                signal.Timestamp,
+                new MonitoringListItem(
+                    $"Signal · {signal.StationIcao ?? "Unmapped"} · {Pretty(signal.Side)}",
+                    $"edge {Percent(signal.Edge)} · model {Percent(signal.ModelProbability)} vs market {Percent(signal.MarketPrice)}",
+                    signal.SkipReason is null
+                        ? $"size {Usd(signal.SizeUsd)} · confidence {signal.Confidence}"
+                        : HumanizeReasons(signal.SkipReason),
+                    $"{RelativeAge(signal.Timestamp)} ago · {signal.PolymarketId}",
+                    Pretty(signal.Status),
+                    IsActionableSignal(signal) ? PnlAccent(signal.Edge) : null,
+                    signal.MarketId))));
+
+        feed.AddRange(positions
+            .Where(position => position.ClosedAt is not null
+                || string.Equals(position.Status, "open", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(position => position.ClosedAt ?? DateTimeOffset.UtcNow)
+            .Take(10)
+            .Select(position =>
+            {
+                bool open = string.Equals(position.Status, "open", StringComparison.OrdinalIgnoreCase);
+                double? pnl = open ? position.UnrealizedPnlUsd : position.PnlUsd;
+                return (
+                    position.ClosedAt ?? DateTimeOffset.UtcNow,
+                    new MonitoringListItem(
+                        $"{(open ? "Open position" : "Closed position")} · {position.StationIcao ?? "Unmapped"}",
+                        $"{Pretty(position.Side)} · entry {Percent(position.AveragePrice)}"
+                            + (position.MarkPrice is null ? string.Empty : $" → mark {Percent(position.MarkPrice)}"),
+                        $"{(open ? "unrealized" : "realized")} {Signed(pnl)} · size {Usd(position.SizeUsd)}",
+                        open
+                            ? $"{position.MarketDate:yyyy-MM-dd} · {position.PolymarketId}"
+                            : $"{RelativeAge(position.ClosedAt!.Value)} ago · {position.PolymarketId}",
+                        open ? "Open" : Signed(pnl),
+                        PnlAccent(pnl),
+                        position.MarketId));
+            }));
+
+        return feed
+            .OrderByDescending(entry => entry.Timestamp)
+            .Take(24)
+            .Select(entry => entry.Item)
+            .ToList();
+    }
+
+    private static string? CommandAccent(CommandItem command)
+    {
+        string status = command.Status;
+        if (status.Contains("fail", StringComparison.OrdinalIgnoreCase)
+            || status.Contains("reject", StringComparison.OrdinalIgnoreCase)
+            || status.Contains("error", StringComparison.OrdinalIgnoreCase))
+        {
+            return "negative";
+        }
+
+        if (status.Contains("pending", StringComparison.OrdinalIgnoreCase)
+            || status.Contains("queued", StringComparison.OrdinalIgnoreCase)
+            || status.Contains("requested", StringComparison.OrdinalIgnoreCase))
+        {
+            return "warning";
+        }
+
+        return "positive";
+    }
+
     private async void CockpitScannerList_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is MonitoringListItem item)
+        {
+            RenderCockpitDetail(item);
+            if (item.MarketId is not null)
+            {
+                await LoadCockpitMarketChartAsync(item);
+            }
+        }
+    }
+
+    private async void CockpitActivityList_ItemClick(object sender, ItemClickEventArgs e)
     {
         if (e.ClickedItem is MonitoringListItem item)
         {
