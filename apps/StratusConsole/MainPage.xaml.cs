@@ -43,8 +43,10 @@ public sealed partial class MainPage : Page
     private IReadOnlyList<CalibrationDto> _calibrationLabItems = [];
     private IReadOnlyList<JobDto> _jobsBoardItems = [];
     private IReadOnlyList<MonitoringListItem> _collectionAllItems = [];
+    private IReadOnlyList<MonitoringListItem> _cockpitActivityItems = [];
     private string _collectionSearchQuery = string.Empty;
     private string _collectionDefaultEmptyText = "No records yet";
+    private string _cockpitActivitySearchQuery = string.Empty;
     private bool _isCommandPaletteOpen;
 
     private sealed record CommandPaletteAction(
@@ -665,11 +667,8 @@ public sealed partial class MainPage : Page
         CockpitRiskHealth.Text = overview.HealthAudit is null
             ? "No health audit available"
             : $"{Pretty(overview.HealthAudit.Status)} · {overview.HealthAudit.Issues.Count} issue(s)";
-        List<MonitoringListItem> activityItems =
-            BuildCockpitActivityFeed(overview, signals, positions, commands, jobs);
-        CockpitActivityList.ItemsSource = activityItems;
-        CockpitActivitySubtitle.Text =
-            $"{activityItems.Count} latest event(s) · click signal/position rows for market overlay";
+        _cockpitActivityItems = BuildCockpitActivityFeed(overview, signals, positions, commands, jobs);
+        ApplyCockpitActivityFilters();
         CockpitRiskActivity.Text =
             $"{overview.ActiveMarkets} active markets · {overview.BlockedMarkets} blocked · "
             + $"{commands.Count} commands · {jobs.Count(job => !IsJobSuccess(job))} job issue(s)";
@@ -890,6 +889,78 @@ public sealed partial class MainPage : Page
             }
         }
     }
+
+    private void CockpitActivityFilterBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        ApplyCockpitActivityFilters();
+    }
+
+    private void CockpitActivitySearchBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        _cockpitActivitySearchQuery = CockpitActivitySearchBox.Text.Trim();
+        ApplyCockpitActivityFilters();
+    }
+
+    private void ApplyCockpitActivityFilters()
+    {
+        if (CockpitActivityList is null
+            || CockpitActivitySubtitle is null
+            || CockpitActivityFilterBox is null)
+        {
+            return;
+        }
+
+        string category =
+            (CockpitActivityFilterBox.SelectedItem as ComboBoxItem)?.Content as string ?? "All";
+        IReadOnlyList<MonitoringListItem> source = _cockpitActivityItems;
+        List<MonitoringListItem> visible = source
+            .Where(item => MatchesActivityCategory(item, category))
+            .Where(item => MatchesActivitySearch(item, _cockpitActivitySearchQuery))
+            .ToList();
+
+        CockpitActivityList.ItemsSource = visible;
+        CockpitActivitySubtitle.Text =
+            $"{visible.Count}/{source.Count} event(s) shown"
+            + (category == "All" ? string.Empty : $" · {category.ToLowerInvariant()}")
+            + (string.IsNullOrWhiteSpace(_cockpitActivitySearchQuery)
+                ? string.Empty
+                : $" · \"{_cockpitActivitySearchQuery}\"")
+            + " · click signal/position rows for market overlay";
+    }
+
+    private static bool MatchesActivityCategory(MonitoringListItem item, string category) =>
+        category switch
+        {
+            "Issues" => IsActivityIssue(item),
+            "Risk" => StartsWithActivityType(item, "System")
+                || StartsWithActivityType(item, "Health")
+                || IsActivityIssue(item),
+            "Commands" => StartsWithActivityType(item, "Command"),
+            "Jobs" => StartsWithActivityType(item, "Job"),
+            "Signals" => StartsWithActivityType(item, "Signal"),
+            "Positions" => item.Title.Contains("position", StringComparison.OrdinalIgnoreCase),
+            _ => true,
+        };
+
+    private static bool StartsWithActivityType(MonitoringListItem item, string type) =>
+        item.Title.StartsWith(type, StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsActivityIssue(MonitoringListItem item) =>
+        item.Accent is "negative" or "warning"
+        || item.Status.Contains("fail", StringComparison.OrdinalIgnoreCase)
+        || item.Status.Contains("slow", StringComparison.OrdinalIgnoreCase)
+        || item.Status.Contains("review", StringComparison.OrdinalIgnoreCase)
+        || item.Status.Contains("stop", StringComparison.OrdinalIgnoreCase);
+
+    private static bool MatchesActivitySearch(MonitoringListItem item, string query) =>
+        string.IsNullOrWhiteSpace(query)
+        || ContainsSearch(item.Title, query)
+        || ContainsSearch(item.Subtitle, query)
+        || ContainsSearch(item.Detail, query)
+        || ContainsSearch(item.Meta, query)
+        || ContainsSearch(item.Status, query)
+        || ContainsSearch(item.Accent, query)
+        || ContainsSearch(item.MarketId?.ToString(CultureInfo.InvariantCulture), query);
 
     private void RenderCockpitDetail(MonitoringListItem item)
     {

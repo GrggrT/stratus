@@ -572,13 +572,38 @@
                                 </StackPanel>
                                 <Rectangle Grid.Row="2" Height="1" Fill="{ThemeResource CardStrokeColorDefaultBrush}" />
                                 <Grid Grid.Row="3">
-                                    <StackPanel>
+                                    <StackPanel Spacing="8">
                                         <TextBlock FontSize="18" FontWeight="SemiBold" Text="Activity feed" />
                                         <TextBlock
                                             x:Name="CockpitActivitySubtitle"
                                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                             Text="Latest commands, jobs, signals, and position changes"
                                             TextWrapping="Wrap" />
+                                        <Grid ColumnSpacing="8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="140" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <ComboBox
+                                                x:Name="CockpitActivityFilterBox"
+                                                AutomationProperties.Name="Activity feed category"
+                                                SelectedIndex="0"
+                                                SelectionChanged="CockpitActivityFilterBox_SelectionChanged">
+                                                <ComboBoxItem Content="All" />
+                                                <ComboBoxItem Content="Issues" />
+                                                <ComboBoxItem Content="Risk" />
+                                                <ComboBoxItem Content="Commands" />
+                                                <ComboBoxItem Content="Jobs" />
+                                                <ComboBoxItem Content="Signals" />
+                                                <ComboBoxItem Content="Positions" />
+                                            </ComboBox>
+                                            <TextBox
+                                                x:Name="CockpitActivitySearchBox"
+                                                Grid.Column="1"
+                                                AutomationProperties.Name="Search activity feed"
+                                                PlaceholderText="Search activity"
+                                                TextChanged="CockpitActivitySearchBox_TextChanged" />
+                                        </Grid>
                                     </StackPanel>
                                 </Grid>
                                 <ListView
