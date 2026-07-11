@@ -1138,6 +1138,122 @@
                     </Grid>
                 </Border>
                 <Border
+                    x:Name="SettingsCenterPanel"
+                    Grid.Row="0"
+                    Grid.ColumnSpan="2"
+                    Margin="32,0,32,12"
+                    Padding="16"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Visibility="Collapsed">
+                    <Grid RowSpacing="12">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="4">
+                                <TextBlock FontSize="18" FontWeight="SemiBold" Text="Operator setup center" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Local API, credential source, runtime mode, and data-safety posture"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <TextBlock
+                                x:Name="SettingsCenterSummaryText"
+                                Grid.Column="1"
+                                VerticalAlignment="Top"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="No setup data"
+                                TextWrapping="Wrap" />
+                        </Grid>
+                        <Grid Grid.Row="1" ColumnSpacing="12" RowSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Border
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <StackPanel Spacing="8">
+                                    <TextBlock FontWeight="SemiBold" Text="Local API" />
+                                    <TextBlock x:Name="SettingsApiText" FontSize="15" Text="No API data loaded" TextWrapping="Wrap" />
+                                    <TextBlock
+                                        x:Name="SettingsApiDetailText"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No API detail loaded"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                            <Border
+                                Grid.Column="1"
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <StackPanel Spacing="8">
+                                    <TextBlock FontWeight="SemiBold" Text="Operator credential" />
+                                    <TextBlock x:Name="SettingsCredentialText" FontSize="15" Text="No credential data loaded" TextWrapping="Wrap" />
+                                    <TextBlock
+                                        x:Name="SettingsCredentialDetailText"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Use API key in the command bar"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                            <Border
+                                Grid.Row="1"
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <StackPanel Spacing="8">
+                                    <TextBlock FontWeight="SemiBold" Text="Runtime target" />
+                                    <TextBlock x:Name="SettingsRuntimeText" FontSize="15" Text="No runtime data loaded" TextWrapping="Wrap" />
+                                    <TextBlock
+                                        x:Name="SettingsRuntimeDetailText"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Runtime detail unavailable"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                            <Border
+                                Grid.Row="1"
+                                Grid.Column="1"
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <StackPanel Spacing="8">
+                                    <TextBlock FontWeight="SemiBold" Text="Setup checklist" />
+                                    <TextBlock
+                                        x:Name="SettingsChecklistText"
+                                        FontFamily="Consolas"
+                                        FontSize="13"
+                                        Text="No setup checklist loaded"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </Grid>
+                </Border>
+                <Border
                     x:Name="PortfolioAnalyticsPanel"
                     Grid.Row="0"
                     Grid.ColumnSpan="2"

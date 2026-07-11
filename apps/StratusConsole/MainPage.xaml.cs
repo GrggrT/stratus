@@ -24,6 +24,7 @@ public sealed partial class MainPage : Page
     private bool _refreshPending;
     private bool _isSubmittingCommand;
     private RuntimeDto? _lastRuntime;
+    private HealthSnapshot? _lastHealth;
     private string _credentialSource;
     private IReadOnlyList<PositionDto> _cockpitPositions = [];
     private IReadOnlyList<EquityPointDto> _cockpitEquity = [];
@@ -236,7 +237,9 @@ public sealed partial class MainPage : Page
                         operationsOrders.Items);
                     break;
                 case "Settings":
-                    RenderSettings();
+                    OverviewResponse settingsOverview =
+                        await _apiClient.GetOverviewAsync(_lifetime.Token);
+                    RenderSettings(settingsOverview, _lastHealth);
                     break;
             }
         }
@@ -251,6 +254,7 @@ public sealed partial class MainPage : Page
 
     private void RenderHealth(HealthSnapshot snapshot)
     {
+        _lastHealth = snapshot;
         bool healthy = string.Equals(snapshot.HealthStatus, "ok", StringComparison.OrdinalIgnoreCase);
         bool ready = string.Equals(snapshot.ReadyStatus, "ready", StringComparison.OrdinalIgnoreCase);
 
@@ -2340,7 +2344,6 @@ public sealed partial class MainPage : Page
         SystemInfoBar.Message = apiKey is null
             ? "Monitoring remains available only while the backend does not require a key."
             : "The key is stored in Windows Credential Locker and is never displayed.";
-        RenderSettings();
         await RefreshAsync();
     }
 
@@ -3078,29 +3081,107 @@ public sealed partial class MainPage : Page
             ? value.Value.ToString("+$0.00;-$0.00;$0.00", CultureInfo.InvariantCulture)
             : "—";
 
-    private void RenderSettings()
+    private void RenderSettings(OverviewResponse overview, HealthSnapshot? health)
     {
+        _lastRuntime = overview.Runtime;
+        bool credentialConfigured = _credentialSource != "Not configured";
+        bool apiHealthy = string.Equals(health?.HealthStatus, "ok", StringComparison.OrdinalIgnoreCase);
+        bool apiReady = string.Equals(health?.ReadyStatus, "ready", StringComparison.OrdinalIgnoreCase);
+        bool killClear = !overview.Runtime.KillSwitch;
+        bool validationPassed = overview.Validation?.Passed is true;
+        bool healthAuditOk = string.Equals(
+            overview.HealthAudit?.Status,
+            "healthy",
+            StringComparison.OrdinalIgnoreCase);
+
         SetCollection(
         [
             new(
                 "Local API endpoint",
-                "http://127.0.0.1:8000",
+                ApiBaseAddress.ToString(),
                 "Loopback-only connection; direct database access is disabled",
-                "Changeable endpoint settings will be added with authenticated operations",
-                "Read only"),
+                health is null
+                    ? "Health snapshot not loaded yet"
+                    : $"healthz {health.HealthStatus} · readyz {health.ReadyStatus} · checked {LocalTime(health.CheckedAt)}",
+                apiHealthy && apiReady ? "Ready" : "Review",
+                apiHealthy && apiReady ? "positive" : "warning"),
             new(
                 "Operator API credential",
                 _credentialSource,
                 "Stored secrets are never written to app settings or displayed after saving",
-                "Use the API key command to save or remove the credential",
-                _credentialSource == "Not configured" ? "Missing" : "Configured"),
+                "Use API key in the command bar to save or remove the credential",
+                credentialConfigured ? "Configured" : "Missing",
+                credentialConfigured ? "positive" : "negative"),
+            new(
+                "Runtime mode",
+                overview.Runtime.Mode.ToUpperInvariant(),
+                overview.Runtime.KillSwitch
+                    ? $"Kill switch active{ReasonSuffix(overview.Runtime.HaltedReason)}"
+                    : "Kill switch off; backend risk limits remain authoritative",
+                $"Open positions {overview.OpenPositions} · pending signals {overview.PendingSignals}",
+                overview.Runtime.KillSwitch ? "Stopped" : "Running",
+                overview.Runtime.KillSwitch ? "negative" : "positive"),
+            new(
+                "Validation gate",
+                overview.Validation is null
+                    ? "No checkpoint"
+                    : $"Day {overview.Validation.CheckpointDay}",
+                overview.Validation is null
+                    ? "Paper evidence has not reached the configured checkpoint"
+                    : (overview.Validation.Passed ? "Gate passed" : "Gate not passed"),
+                overview.Validation is null
+                    ? "Live remains unavailable"
+                    : $"Eligible {overview.Validation.Eligible} · evaluated {LocalTime(overview.Validation.EvaluatedAt)}",
+                validationPassed ? "Passed" : "Locked",
+                validationPassed ? "positive" : "warning"),
             new(
                 "Refresh cadence",
                 "10 seconds",
-                "Automatic refresh can be disabled from the command bar",
-                "Manual refresh remains available",
-                "Active"),
+                AutoRefreshButton.IsChecked == true
+                    ? "Automatic refresh is enabled"
+                    : "Automatic refresh is paused",
+                "Manual refresh remains available from the command bar",
+                AutoRefreshButton.IsChecked == true ? "Active" : "Paused",
+                AutoRefreshButton.IsChecked == true ? "positive" : "warning"),
         ]);
+
+        SettingsCenterPanel.Visibility = Visibility.Visible;
+        SettingsCenterSummaryText.Text =
+            $"{(apiReady ? "API ready" : apiHealthy ? "API not ready" : "API review")} · "
+            + $"{(credentialConfigured ? "credential set" : "credential missing")} · "
+            + $"runtime {overview.Runtime.Mode.ToUpperInvariant()}";
+        SettingsApiText.Text = apiHealthy && apiReady
+            ? "Connected to local operator API"
+            : "Local operator API needs attention";
+        SettingsApiDetailText.Text = health is null
+            ? "No health snapshot has been loaded yet."
+            : health.Reasons.Count == 0
+                ? $"healthz {health.HealthStatus} · readyz {health.ReadyStatus} · {LocalTime(health.CheckedAt)}"
+                : $"healthz {health.HealthStatus} · readyz {health.ReadyStatus} · "
+                    + string.Join(" · ", health.Reasons);
+        SettingsCredentialText.Text = credentialConfigured
+            ? $"Configured via {_credentialSource}"
+            : "Operator API key is not configured";
+        SettingsCredentialDetailText.Text = credentialConfigured
+            ? "Authenticated commands can be submitted from this console."
+            : "Read-only monitoring still works; command submission will fail until a key is saved.";
+        SettingsRuntimeText.Text = overview.Runtime.KillSwitch
+            ? "Kill switch active"
+            : $"Runtime {overview.Runtime.Mode.ToUpperInvariant()}";
+        SettingsRuntimeDetailText.Text = overview.Runtime.KillSwitch
+            ? $"Trading stopped{ReasonSuffix(overview.Runtime.HaltedReason)}"
+            : $"Open {overview.OpenPositions} · pending {overview.PendingSignals} · exposure {Usd(overview.OpenExposureUsd)}";
+        SettingsChecklistText.Text = string.Join(
+            Environment.NewLine,
+            ReadinessLine(apiHealthy, "healthz ok"),
+            ReadinessLine(apiReady, "readyz ready"),
+            ReadinessLine(credentialConfigured, "operator credential"),
+            ReadinessLine(killClear, "kill switch clear"),
+            ReadinessLine(healthAuditOk, $"health audit {overview.HealthAudit?.Status ?? "missing"}"),
+            ReadinessLine(validationPassed, overview.Validation is null
+                ? "validation checkpoint missing"
+                : $"validation day {overview.Validation.CheckpointDay}"),
+            "[…] Legal/tax/wallet: backend gated");
     }
 
     private void SetCollection(IEnumerable<MonitoringListItem> items)
@@ -3113,6 +3194,7 @@ public sealed partial class MainPage : Page
         MarketBoardPanel.Visibility = Visibility.Collapsed;
         CalibrationLabPanel.Visibility = Visibility.Collapsed;
         JobsBoardPanel.Visibility = Visibility.Collapsed;
+        SettingsCenterPanel.Visibility = Visibility.Collapsed;
         if (SupportsMarketDrilldown(_selectedDestination) && _selectedDrilldownItem?.MarketId is not null)
         {
             CollectionDetailColumn.Width = new GridLength(460);
