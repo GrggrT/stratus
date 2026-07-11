@@ -26,7 +26,51 @@
             <Setter Property="CornerRadius" Value="10" />
             <Setter Property="Padding" Value="16" />
         </Style>
+        <DataTemplate x:Key="CommandPaletteActionTemplate">
+            <Border
+                Padding="12,10"
+                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8">
+                <Grid ColumnSpacing="12" RowSpacing="2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <TextBlock FontSize="14" FontWeight="SemiBold" Text="{Binding Title}" TextWrapping="Wrap" />
+                    <Border
+                        Grid.Column="1"
+                        Padding="8,2"
+                        VerticalAlignment="Top"
+                        Background="{Binding Accent, Converter={StaticResource AccentToBrush}}"
+                        CornerRadius="8">
+                        <TextBlock FontSize="11" Text="{Binding Status}" />
+                    </Border>
+                    <TextBlock Grid.Row="1" Grid.ColumnSpan="2" FontSize="12" Text="{Binding Subtitle}" TextWrapping="Wrap" />
+                    <TextBlock
+                        Grid.Row="2"
+                        Grid.ColumnSpan="2"
+                        FontSize="11"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="{Binding Detail}"
+                        TextWrapping="Wrap" />
+                </Grid>
+            </Border>
+        </DataTemplate>
     </Page.Resources>
+
+    <Page.KeyboardAccelerators>
+        <KeyboardAccelerator
+            Key="K"
+            Modifiers="Control"
+            Invoked="CommandPaletteKeyboardAccelerator_Invoked" />
+    </Page.KeyboardAccelerators>
 
     <NavigationView
         x:Name="RootNavigation"
@@ -245,6 +289,13 @@
                         <AppBarButton.Icon><FontIcon Glyph="&#xE72E;" /></AppBarButton.Icon>
                     </AppBarButton>
                     <AppBarSeparator />
+                    <AppBarButton
+                        x:Name="CommandPaletteButton"
+                        AutomationProperties.Name="Command palette Ctrl K"
+                        Click="CommandPaletteButton_Click"
+                        Label="Palette">
+                        <AppBarButton.Icon><FontIcon Glyph="&#xE721;" /></AppBarButton.Icon>
+                    </AppBarButton>
                     <AppBarButton
                         x:Name="RefreshButton"
                         Click="RefreshButton_Click"

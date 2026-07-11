@@ -2,6 +2,7 @@ using System.Globalization;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using StratusConsole.Models;
@@ -44,6 +45,16 @@ public sealed partial class MainPage : Page
     private IReadOnlyList<MonitoringListItem> _collectionAllItems = [];
     private string _collectionSearchQuery = string.Empty;
     private string _collectionDefaultEmptyText = "No records yet";
+    private bool _isCommandPaletteOpen;
+
+    private sealed record CommandPaletteAction(
+        string Title,
+        string Subtitle,
+        string Detail,
+        string SearchText,
+        string Status,
+        string? Accent,
+        Func<Task> Execute);
 
     public MainPage()
     {
@@ -123,6 +134,296 @@ public sealed partial class MainPage : Page
     {
         await RefreshAsync();
     }
+
+    private async void CommandPaletteButton_Click(object sender, RoutedEventArgs e)
+    {
+        await ShowCommandPaletteAsync();
+    }
+
+    private async void CommandPaletteKeyboardAccelerator_Invoked(
+        KeyboardAccelerator sender,
+        KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        await ShowCommandPaletteAsync();
+    }
+
+    private async Task ShowCommandPaletteAsync()
+    {
+        if (_isCommandPaletteOpen)
+        {
+            return;
+        }
+
+        _isCommandPaletteOpen = true;
+        try
+        {
+            List<CommandPaletteAction> actions = BuildCommandPaletteActions();
+            TextBox searchBox = new()
+            {
+                PlaceholderText = "Type a page, action, job, market, signal, or risk command",
+                MinWidth = 560,
+            };
+            ListView actionList = new()
+            {
+                Height = 430,
+                IsItemClickEnabled = true,
+                ItemTemplate = (DataTemplate)Resources["CommandPaletteActionTemplate"],
+                SelectionMode = ListViewSelectionMode.Single,
+            };
+            actionList.ItemContainerStyle = new Style(typeof(ListViewItem))
+            {
+                Setters =
+                {
+                    new Setter(ListViewItem.HorizontalContentAlignmentProperty, HorizontalAlignment.Stretch),
+                    new Setter(ListViewItem.PaddingProperty, new Thickness(0)),
+                    new Setter(ListViewItem.MarginProperty, new Thickness(0, 0, 0, 6)),
+                    new Setter(ListViewItem.MinHeightProperty, 0d),
+                },
+            };
+
+            void ApplyPaletteFilter()
+            {
+                string query = searchBox.Text.Trim();
+                List<CommandPaletteAction> filtered = string.IsNullOrWhiteSpace(query)
+                    ? actions
+                    : actions.Where(action => MatchesPaletteQuery(action, query)).ToList();
+                actionList.ItemsSource = filtered;
+                actionList.SelectedIndex = filtered.Count > 0 ? 0 : -1;
+            }
+
+            searchBox.TextChanged += (_, _) => ApplyPaletteFilter();
+
+            StackPanel panel = new() { Spacing = 12 };
+            panel.Children.Add(new TextBlock
+            {
+                Text = "Fast navigation and operator actions. Risk-changing commands still open their normal confirmation dialogs.",
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+            });
+            panel.Children.Add(searchBox);
+            panel.Children.Add(actionList);
+
+            ContentDialog dialog = new()
+            {
+                Title = "Command palette",
+                Content = panel,
+                PrimaryButtonText = "Run",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = XamlRoot,
+            };
+            dialog.Opened += (_, _) => searchBox.Focus(FocusState.Programmatic);
+            actionList.ItemClick += (_, args) =>
+            {
+                actionList.SelectedItem = args.ClickedItem;
+                dialog.Hide();
+            };
+
+            ApplyPaletteFilter();
+            ContentDialogResult result = await dialog.ShowAsync();
+            if (result != ContentDialogResult.Primary && actionList.SelectedItem is null)
+            {
+                return;
+            }
+
+            if (actionList.SelectedItem is CommandPaletteAction selected)
+            {
+                await selected.Execute();
+            }
+        }
+        finally
+        {
+            _isCommandPaletteOpen = false;
+        }
+    }
+
+    private List<CommandPaletteAction> BuildCommandPaletteActions()
+    {
+        List<CommandPaletteAction> actions =
+        [
+            NavigationAction("Cockpit", "Dashboard", "Trading overview, scanner, equity, and activity feed", "1"),
+            NavigationAction("Markets", "Markets", "Weather markets, station verification, resolving soon, blocked", "2"),
+            NavigationAction("Signals", "Signals", "Recent model decisions, edge, confidence, skip reasons", "3"),
+            NavigationAction("Positions", "Positions", "Paper positions, mark-to-market, P&L, CLV", "4"),
+            NavigationAction("Calibration", "Calibration", "Station evidence, bias, sigma, Brier", "5"),
+            NavigationAction("Jobs", "Jobs", "Scheduler outcomes, failures, slow jobs, runtime tape", "6"),
+            NavigationAction("Live", "Live", "Live positions, live orders, redemption queue", "7"),
+            NavigationAction("Operations", "Operations", "Runtime control, command audit, validation gate", "8"),
+            new(
+                "Open settings",
+                "Configure local API credentials",
+                $"Current key source: {_credentialSource}",
+                "settings api key credential local config",
+                "Settings",
+                null,
+                () =>
+                {
+                    NavigateToDestination("Settings");
+                    return Task.CompletedTask;
+                }),
+            new(
+                "Refresh current page",
+                "Fetch latest monitoring state now",
+                AutoRefreshButton.IsChecked == true ? "Auto-refresh is enabled" : "Auto-refresh is paused",
+                "refresh reload update sync",
+                "Refresh",
+                null,
+                RefreshAsync),
+            new(
+                "Focus list search",
+                "Jump to the current page search box",
+                _selectedDestination == "Dashboard"
+                    ? "Search is available on data pages; choose a page first"
+                    : $"Search {_selectedDestination}",
+                "search filter find current list",
+                "Search",
+                null,
+                FocusCollectionSearchAsync),
+            new(
+                "Stop trading",
+                "Enable kill switch and expire pending signals",
+                "Opens the existing confirmation dialog with required reason",
+                "stop halt kill switch risk emergency",
+                "Risk",
+                "negative",
+                () =>
+                {
+                    StopButton_Click(this, new RoutedEventArgs());
+                    return Task.CompletedTask;
+                }),
+            new(
+                "Resume trading",
+                "Request normal signal execution after a stop",
+                "Opens the existing confirmation dialog with required reason",
+                "resume unhalt restart trading",
+                "Risk",
+                "warning",
+                () =>
+                {
+                    ResumeButton_Click(this, new RoutedEventArgs());
+                    return Task.CompletedTask;
+                }),
+            new(
+                "Switch to paper mode",
+                "Queue runtime mode change to paper trading",
+                "Uses the audited backend command queue",
+                "paper mode simulated trading",
+                "Mode",
+                null,
+                () =>
+                {
+                    PaperModeButton_Click(this, new RoutedEventArgs());
+                    return Task.CompletedTask;
+                }),
+            new(
+                "Request live mode",
+                "Queue LIVE request; backend gates remain authoritative",
+                "Requires the same two-step live confirmation and legal/wallet gates",
+                "live mode real money gate kyc wallet",
+                "Live",
+                "negative",
+                () =>
+                {
+                    LiveModeButton_Click(this, new RoutedEventArgs());
+                    return Task.CompletedTask;
+                }),
+            new(
+                "Verify market station",
+                "Approve a blocked market's parsed station by internal id",
+                "Opens the existing verify dialog; does not bypass station checks",
+                "verify market station blocked rules",
+                "Verify",
+                "warning",
+                () =>
+                {
+                    VerifyMarketButton_Click(this, new RoutedEventArgs());
+                    return Task.CompletedTask;
+                }),
+            new(
+                "Run maintenance job",
+                "Queue discover-markets, backfill-fees, or prune-signals",
+                "Uses the audited backend command queue",
+                "run job maintenance discover markets backfill fees prune signals",
+                "Job",
+                null,
+                () =>
+                {
+                    RunJobButton_Click(this, new RoutedEventArgs());
+                    return Task.CompletedTask;
+                }),
+            new(
+                "Edit API key",
+                "Save or remove the local operator API credential",
+                $"Current source: {_credentialSource}",
+                "api key credential auth token settings",
+                "Auth",
+                null,
+                () =>
+                {
+                    ApiKeyButton_Click(this, new RoutedEventArgs());
+                    return Task.CompletedTask;
+                }),
+        ];
+
+        return actions;
+    }
+
+    private CommandPaletteAction NavigationAction(
+        string label,
+        string destination,
+        string detail,
+        string shortcut) =>
+        new(
+            $"Go to {label}",
+            destination == _selectedDestination ? "Current page" : $"Navigate to {label}",
+            detail,
+            $"{label} {destination} page nav navigation {shortcut}",
+            $"Ctrl+K",
+            destination == _selectedDestination ? "positive" : null,
+            () =>
+            {
+                NavigateToDestination(destination);
+                return Task.CompletedTask;
+            });
+
+    private void NavigateToDestination(string destination)
+    {
+        if (destination == "Settings")
+        {
+            RootNavigation.SelectedItem = RootNavigation.SettingsItem;
+            return;
+        }
+
+        foreach (object item in RootNavigation.MenuItems)
+        {
+            if (item is NavigationViewItem navigationItem
+                && string.Equals(navigationItem.Tag as string, destination, StringComparison.Ordinal))
+            {
+                RootNavigation.SelectedItem = navigationItem;
+                return;
+            }
+        }
+    }
+
+    private Task FocusCollectionSearchAsync()
+    {
+        if (_selectedDestination == "Dashboard")
+        {
+            ShowCommandWarning("List search is available after opening Markets, Signals, Positions, Calibration, Jobs, Live, Operations, or Settings.");
+            return Task.CompletedTask;
+        }
+
+        CollectionSearchBox.Focus(FocusState.Programmatic);
+        return Task.CompletedTask;
+    }
+
+    private static bool MatchesPaletteQuery(CommandPaletteAction action, string query) =>
+        ContainsSearch(action.Title, query)
+        || ContainsSearch(action.Subtitle, query)
+        || ContainsSearch(action.Detail, query)
+        || ContainsSearch(action.Status, query)
+        || ContainsSearch(action.SearchText, query);
 
     private async Task RefreshAsync()
     {
