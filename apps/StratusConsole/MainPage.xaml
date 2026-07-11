@@ -211,6 +211,22 @@
                             <ComboBoxItem Content="Review risk" />
                         </ComboBox>
                     </AppBarElementContainer>
+                    <AppBarElementContainer
+                        x:Name="JobsFilterContainer"
+                        VerticalContentAlignment="Center"
+                        Visibility="Collapsed">
+                        <ComboBox
+                            x:Name="JobsFilterBox"
+                            MinWidth="130"
+                            SelectedIndex="0"
+                            SelectionChanged="JobsFilterBox_SelectionChanged">
+                            <ComboBoxItem Content="All" />
+                            <ComboBoxItem Content="Failures" />
+                            <ComboBoxItem Content="Slow" />
+                            <ComboBoxItem Content="Prices" />
+                            <ComboBoxItem Content="Execution" />
+                        </ComboBox>
+                    </AppBarElementContainer>
                     <AppBarButton
                         x:Name="ApiKeyButton"
                         Click="ApiKeyButton_Click"
@@ -987,6 +1003,133 @@
                                             x:Name="CalibrationOutlierText"
                                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                             Text="No outliers loaded"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
+                        </Grid>
+                    </Grid>
+                </Border>
+                <Border
+                    x:Name="JobsBoardPanel"
+                    Grid.Row="0"
+                    Grid.ColumnSpan="2"
+                    Margin="32,0,32,12"
+                    Padding="16"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Visibility="Collapsed">
+                    <Grid RowSpacing="12">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="4">
+                                <TextBlock FontSize="18" FontWeight="SemiBold" Text="Scheduler board" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Job cadence, duration tape, failures, and stale worker detection"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <TextBlock
+                                x:Name="JobsBoardSummaryText"
+                                Grid.Column="1"
+                                VerticalAlignment="Top"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="No job data"
+                                TextWrapping="Wrap" />
+                        </Grid>
+                        <Grid Grid.Row="1" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.45*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border
+                                Padding="12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <Grid RowSpacing="8">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="220" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <StackPanel>
+                                        <TextBlock FontWeight="SemiBold" Text="Duration tape" />
+                                        <TextBlock
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="Recent job durations; red marks failures, amber marks slow runs."
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <Canvas
+                                        x:Name="JobsDurationCanvas"
+                                        Grid.Row="1"
+                                        SizeChanged="JobsDurationCanvas_SizeChanged" />
+                                    <TextBlock
+                                        x:Name="JobsDurationSummaryText"
+                                        Grid.Row="2"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No duration tape loaded"
+                                        TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                            <Grid Grid.Column="1" RowSpacing="12">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+                                <Border
+                                    Padding="12"
+                                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                    <Grid RowSpacing="8">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="96" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock FontWeight="SemiBold" Text="Run mix" />
+                                        <Canvas
+                                            x:Name="JobsMixCanvas"
+                                            Grid.Row="1"
+                                            SizeChanged="JobsMixCanvas_SizeChanged" />
+                                        <TextBlock
+                                            x:Name="JobsMixSummaryText"
+                                            Grid.Row="2"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="No job mix loaded"
+                                            TextWrapping="Wrap" />
+                                    </Grid>
+                                </Border>
+                                <Border
+                                    Grid.Row="1"
+                                    Padding="12"
+                                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                    <StackPanel Spacing="8">
+                                        <TextBlock FontWeight="SemiBold" Text="Cadence and failures" />
+                                        <TextBlock
+                                            x:Name="JobsCadenceText"
+                                            FontSize="15"
+                                            Text="No cadence loaded"
+                                            TextWrapping="Wrap" />
+                                        <TextBlock
+                                            x:Name="JobsFailureText"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="No failure summary loaded"
                                             TextWrapping="Wrap" />
                                     </StackPanel>
                                 </Border>

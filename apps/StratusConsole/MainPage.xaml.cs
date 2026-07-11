@@ -39,6 +39,7 @@ public sealed partial class MainPage : Page
     private IReadOnlyList<SignalDto> _signalPanelSignals = [];
     private IReadOnlyList<MarketDto> _marketBoardMarkets = [];
     private IReadOnlyList<CalibrationDto> _calibrationLabItems = [];
+    private IReadOnlyList<JobDto> _jobsBoardItems = [];
 
     public MainPage()
     {
@@ -1593,14 +1594,305 @@ public sealed partial class MainPage : Page
         }
     }
 
+    private string _jobsFilter = "All";
+
+    private async void JobsFilterBox_SelectionChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        _jobsFilter =
+            (JobsFilterBox.SelectedItem as ComboBoxItem)?.Content as string ?? "All";
+        await RefreshAsync();
+    }
+
     private void RenderJobs(IReadOnlyList<JobDto> jobs)
     {
-        SetCollection(jobs.Select(job => new MonitoringListItem(
+        List<JobDto> ordered = jobs
+            .OrderByDescending(job => job.FinishedAt)
+            .ToList();
+        List<JobDto> filtered = FilterJobs(ordered).ToList();
+        _jobsBoardItems = ordered;
+
+        SetCollection(filtered.Select(job => new MonitoringListItem(
             job.JobId,
             $"Scheduled {LocalTime(job.ScheduledAt)}",
-            $"Duration {(job.FinishedAt - job.ScheduledAt).TotalSeconds:0.0}s{ReasonSuffix(job.Error)}",
-            $"Finished {LocalTime(job.FinishedAt)}",
-            Pretty(job.Status))));
+            $"Duration {JobDurationSeconds(job):0.0}s{ReasonSuffix(job.Error)}",
+            $"Finished {LocalTime(job.FinishedAt)} · {RelativeAge(job.FinishedAt)} ago",
+            Pretty(job.Status),
+            JobAccent(job))));
+        CollectionEmptyText.Text = _jobsFilter == "All"
+            ? "No job runs yet"
+            : "No job runs match this filter";
+        RenderJobsBoard(ordered, filtered);
+    }
+
+    private IEnumerable<JobDto> FilterJobs(IReadOnlyList<JobDto> jobs) =>
+        _jobsFilter switch
+        {
+            "Failures" => jobs.Where(job => !IsJobSuccess(job)),
+            "Slow" => jobs.Where(IsJobSlow),
+            "Prices" => jobs.Where(job => job.JobId.Contains("price", StringComparison.OrdinalIgnoreCase)
+                || job.JobId.Contains("signal", StringComparison.OrdinalIgnoreCase)),
+            "Execution" => jobs.Where(job => job.JobId.Contains("execution", StringComparison.OrdinalIgnoreCase)),
+            _ => jobs,
+        };
+
+    private static bool IsJobSuccess(JobDto job) =>
+        job.Status.Equals("success", StringComparison.OrdinalIgnoreCase)
+        || job.Status.Equals("succeeded", StringComparison.OrdinalIgnoreCase);
+
+    private static double JobDurationSeconds(JobDto job) =>
+        Math.Max(0, (job.FinishedAt - job.ScheduledAt).TotalSeconds);
+
+    private static bool IsJobSlow(JobDto job) => JobDurationSeconds(job) > 1.0;
+
+    private static string? JobAccent(JobDto job) =>
+        !IsJobSuccess(job)
+            ? "negative"
+            : IsJobSlow(job)
+                ? null
+                : "positive";
+
+    private static string RelativeAge(DateTimeOffset value)
+    {
+        TimeSpan age = DateTimeOffset.Now - value.ToLocalTime();
+        if (age.TotalMinutes < 1)
+        {
+            return "just now";
+        }
+
+        if (age.TotalHours < 1)
+        {
+            return $"{age.TotalMinutes:0}m";
+        }
+
+        if (age.TotalDays < 1)
+        {
+            return $"{age.TotalHours:0.0}h";
+        }
+
+        return $"{age.TotalDays:0.0}d";
+    }
+
+    private void RenderJobsBoard(
+        IReadOnlyList<JobDto> jobs,
+        IReadOnlyList<JobDto> filtered)
+    {
+        JobsBoardPanel.Visibility = Visibility.Visible;
+        int failures = jobs.Count(job => !IsJobSuccess(job));
+        int slow = jobs.Count(IsJobSlow);
+        double avgDuration = jobs.Count == 0 ? 0 : jobs.Average(JobDurationSeconds);
+        JobDto? latest = jobs.OrderByDescending(job => job.FinishedAt).FirstOrDefault();
+        bool stale = latest is null || DateTimeOffset.Now - latest.FinishedAt.ToLocalTime() > TimeSpan.FromMinutes(15);
+
+        JobsBoardSummaryText.Text =
+            $"{filtered.Count}/{jobs.Count} shown · {failures} failed · {slow} slow"
+            + (stale ? " · stale" : " · live cadence");
+        JobsDurationSummaryText.Text = jobs.Count == 0
+            ? "No job duration history"
+            : $"avg {avgDuration:0.00}s · max {jobs.Max(JobDurationSeconds):0.00}s · filter {_jobsFilter}";
+        JobsMixSummaryText.Text =
+            $"success {jobs.Count(IsJobSuccess)} · failed {failures} · slow {slow}";
+
+        List<string> cadence = jobs
+            .GroupBy(job => job.JobId)
+            .OrderBy(group => group.Key)
+            .Take(6)
+            .Select(group =>
+            {
+                JobDto last = group.OrderByDescending(job => job.FinishedAt).First();
+                bool jobStale = DateTimeOffset.Now - last.FinishedAt.ToLocalTime() > TimeSpan.FromMinutes(15);
+                return $"{(jobStale ? "[STALE]" : "[OK]")} {group.Key}: {RelativeAge(last.FinishedAt)} ago";
+            })
+            .ToList();
+        JobsCadenceText.Text = cadence.Count == 0
+            ? "No scheduler cadence has been recorded yet."
+            : string.Join(Environment.NewLine, cadence);
+
+        List<string> failureRows = jobs
+            .Where(job => !IsJobSuccess(job))
+            .Take(4)
+            .Select(job => $"{job.JobId} · {LocalTime(job.FinishedAt)} · {job.Error ?? Pretty(job.Status)}")
+            .ToList();
+        JobsFailureText.Text = failureRows.Count == 0
+            ? stale
+                ? "No failures in the latest sample, but cadence is stale. The worker is probably stopped."
+                : "No failures in the latest sample."
+            : string.Join(Environment.NewLine, failureRows);
+
+        DrawJobsDurationTape();
+        DrawJobsMix();
+    }
+
+    private void JobsDurationCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (JobsBoardPanel.Visibility == Visibility.Visible)
+        {
+            DrawJobsDurationTape();
+        }
+    }
+
+    private void JobsMixCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (JobsBoardPanel.Visibility == Visibility.Visible)
+        {
+            DrawJobsMix();
+        }
+    }
+
+    private void DrawJobsDurationTape()
+    {
+        JobsDurationCanvas.Children.Clear();
+        double width = JobsDurationCanvas.ActualWidth;
+        double height = JobsDurationCanvas.ActualHeight;
+        if (width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        List<JobDto> recent = _jobsBoardItems
+            .OrderBy(job => job.FinishedAt)
+            .TakeLast(48)
+            .ToList();
+        if (recent.Count == 0)
+        {
+            AddCanvasText(
+                JobsDurationCanvas,
+                "No job runs yet",
+                18,
+                20,
+                new SolidColorBrush(Color.FromArgb(0xDD, 0xFF, 0xFF, 0xFF)),
+                18,
+                new FontWeight { Weight = 600 });
+            AddCanvasText(
+                JobsDurationCanvas,
+                "The scheduler tape will fill after the worker writes job_runs.",
+                18,
+                56,
+                new SolidColorBrush(Color.FromArgb(0xAA, 0xFF, 0xFF, 0xFF)),
+                13);
+            return;
+        }
+
+        double maxDuration = Math.Max(0.1, recent.Max(JobDurationSeconds));
+        double gap = 4;
+        double barWidth = Math.Max(5, (width - gap * (recent.Count - 1)) / recent.Count);
+        double baseline = height - 22;
+        var baselineLine = new Line
+        {
+            X1 = 0,
+            X2 = width,
+            Y1 = baseline,
+            Y2 = baseline,
+            Stroke = new SolidColorBrush(Color.FromArgb(0x55, 0xAA, 0xAA, 0xAA)),
+            StrokeThickness = 1,
+        };
+        JobsDurationCanvas.Children.Add(baselineLine);
+
+        for (int i = 0; i < recent.Count; i++)
+        {
+            JobDto job = recent[i];
+            double duration = JobDurationSeconds(job);
+            double barHeight = Math.Max(2, duration / maxDuration * (height - 54));
+            Brush fill = !IsJobSuccess(job)
+                ? AccentBrush("negative")
+                : IsJobSlow(job)
+                    ? new SolidColorBrush(Color.FromArgb(0xFF, 0xC7, 0x9A, 0x3D))
+                    : AccentBrush("positive");
+            var rect = new Rectangle
+            {
+                Width = barWidth,
+                Height = barHeight,
+                RadiusX = 3,
+                RadiusY = 3,
+                Fill = fill,
+            };
+            Canvas.SetLeft(rect, i * (barWidth + gap));
+            Canvas.SetTop(rect, baseline - barHeight);
+            JobsDurationCanvas.Children.Add(rect);
+        }
+
+        JobDto latest = recent[^1];
+        AddCanvasText(
+            JobsDurationCanvas,
+            $"latest {latest.JobId} · {JobDurationSeconds(latest):0.00}s · {RelativeAge(latest.FinishedAt)} ago",
+            16,
+            12,
+            new SolidColorBrush(Color.FromArgb(0xDD, 0xFF, 0xFF, 0xFF)),
+            13,
+            new FontWeight { Weight = 600 });
+    }
+
+    private void DrawJobsMix()
+    {
+        JobsMixCanvas.Children.Clear();
+        double width = JobsMixCanvas.ActualWidth;
+        double height = JobsMixCanvas.ActualHeight;
+        if (width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        int success = _jobsBoardItems.Count(IsJobSuccess);
+        int failures = _jobsBoardItems.Count(job => !IsJobSuccess(job));
+        int slow = _jobsBoardItems.Count(job => IsJobSuccess(job) && IsJobSlow(job));
+        int fast = Math.Max(0, success - slow);
+        int total = fast + slow + failures;
+        if (total == 0)
+        {
+            AddCanvasText(
+                JobsMixCanvas,
+                "No run mix yet",
+                12,
+                16,
+                new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
+                13,
+                new FontWeight { Weight = 600 });
+            return;
+        }
+
+        double x = 0;
+        double y = 28;
+        double barHeight = 28;
+        (string Label, int Count, Brush Brush)[] segments =
+        [
+            ("Fast", fast, AccentBrush("positive")),
+            ("Slow", slow, new SolidColorBrush(Color.FromArgb(0xFF, 0xC7, 0x9A, 0x3D))),
+            ("Failed", failures, AccentBrush("negative")),
+        ];
+        foreach ((string label, int count, Brush brush) in segments.Where(segment => segment.Count > 0))
+        {
+            double segmentWidth = Math.Max(3, width * count / total);
+            var rect = new Rectangle
+            {
+                Width = segmentWidth,
+                Height = barHeight,
+                RadiusX = 4,
+                RadiusY = 4,
+                Fill = brush,
+            };
+            Canvas.SetLeft(rect, x);
+            Canvas.SetTop(rect, y);
+            JobsMixCanvas.Children.Add(rect);
+            if (segmentWidth > 70)
+            {
+                AddCanvasText(
+                    JobsMixCanvas,
+                    $"{label} {count}",
+                    x + 8,
+                    y + 5,
+                    new SolidColorBrush(Colors.White),
+                    11,
+                    new FontWeight { Weight = 600 });
+            }
+
+            x += segmentWidth;
+        }
     }
 
     private void RenderOperations(
@@ -2820,6 +3112,7 @@ public sealed partial class MainPage : Page
         SignalIntelligencePanel.Visibility = Visibility.Collapsed;
         MarketBoardPanel.Visibility = Visibility.Collapsed;
         CalibrationLabPanel.Visibility = Visibility.Collapsed;
+        JobsBoardPanel.Visibility = Visibility.Collapsed;
         if (SupportsMarketDrilldown(_selectedDestination) && _selectedDrilldownItem?.MarketId is not null)
         {
             CollectionDetailColumn.Width = new GridLength(460);
@@ -2922,6 +3215,8 @@ public sealed partial class MainPage : Page
             _selectedDestination == "Markets" ? Visibility.Visible : Visibility.Collapsed;
         CalibrationFilterContainer.Visibility =
             _selectedDestination == "Calibration" ? Visibility.Visible : Visibility.Collapsed;
+        JobsFilterContainer.Visibility =
+            _selectedDestination == "Jobs" ? Visibility.Visible : Visibility.Collapsed;
         ApiKeyButton.Visibility =
             _selectedDestination == "Settings" ? Visibility.Visible : Visibility.Collapsed;
 
