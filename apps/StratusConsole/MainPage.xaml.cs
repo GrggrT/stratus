@@ -36,6 +36,8 @@ public sealed partial class MainPage : Page
     private IReadOnlyList<ProbabilityPointDto> _drilldownProbabilities = [];
     private OrderBookResponse? _drilldownOrderBook;
     private MonitoringListItem? _selectedDrilldownItem;
+    private Point? _drilldownHoverPoint;
+    private string _drilldownBaseMetaText = "Chart and orderbook will load after selection";
     private IReadOnlyList<PositionDto> _portfolioPositions = [];
     private IReadOnlyList<EquityPointDto> _portfolioEquity = [];
     private IReadOnlyList<SignalDto> _signalPanelSignals = [];
@@ -57,6 +59,13 @@ public sealed partial class MainPage : Page
         string Status,
         string? Accent,
         Func<Task> Execute);
+
+    private sealed record DrilldownHoverReadout(
+        double X,
+        double Y,
+        string Text,
+        string Meta,
+        Brush Brush);
 
     public MainPage()
     {
@@ -1023,6 +1032,8 @@ public sealed partial class MainPage : Page
         _drilldownProbabilities = [];
         _drilldownOrderBook = null;
         _selectedDrilldownItem = null;
+        _drilldownHoverPoint = null;
+        _drilldownBaseMetaText = "Chart and orderbook will load after selection";
     }
 
     private async Task LoadMarketDrilldownAsync(MonitoringListItem item)
@@ -1034,11 +1045,13 @@ public sealed partial class MainPage : Page
         }
 
         _selectedDrilldownItem = item;
+        _drilldownHoverPoint = null;
         CollectionDetailColumn.Width = new GridLength(460);
         MarketDrilldownPanel.Visibility = Visibility.Visible;
         DrilldownTitle.Text = item.Title;
         DrilldownSummaryText.Text = "Loading market series and orderbook...";
-        DrilldownMetaText.Text = item.Meta;
+        _drilldownBaseMetaText = item.Meta;
+        DrilldownMetaText.Text = _drilldownBaseMetaText;
         OrderBookBidsText.Text = "Loading";
         OrderBookAsksText.Text = "Loading";
         DrilldownChartCanvas.Children.Clear();
@@ -1063,13 +1076,14 @@ public sealed partial class MainPage : Page
             DrilldownSummaryText.Text =
                 $"mid {Percent(latestPrice?.Midpoint)} · model {Percent(latestSignal?.ModelProbability)}"
                 + $" · edge {Percent(latestSignal?.Edge)}";
-            DrilldownMetaText.Text =
+            _drilldownBaseMetaText =
                 $"{_drilldownPrices.Count} price point(s) · {_drilldownProbabilities.Count} probability/signal point(s)"
                 + $" · book {_drilldownOrderBook.SourceStatus}";
             if (!string.IsNullOrWhiteSpace(_drilldownOrderBook.Error))
             {
-                DrilldownMetaText.Text += $" · {_drilldownOrderBook.Error}";
+                _drilldownBaseMetaText += $" · {_drilldownOrderBook.Error}";
             }
+            DrilldownMetaText.Text = _drilldownBaseMetaText;
             OrderBookBidsText.Text = FormatBookLevels(_drilldownOrderBook.Bids);
             OrderBookAsksText.Text = FormatBookLevels(_drilldownOrderBook.Asks);
             DrawDrilldownChart();
@@ -1080,7 +1094,8 @@ public sealed partial class MainPage : Page
         catch (Exception ex)
         {
             DrilldownSummaryText.Text = "Drill-down unavailable";
-            DrilldownMetaText.Text = ex.Message;
+            _drilldownBaseMetaText = ex.Message;
+            DrilldownMetaText.Text = _drilldownBaseMetaText;
             OrderBookBidsText.Text = "—";
             OrderBookAsksText.Text = "—";
         }
@@ -3172,6 +3187,19 @@ public sealed partial class MainPage : Page
         DrawDrilldownChart();
     }
 
+    private void DrilldownChartCanvas_PointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        _drilldownHoverPoint = e.GetCurrentPoint(DrilldownChartCanvas).Position;
+        DrawDrilldownChart();
+    }
+
+    private void DrilldownChartCanvas_PointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        _drilldownHoverPoint = null;
+        DrilldownMetaText.Text = _drilldownBaseMetaText;
+        DrawDrilldownChart();
+    }
+
     private void DrawDrilldownChart()
     {
         DrilldownChartCanvas.Children.Clear();
@@ -3196,6 +3224,7 @@ public sealed partial class MainPage : Page
                     height,
                     new SolidColorBrush(Color.FromArgb(0xFF, 0x43, 0xD8, 0xFF)),
                     3);
+                DrawDrilldownHoverOverlay(width, height);
                 return;
             }
         }
@@ -3210,6 +3239,7 @@ public sealed partial class MainPage : Page
             if (_drilldownPrices.Count >= 2
                 || _drilldownProbabilities.Count(point => point.ModelProbability is not null) >= 2)
             {
+                DrawDrilldownHoverOverlay(width, height);
                 return;
             }
         }
@@ -3227,6 +3257,7 @@ public sealed partial class MainPage : Page
                     width,
                     height,
                     edgeValues[^1] >= 0 ? "positive" : "negative");
+                DrawDrilldownHoverOverlay(width, height);
                 return;
             }
         }
@@ -3239,6 +3270,170 @@ public sealed partial class MainPage : Page
             new SolidColorBrush(Color.FromArgb(0xCC, 0xFF, 0xFF, 0xFF)),
             14,
             new FontWeight { Weight = 600 });
+    }
+
+    private void DrawDrilldownHoverOverlay(double width, double height)
+    {
+        if (_drilldownHoverPoint is not Point point || width <= 1 || height <= 1)
+        {
+            return;
+        }
+
+        DrilldownHoverReadout? readout = DrilldownSeriesBox.SelectedIndex switch
+        {
+            0 => PriceHoverReadout(point, width, height),
+            1 => ProbabilityHoverReadout(point, width, height),
+            _ => EdgeHoverReadout(point, width, height),
+        };
+        if (readout is null)
+        {
+            return;
+        }
+
+        DrawHoverCrosshair(DrilldownChartCanvas, readout, width, height);
+        DrilldownMetaText.Text = readout.Meta;
+    }
+
+    private DrilldownHoverReadout? PriceHoverReadout(Point point, double width, double height)
+    {
+        if (_drilldownPrices.Count < 2)
+        {
+            return null;
+        }
+
+        int index = NearestSeriesIndex(point.X, width, _drilldownPrices.Count);
+        MarketPricePointDto price = _drilldownPrices[index];
+        double x = SeriesX(index, width, _drilldownPrices.Count);
+        double y = height - Math.Clamp(price.Midpoint, 0, 1) * height;
+        string text =
+            $"{LocalTime(price.T)}\nmid {Percent(price.Midpoint)} · bid {Percent(price.BestBid)} · ask {Percent(price.BestAsk)}";
+        string meta =
+            $"Hover price · {LocalTime(price.T)} · bid depth {Usd(price.BidDepthUsd)} · ask depth {Usd(price.AskDepthUsd)}";
+        return new DrilldownHoverReadout(x, y, text, meta, new SolidColorBrush(Color.FromArgb(0xFF, 0x43, 0xD8, 0xFF)));
+    }
+
+    private DrilldownHoverReadout? ProbabilityHoverReadout(Point point, double width, double height)
+    {
+        List<ProbabilityPointDto> points = _drilldownProbabilities
+            .Where(p => p.ModelProbability is not null || p.MarketPrice is not null)
+            .ToList();
+        if (points.Count < 2)
+        {
+            return null;
+        }
+
+        int index = NearestSeriesIndex(point.X, width, points.Count);
+        ProbabilityPointDto probability = points[index];
+        double value = probability.ModelProbability ?? probability.MarketPrice ?? 0;
+        double x = SeriesX(index, width, points.Count);
+        double y = height - Math.Clamp(value, 0, 1) * height;
+        string text =
+            $"{LocalTime(probability.T)}\nmodel {Percent(probability.ModelProbability)} · market {Percent(probability.MarketPrice)} · edge {Percent(probability.Edge)}";
+        string meta =
+            $"Hover probability · {LocalTime(probability.T)} · {probability.Source}"
+            + (probability.Confidence is null ? string.Empty : $" · confidence {probability.Confidence}");
+        return new DrilldownHoverReadout(x, y, text, meta, new SolidColorBrush(Color.FromArgb(0xFF, 0xB2, 0x7C, 0xFF)));
+    }
+
+    private DrilldownHoverReadout? EdgeHoverReadout(Point point, double width, double height)
+    {
+        List<ProbabilityPointDto> points = _drilldownProbabilities
+            .Where(p => p.Edge is not null)
+            .ToList();
+        if (points.Count < 2)
+        {
+            return null;
+        }
+
+        int index = NearestSeriesIndex(point.X, width, points.Count);
+        ProbabilityPointDto edge = points[index];
+        double[] values = points.Select(p => p.Edge!.Value).ToArray();
+        double lo = Math.Min(0, values.Min());
+        double hi = Math.Max(0, values.Max());
+        double span = hi - lo <= 0 ? 1 : hi - lo;
+        double x = SeriesX(index, width, points.Count);
+        double y = height - ((edge.Edge!.Value - lo) / span * height);
+        string text =
+            $"{LocalTime(edge.T)}\nedge {Percent(edge.Edge)} · model {Percent(edge.ModelProbability)} · market {Percent(edge.MarketPrice)}";
+        string meta =
+            $"Hover edge · {LocalTime(edge.T)} · {edge.Status ?? edge.Source}"
+            + (edge.Confidence is null ? string.Empty : $" · confidence {edge.Confidence}");
+        return new DrilldownHoverReadout(x, y, text, meta, AccentBrush(PnlAccent(edge.Edge)));
+    }
+
+    private static int NearestSeriesIndex(double x, double width, int count)
+    {
+        if (count <= 1 || width <= 0)
+        {
+            return 0;
+        }
+
+        double scaled = x / width * (count - 1);
+        return Math.Clamp((int)Math.Round(scaled), 0, count - 1);
+    }
+
+    private static double SeriesX(int index, double width, int count) =>
+        count <= 1 ? 0 : index * (width / (count - 1));
+
+    private static void DrawHoverCrosshair(
+        Canvas canvas,
+        DrilldownHoverReadout readout,
+        double width,
+        double height)
+    {
+        Brush lineBrush = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xFF, 0xFF));
+        canvas.Children.Add(new Line
+        {
+            X1 = readout.X,
+            X2 = readout.X,
+            Y1 = 0,
+            Y2 = height,
+            Stroke = lineBrush,
+            StrokeThickness = 1,
+        });
+        canvas.Children.Add(new Line
+        {
+            X1 = 0,
+            X2 = width,
+            Y1 = readout.Y,
+            Y2 = readout.Y,
+            Stroke = new SolidColorBrush(Color.FromArgb(0x55, 0xFF, 0xFF, 0xFF)),
+            StrokeThickness = 1,
+        });
+
+        var dot = new Ellipse
+        {
+            Width = 11,
+            Height = 11,
+            Fill = readout.Brush,
+            Stroke = new SolidColorBrush(Colors.White),
+            StrokeThickness = 1,
+        };
+        Canvas.SetLeft(dot, readout.X - 5.5);
+        Canvas.SetTop(dot, readout.Y - 5.5);
+        canvas.Children.Add(dot);
+
+        var label = new Border
+        {
+            Padding = new Thickness(8, 5, 8, 5),
+            CornerRadius = new CornerRadius(6),
+            Background = new SolidColorBrush(Color.FromArgb(0xDD, 0x20, 0x20, 0x20)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0x77, 0xFF, 0xFF, 0xFF)),
+            BorderThickness = new Thickness(1),
+            Child = new TextBlock
+            {
+                Text = readout.Text,
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Colors.White),
+                TextWrapping = TextWrapping.Wrap,
+            },
+        };
+        double labelLeft = Math.Clamp(readout.X + 10, 0, Math.Max(0, width - 205));
+        double labelTop = Math.Clamp(readout.Y - 34, 0, Math.Max(0, height - 62));
+        label.Width = Math.Min(205, Math.Max(150, width - labelLeft));
+        Canvas.SetLeft(label, labelLeft);
+        Canvas.SetTop(label, labelTop);
+        canvas.Children.Add(label);
     }
 
     private static void DrawLineSeries(

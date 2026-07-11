@@ -1649,6 +1649,9 @@
                         <Canvas
                             x:Name="DrilldownChartCanvas"
                             Grid.Row="2"
+                            AutomationProperties.Name="Interactive market drill-down chart"
+                            PointerExited="DrilldownChartCanvas_PointerExited"
+                            PointerMoved="DrilldownChartCanvas_PointerMoved"
                             SizeChanged="DrilldownChartCanvas_SizeChanged" />
                         <StackPanel Grid.Row="3" Spacing="4">
                             <TextBlock x:Name="DrilldownSummaryText" Text="No market selected" TextWrapping="Wrap" />
