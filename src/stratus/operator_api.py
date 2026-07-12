@@ -32,6 +32,7 @@ from stratus.db.models import (
 from stratus.repositories.operator_commands import enqueue_command, recent_commands
 from stratus.repositories.runtime_control import get_runtime_control
 from stratus.services.live_analytics import (
+    LivePerformance,
     PositionStat,
     cumulative_equity,
     summarize_live_performance,
@@ -183,9 +184,11 @@ class LiveSummaryResponse(BaseModel):
     wins: int
     win_rate: float | None
     total_pnl_usd: float
+    robust_pnl_usd: float | None
     total_cost_usd: float
     total_fees_usd: float
     roi: float | None
+    robust_roi: float | None
     avg_clv: float | None
     clv_beat_rate: float | None
 
@@ -853,7 +856,9 @@ async def commands(
     )
 
 
-async def _live_position_stats(session: AsyncSession) -> list[PositionStat]:
+async def _position_stats(
+    session: AsyncSession, mode: ExecutionMode
+) -> list[PositionStat]:
     rows = (
         await session.execute(
             select(
@@ -862,7 +867,7 @@ async def _live_position_stats(session: AsyncSession) -> list[PositionStat]:
                 Position.clv,
                 Position.size_usd,
                 Position.fee_usd,
-            ).where(Position.mode == ExecutionMode.LIVE)
+            ).where(Position.mode == mode)
         )
     ).all()
     return [
@@ -877,10 +882,7 @@ async def _live_position_stats(session: AsyncSession) -> list[PositionStat]:
     ]
 
 
-@router.get("/live-summary", response_model=LiveSummaryResponse)
-async def live_summary(request: Request) -> LiveSummaryResponse:
-    async with _sessions(request)() as session:
-        perf = summarize_live_performance(await _live_position_stats(session))
+def _summary_response(perf: LivePerformance) -> LiveSummaryResponse:
     return LiveSummaryResponse(
         generated_at=datetime.now(UTC),
         positions=perf.positions,
@@ -889,12 +891,36 @@ async def live_summary(request: Request) -> LiveSummaryResponse:
         wins=perf.wins,
         win_rate=perf.win_rate,
         total_pnl_usd=perf.total_pnl_usd,
+        robust_pnl_usd=perf.robust_pnl_usd,
         total_cost_usd=perf.total_cost_usd,
         total_fees_usd=perf.total_fees_usd,
         roi=perf.roi,
+        robust_roi=perf.robust_roi,
         avg_clv=perf.avg_clv,
         clv_beat_rate=perf.clv_beat_rate,
     )
+
+
+@router.get("/live-summary", response_model=LiveSummaryResponse)
+async def live_summary(request: Request) -> LiveSummaryResponse:
+    async with _sessions(request)() as session:
+        perf = summarize_live_performance(
+            await _position_stats(session, ExecutionMode.LIVE)
+        )
+    return _summary_response(perf)
+
+
+@router.get("/performance-summary", response_model=LiveSummaryResponse)
+async def performance_summary(
+    request: Request,
+    mode: Annotated[str, Query(pattern="^(paper|live)$")] = "paper",
+) -> LiveSummaryResponse:
+    selected_mode = ExecutionMode.LIVE if mode == "live" else ExecutionMode.PAPER
+    async with _sessions(request)() as session:
+        perf = summarize_live_performance(
+            await _position_stats(session, selected_mode)
+        )
+    return _summary_response(perf)
 
 
 async def _equity_response(request: Request, mode: ExecutionMode) -> EquityResponse:

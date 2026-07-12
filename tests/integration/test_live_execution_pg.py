@@ -37,6 +37,7 @@ from stratus.jobs.execute_live_signals import (
     poll_live_fills,
     preflight_live,
 )
+from stratus.repositories.execution import PaperExecutionValue, persist_paper_executions
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("STRATUS_TEST_DATABASE_URL"),
@@ -609,6 +610,73 @@ async def test_in_flight_excludes_paper_orders(
         )
     async with db_sessions() as session:
         assert await in_flight_live_exposure(session) == []
+
+
+async def test_paper_executions_aggregate_open_position_by_market_and_side(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    first_signal_id = await _pending_signal(db_sessions)
+    async with db_sessions.begin() as session:
+        first_signal = await session.get(Signal, first_signal_id)
+        assert first_signal is not None
+        second_signal = Signal(
+            market_id=first_signal.market_id,
+            ts=NOW + timedelta(seconds=1),
+            side=TradeSide.BUY_YES,
+            model_prob=Decimal("0.610000"),
+            market_price=Decimal("0.600000"),
+            edge=Decimal("0.070000"),
+            kelly_frac=Decimal("0.010000"),
+            size_usd=Decimal("30.0000"),
+            confidence=SignalConfidence.B,
+            status=SignalStatus.PENDING,
+        )
+        session.add(second_signal)
+        await session.flush()
+        second_signal_id = second_signal.id
+        market_id = first_signal.market_id
+
+    async with db_sessions.begin() as session:
+        written = await persist_paper_executions(
+            session,
+            [
+                PaperExecutionValue(
+                    signal_id=first_signal_id,
+                    market_id=market_id,
+                    side=TradeSide.BUY_YES,
+                    requested_usd=Decimal("20.0000"),
+                    filled_usd=Decimal("20.0000"),
+                    avg_price=Decimal("0.500000"),
+                    size_shares=Decimal("40.000000"),
+                    fee_usd=Decimal("0.00000"),
+                    total_cost_usd=Decimal("20.0000"),
+                    filled_at=NOW,
+                ),
+                PaperExecutionValue(
+                    signal_id=second_signal_id,
+                    market_id=market_id,
+                    side=TradeSide.BUY_YES,
+                    requested_usd=Decimal("30.0000"),
+                    filled_usd=Decimal("30.0000"),
+                    avg_price=Decimal("0.600000"),
+                    size_shares=Decimal("50.000000"),
+                    fee_usd=Decimal("0.00000"),
+                    total_cost_usd=Decimal("30.0000"),
+                    filled_at=NOW + timedelta(seconds=1),
+                ),
+            ],
+        )
+
+    async with db_sessions() as session:
+        positions = (await session.execute(select(Position))).scalars().all()
+        signals = (await session.execute(select(Signal))).scalars().all()
+
+    assert written == 2
+    assert len(positions) == 1
+    assert positions[0].size_usd == Decimal("50.0000")
+    assert positions[0].size_shares == Decimal("90.000000")
+    assert positions[0].avg_price == Decimal("0.555556")
+    assert {signal.status for signal in signals} == {SignalStatus.EXECUTED}
 
 
 async def test_cancel_requested_live_orders_are_canceled(

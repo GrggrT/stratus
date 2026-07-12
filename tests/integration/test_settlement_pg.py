@@ -14,6 +14,7 @@ from stratus.db.models import (
     BankrollLog,
     ExecutionMode,
     Market,
+    MarketPrice,
     MarketStatus,
     Position,
     PositionStatus,
@@ -102,6 +103,51 @@ async def test_paper_settlement_writes_a_bankroll_row(
     assert bankroll.balance_usd == Decimal("1100.0000")
     assert position.status is PositionStatus.CLOSED
     assert position.pnl_usd == Decimal("20.0000")
+
+
+async def test_settlement_uses_latest_pre_cutoff_price_for_clv(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    market_id = await _market_with_position(
+        db_sessions, mode=ExecutionMode.PAPER, side=TradeSide.BUY_NO
+    )
+    async with db_sessions.begin() as session:
+        session.add_all(
+            [
+                MarketPrice(
+                    market_id=market_id,
+                    ts=NOW - timedelta(minutes=25),
+                    best_bid=Decimal("0.290000"),
+                    best_ask=Decimal("0.310000"),
+                    midpoint=Decimal("0.300000"),
+                    bid_depth_usd=Decimal("100.0000"),
+                    ask_depth_usd=Decimal("100.0000"),
+                ),
+                MarketPrice(
+                    market_id=market_id,
+                    ts=NOW - timedelta(minutes=5),
+                    best_bid=Decimal("0.010000"),
+                    best_ask=Decimal("0.020000"),
+                    midpoint=Decimal("0.015000"),
+                    bid_depth_usd=Decimal("100.0000"),
+                    ask_depth_usd=Decimal("100.0000"),
+                ),
+            ]
+        )
+        await settle_resolved_markets(
+            session,
+            resolutions={market_id: False},  # NO wins
+            closing_times={market_id: NOW},
+            settled_at=NOW,
+            initial_bankroll_usd=Decimal("1080"),
+        )
+
+    async with db_sessions() as session:
+        position = (await session.execute(select(Position))).scalar_one()
+
+    # BUY_NO side-adjusts the YES midpoint: 1 - 0.30 - 0.50 entry.
+    # The later post-cutoff price must not be used.
+    assert position.clv == Decimal("0.200000")
 
 
 async def test_live_settlement_records_pnl_and_a_redemption_reminder(

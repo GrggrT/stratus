@@ -44,26 +44,96 @@ async def _close_position(
         cost_usd=position.size_usd,
     )
     position.pnl_usd = pnl
+    if position.clv is None:
+        midpoint = await _closing_midpoint(session, position, closed_at=closed_at)
+        if midpoint is not None:
+            position.clv = closing_line_value(
+                side=position.side,
+                yes_midpoint=midpoint,
+                entry_price=position.avg_price,
+            )
+    position.status = PositionStatus.CLOSED
+    position.closed_at = closed_at
+    return pnl
+
+
+async def _closing_midpoint(
+    session: AsyncSession, position: Position, *, closed_at: datetime
+) -> Decimal | None:
+    """Return a non-leaking closing-line midpoint for a position.
+
+    The previous implementation required a price snapshot inside a two-minute
+    window around T-15m. In production the collector cadence can drift or be
+    interrupted; that narrow window made CLV null for otherwise valid settled
+    positions. The robust rule is:
+
+    1. prefer the latest snapshot at or before T-15m;
+    2. if the market was created/observed too late for that, fall back to the
+       latest snapshot at or before the recorded close time;
+    3. never use a price after close, because that would leak settlement info.
+    """
     clv_target = closed_at - timedelta(minutes=15)
-    closing_price = await session.scalar(
+    midpoint = await session.scalar(
         select(MarketPrice)
         .where(
             MarketPrice.market_id == position.market_id,
             MarketPrice.ts <= clv_target,
-            MarketPrice.ts >= clv_target - timedelta(minutes=2),
         )
         .order_by(MarketPrice.ts.desc())
         .limit(1)
     )
-    if position.clv is None and closing_price is not None:
+    if midpoint is not None:
+        return midpoint.midpoint
+    fallback = await session.scalar(
+        select(MarketPrice)
+        .where(
+            MarketPrice.market_id == position.market_id,
+            MarketPrice.ts <= closed_at,
+        )
+        .order_by(MarketPrice.ts.desc())
+        .limit(1)
+    )
+    return fallback.midpoint if fallback is not None else None
+
+
+async def backfill_missing_clv(
+    session: AsyncSession, *, batch_size: int = 500
+) -> int:
+    """Best-effort CLV repair for already-settled positions.
+
+    Used by maintenance/backfills and safe to run repeatedly. It only fills
+    null CLV values and uses the same non-leaking price selection as normal
+    settlement.
+    """
+    positions = (
+        await session.execute(
+            select(Position)
+            .where(
+                Position.status == PositionStatus.CLOSED,
+                Position.closed_at.is_not(None),
+                Position.clv.is_(None),
+            )
+            .order_by(Position.id)
+            .limit(batch_size)
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars().all()
+    updated = 0
+    for position in positions:
+        if position.closed_at is None:
+            continue
+        midpoint = await _closing_midpoint(session, position, closed_at=position.closed_at)
+        if midpoint is None:
+            continue
         position.clv = closing_line_value(
             side=position.side,
-            yes_midpoint=closing_price.midpoint,
+            yes_midpoint=midpoint,
             entry_price=position.avg_price,
         )
-    position.status = PositionStatus.CLOSED
-    position.closed_at = closed_at
-    return pnl
+        updated += 1
+    if updated:
+        await session.flush()
+    return updated
 
 
 async def settle_resolved_markets(

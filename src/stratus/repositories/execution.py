@@ -347,18 +347,47 @@ async def persist_paper_executions(
                 filled_at=value.filled_at,
             )
         )
-        session.add(
-            Position(
-                market_id=value.market_id,
-                mode=ExecutionMode.PAPER,
-                side=value.side,
-                avg_price=value.avg_price,
-                size_shares=value.size_shares,
-                size_usd=value.total_cost_usd,
-                fee_usd=value.fee_usd,
-                status=PositionStatus.OPEN,
+        position = await session.scalar(
+            select(Position)
+            .where(
+                Position.market_id == value.market_id,
+                Position.mode == ExecutionMode.PAPER,
+                Position.side == value.side,
+                Position.status == PositionStatus.OPEN,
             )
+            .order_by(Position.id)
+            .with_for_update()
         )
+        if position is None:
+            session.add(
+                Position(
+                    market_id=value.market_id,
+                    mode=ExecutionMode.PAPER,
+                    side=value.side,
+                    avg_price=value.avg_price,
+                    size_shares=value.size_shares,
+                    size_usd=value.total_cost_usd,
+                    fee_usd=value.fee_usd,
+                    status=PositionStatus.OPEN,
+                )
+            )
+        else:
+            combined_shares = position.size_shares + value.size_shares
+            if combined_shares > 0:
+                position.avg_price = (
+                    (
+                        position.avg_price * position.size_shares
+                        + value.avg_price * value.size_shares
+                    )
+                    / combined_shares
+                ).quantize(Decimal("0.000001"))
+            position.size_shares = combined_shares.quantize(Decimal("0.000001"))
+            position.size_usd = (position.size_usd + value.total_cost_usd).quantize(
+                Decimal("0.0001")
+            )
+            position.fee_usd = ((position.fee_usd or Decimal(0)) + value.fee_usd).quantize(
+                Decimal("0.00001")
+            )
         signal.status = SignalStatus.EXECUTED
         written += 1
     await session.flush()

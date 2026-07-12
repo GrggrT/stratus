@@ -286,3 +286,46 @@ async def test_live_equity_endpoint_returns_cumulative_series(
     assert response.status_code == 200
     points = response.json()["points"]
     assert [p["cumulative_pnl_usd"] for p in points] == [20.0, 15.0]
+
+
+async def test_performance_summary_endpoint_supports_paper_robust_metrics(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    async with db_sessions.begin() as session:
+        station = Station(
+            icao="KLGA", name="LaGuardia", city="New York City",
+            lat=Decimal("40.77"), lon=Decimal("-73.87"), tz="America/New_York",
+        )
+        session.add(station)
+        await session.flush()
+        market = Market(
+            polymarket_id="pm-paper-summary", event_id="ev-1", station_id=station.id,
+            market_date=NOW.date(), kind=WeatherKind.HIGH, rules_raw="rules",
+            resolves_at=NOW, status=MarketStatus.RESOLVED, station_verified=True,
+        )
+        session.add(market)
+        await session.flush()
+        for pnl, cost in (("100.0", "50.0"), ("-10.0", "25.0"), ("-10.0", "25.0")):
+            session.add(
+                Position(
+                    market_id=market.id, mode=ExecutionMode.PAPER,
+                    side=TradeSide.BUY_YES, avg_price=Decimal("0.5"),
+                    size_shares=Decimal("50"), size_usd=Decimal(cost),
+                    status=PositionStatus.CLOSED, pnl_usd=Decimal(pnl),
+                    closed_at=NOW,
+                )
+            )
+
+    app = create_app(Settings(database_url=migrated_database_url))
+    app.state.sessions = db_sessions
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/api/v1/performance-summary?mode=paper")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_pnl_usd"] == 80.0
+    assert body["roi"] == 0.8
+    assert body["robust_pnl_usd"] == -20.0
+    assert body["robust_roi"] == -0.4

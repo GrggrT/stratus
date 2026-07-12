@@ -76,21 +76,77 @@ async def price_cycle(
         await _probability_pipeline(settings, sessions)
 
 
+async def _record_startup_job_run(
+    sessions: SessionFactory | None,
+    *,
+    job_id: str,
+    scheduled_at: datetime,
+    status: str,
+    error: str | None,
+) -> None:
+    if sessions is None:
+        return
+    try:
+        async with sessions.begin() as session:
+            await record_job_run(
+                session,
+                job_id=job_id,
+                scheduled_at=scheduled_at,
+                finished_at=datetime.now(UTC),
+                status=status,
+                error=error,
+            )
+    except Exception:
+        logger.exception("failed to persist startup job event for %s", job_id)
+
+
+async def _run_startup_job(
+    job_id: str,
+    function: Callable[[Settings, SessionFactory | None], Awaitable[object]],
+    settings: Settings,
+    sessions: SessionFactory | None,
+    *,
+    fatal: bool = False,
+) -> object:
+    scheduled_at = datetime.now(UTC)
+    try:
+        result = await function(settings, sessions)
+    except Exception as exc:
+        error = str(exc)[:4000]
+        await _record_startup_job_run(
+            sessions,
+            job_id=job_id,
+            scheduled_at=scheduled_at,
+            status="error",
+            error=error,
+        )
+        if fatal:
+            raise
+        logger.warning("startup job %s failed; continuing: %s", job_id, error)
+        return None
+    await _record_startup_job_run(
+        sessions,
+        job_id=job_id,
+        scheduled_at=scheduled_at,
+        status="success",
+        error=None,
+    )
+    return result
+
+
 async def startup_refresh(
     settings: Settings, sessions: SessionFactory | None = None
 ) -> None:
-    await discover_markets(settings, sessions)
-    forecasts, ensemble, _observations = await asyncio.gather(
-        fetch_forecasts(settings, sessions),
-        fetch_ensemble(settings, sessions),
-        fetch_observations(settings, sessions),
+    await _run_startup_job("market-discovery", discover_markets, settings, sessions)
+    await asyncio.gather(
+        _run_startup_job("forecasts", forecast_cycle, settings, sessions),
+        _run_startup_job("ensemble", ensemble_cycle, settings, sessions),
+        _run_startup_job("observations", fetch_observations, settings, sessions),
     )
-    await finalize_daily_actuals(settings, sessions)
-    prices, _ = await fetch_prices(settings, sessions)
-    if forecasts or ensemble or prices:
-        await _probability_pipeline(settings, sessions)
-    await execute_signals(settings, sessions)
-    await settle_markets(settings, sessions)
+    await _run_startup_job("daily-actuals", finalize_daily_actuals, settings, sessions)
+    await _run_startup_job("prices-and-signals", price_cycle, settings, sessions)
+    await _run_startup_job("execution", execute_signals, settings, sessions)
+    await _run_startup_job("settlement", settle_markets, settings, sessions)
 
 
 async def safe_startup_refresh(

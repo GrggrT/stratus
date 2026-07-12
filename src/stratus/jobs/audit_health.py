@@ -283,14 +283,50 @@ async def audit_health(
                 station_exposure[(market.station_id, market.market_date)] += float(
                     position.size_usd
                 )
-            if any(value > 0.05 * bankroll_usd + 0.01 for value in market_exposure.values()):
-                issues.append({"code": "market_exposure_breach", "detail": "critical"})
-                critical = True
-            if any(value > 0.12 * bankroll_usd + 0.01 for value in station_exposure.values()):
-                issues.append(
-                    {"code": "station_day_exposure_breach", "detail": "critical"}
+            market_limit = 0.05 * bankroll_usd
+            material_market_excess = max(1.0, 0.001 * bankroll_usd)
+            market_breaches = [
+                (market_id, value)
+                for market_id, value in market_exposure.items()
+                if value > market_limit + 0.01
+            ]
+            if market_breaches:
+                detail = "; ".join(
+                    f"market_id={market_id} ${value:.2f}/${market_limit:.2f} "
+                    f"(excess ${value - market_limit:.2f})"
+                    for market_id, value in sorted(
+                        market_breaches, key=lambda item: item[1], reverse=True
+                    )[:5]
                 )
-                critical = True
+                issues.append({"code": "market_exposure_breach", "detail": detail})
+                if any(
+                    value > market_limit + material_market_excess
+                    for _market_id, value in market_breaches
+                ):
+                    critical = True
+            station_limit = 0.12 * bankroll_usd
+            material_station_excess = max(1.0, 0.001 * bankroll_usd)
+            station_breaches = [
+                (station_key, value)
+                for station_key, value in station_exposure.items()
+                if value > station_limit + 0.01
+            ]
+            if station_breaches:
+                detail = "; ".join(
+                    f"station_day={station_key} ${value:.2f}/${station_limit:.2f} "
+                    f"(excess ${value - station_limit:.2f})"
+                    for station_key, value in sorted(
+                        station_breaches, key=lambda item: item[1], reverse=True
+                    )[:5]
+                )
+                issues.append(
+                    {"code": "station_day_exposure_breach", "detail": detail}
+                )
+                if any(
+                    value > station_limit + material_station_excess
+                    for _station_key, value in station_breaches
+                ):
+                    critical = True
 
             missing_clv = await session.scalar(
                 select(func.count())
