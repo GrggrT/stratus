@@ -5,6 +5,11 @@ validated, operator-grade trading system.
 
 Last updated: 2026-07-12.
 
+Related detail plan: `docs/EDGE_VALIDATION_PLAN.md` expands the anti-luck
+workstream: skill/luck PnL decomposition, bootstrap confidence intervals,
+execution-cost filters, potential-win sizing caps, calibration shrinkage, and
+the formal "edge proven" gate.
+
 ## Definition of quality
 
 STRATUS is not considered "quality" merely because tests pass or the console
