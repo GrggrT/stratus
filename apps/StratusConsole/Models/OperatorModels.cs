@@ -291,6 +291,20 @@ public sealed record RootCauseDrilldownDto(
     [property: JsonPropertyName("count")] int Count,
     [property: JsonPropertyName("items")] IReadOnlyList<RootCauseTradeDto> Items);
 
+public sealed record RootCauseActionDto(
+    [property: JsonPropertyName("metric")] string Metric,
+    [property: JsonPropertyName("dimension")] string Dimension,
+    [property: JsonPropertyName("value")] string Value,
+    [property: JsonPropertyName("count")] int Count,
+    [property: JsonPropertyName("action")] string Action,
+    [property: JsonPropertyName("severity")] string Severity,
+    [property: JsonPropertyName("detail")] string Detail);
+
+public sealed record RootCauseActionsDto(
+    [property: JsonPropertyName("generated_at")] DateTimeOffset GeneratedAt,
+    [property: JsonPropertyName("mode")] string Mode,
+    [property: JsonPropertyName("items")] IReadOnlyList<RootCauseActionDto> Items);
+
 public sealed record OrderDto(
     [property: JsonPropertyName("id")] long Id,
     [property: JsonPropertyName("polymarket_id")] string PolymarketId,

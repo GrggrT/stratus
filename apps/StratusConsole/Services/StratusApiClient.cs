@@ -102,6 +102,13 @@ public sealed class StratusApiClient : IDisposable
             + $"&value={Uri.EscapeDataString(value)}",
             cancellationToken);
 
+    public Task<RootCauseActionsDto> GetRootCauseActionsAsync(
+        string mode,
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<RootCauseActionsDto>(
+            $"api/v1/root-cause-actions?mode={Uri.EscapeDataString(mode)}",
+            cancellationToken);
+
     public Task<EquityResponse> GetLiveEquityAsync(
         CancellationToken cancellationToken = default) =>
         GetRequiredAsync<EquityResponse>("api/v1/live-equity", cancellationToken);

@@ -349,6 +349,22 @@ class RootCauseDrilldownResponse(BaseModel):
     items: list[RootCauseTradeItem]
 
 
+class RootCauseActionItem(BaseModel):
+    metric: str
+    dimension: str
+    value: str
+    count: int
+    action: str
+    severity: str
+    detail: str
+
+
+class RootCauseActionsResponse(BaseModel):
+    generated_at: datetime
+    mode: str
+    items: list[RootCauseActionItem]
+
+
 class EquityPointItem(BaseModel):
     t: datetime
     cumulative_pnl_usd: float
@@ -1298,6 +1314,95 @@ def _clv_slice_item(slice_: ClvSlice) -> ClvSliceItem:
     )
 
 
+def _brier_action_item(slice_: BrierSlice) -> RootCauseActionItem:
+    if slice_.count < 10:
+        action = "Watch"
+        severity = "warning"
+        detail = (
+            "Action: keep collecting until n≥10 for this slice; "
+            "current model-vs-market gap may be noise."
+        )
+    elif slice_.model_minus_market <= 0:
+        action = "Keep"
+        severity = "positive"
+        detail = (
+            "Action: no model restriction; model is not worse than "
+            "the market in this slice."
+        )
+    elif slice_.count >= 30 and slice_.model_minus_market >= 0.05:
+        action = "Block cand."
+        severity = "negative"
+        detail = (
+            "Action: candidate for block/recalibration rule; model is "
+            "materially worse than market with enough sample."
+        )
+    elif slice_.model_minus_market >= 0.02:
+        action = "Reduce"
+        severity = "warning"
+        detail = "Action: reduce sizing or require stronger edge until Brier delta improves."
+    else:
+        action = "Watch"
+        severity = "warning"
+        detail = "Action: mild model drag; monitor before changing rules."
+
+    return RootCauseActionItem(
+        metric="brier",
+        dimension=slice_.dimension,
+        value=slice_.value,
+        count=slice_.count,
+        action=action,
+        severity=severity,
+        detail=detail,
+    )
+
+
+def _clv_action_item(slice_: ClvSlice) -> RootCauseActionItem:
+    if slice_.count < 10:
+        action = "Watch"
+        severity = "warning"
+        detail = (
+            "Action: keep collecting until n≥10 for this slice; "
+            "current CLV may be noisy."
+        )
+    elif slice_.avg_clv >= 0:
+        action = "Keep"
+        severity = "positive"
+        detail = "Action: execution quality acceptable; entries beat or match the closing line."
+    elif slice_.count >= 30 and slice_.avg_clv <= -0.03:
+        action = "Block cand."
+        severity = "negative"
+        detail = (
+            "Action: candidate for block/maker-only rule; repeated entries "
+            "are far worse than closing line."
+        )
+    elif slice_.avg_clv <= -0.01:
+        action = "Maker only"
+        severity = "warning"
+        detail = (
+            "Action: avoid taker-style fills; prefer passive midpoint/maker "
+            "entry or reduce size."
+        )
+    else:
+        action = "Watch"
+        severity = "warning"
+        detail = "Action: slight negative CLV; monitor entry quality before changing rules."
+
+    return RootCauseActionItem(
+        metric="clv",
+        dimension=slice_.dimension,
+        value=slice_.value,
+        count=slice_.count,
+        action=action,
+        severity=severity,
+        detail=detail,
+    )
+
+
+def _action_rank(item: RootCauseActionItem) -> tuple[int, str, str, str]:
+    severity_rank = {"negative": 0, "warning": 1, "positive": 2}.get(item.severity, 3)
+    return severity_rank, item.metric, item.dimension, item.value
+
+
 @router.get("/clv-report", response_model=ClvReportResponse)
 async def clv_report(
     request: Request,
@@ -1321,6 +1426,32 @@ async def clv_report(
         avg_clv=summary[0] if summary else None,
         clv_beat_rate=summary[1] if summary else None,
         slices=[_clv_slice_item(slice_) for slice_ in clv_root_cause(outcomes)],
+    )
+
+
+@router.get("/root-cause-actions", response_model=RootCauseActionsResponse)
+async def root_cause_actions(
+    request: Request,
+    mode: Annotated[str, Query(pattern="^(paper|live)$")] = "paper",
+) -> RootCauseActionsResponse:
+    """Advisory actions for diagnostic slices.
+
+    These are operator hints only: they do not change signal generation,
+    sizing, station eligibility, or runtime state. Keeping the policy in the
+    backend gives Cockpit, Telegram, and future reports one source of truth.
+    """
+    selected_mode = ExecutionMode.LIVE if mode == "live" else ExecutionMode.PAPER
+    async with _sessions(request)() as session:
+        trades = await resolved_trade_outcomes(session, selected_mode)
+        clv_outcomes = await resolved_clv_outcomes(session, selected_mode)
+    items = [
+        *[_brier_action_item(slice_) for slice_ in brier_root_cause(trades)],
+        *[_clv_action_item(slice_) for slice_ in clv_root_cause(clv_outcomes)],
+    ]
+    return RootCauseActionsResponse(
+        generated_at=datetime.now(UTC),
+        mode=mode,
+        items=sorted(items, key=_action_rank),
     )
 
 

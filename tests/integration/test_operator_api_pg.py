@@ -512,3 +512,27 @@ async def test_edge_report_returns_decomposition_and_gate_checklist(
     assert clv_item["closing_line_price"] == pytest.approx(0.54)
     assert clv_item["confidence"] == "A"
     assert clv_item["horizon_bucket"] == "0-6h"
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        actions_response = await client.get("/api/v1/root-cause-actions?mode=paper")
+
+    assert actions_response.status_code == 200
+    actions = actions_response.json()
+    assert actions["mode"] == "paper"
+    action_keys = {
+        (item["metric"], item["dimension"], item["value"])
+        for item in actions["items"]
+    }
+    assert ("brier", "station", "KLGA") in action_keys
+    assert ("clv", "price_band", "0.50-0.75") in action_keys
+    brier_action = next(
+        item for item in actions["items"]
+        if item["metric"] == "brier"
+        and item["dimension"] == "station"
+        and item["value"] == "KLGA"
+    )
+    assert brier_action["action"] == "Watch"
+    assert brier_action["severity"] == "warning"
+    assert brier_action["count"] == 1

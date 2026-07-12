@@ -62,11 +62,6 @@ public sealed partial class MainPage : Page
         string? Accent,
         Func<Task> Execute);
 
-    private sealed record DiagnosticAction(
-        string Label,
-        string? Accent,
-        string Detail);
-
     private sealed record DrilldownHoverReadout(
         double X,
         double Y,
@@ -509,6 +504,8 @@ public sealed partial class MainPage : Page
                         _apiClient.GetBrierReportAsync("paper", _lifetime.Token);
                     Task<ClvReportDto> cockpitClv =
                         _apiClient.GetClvReportAsync("paper", _lifetime.Token);
+                    Task<RootCauseActionsDto> cockpitActions =
+                        _apiClient.GetRootCauseActionsAsync("paper", _lifetime.Token);
                     await Task.WhenAll(
                         cockpitOverview,
                         cockpitSignals,
@@ -518,7 +515,8 @@ public sealed partial class MainPage : Page
                         cockpitJobs,
                         cockpitEdge,
                         cockpitBrier,
-                        cockpitClv);
+                        cockpitClv,
+                        cockpitActions);
                     RenderCockpit(
                         cockpitOverview.Result,
                         cockpitSignals.Result.Items,
@@ -527,7 +525,10 @@ public sealed partial class MainPage : Page
                         cockpitCommands.Result.Items,
                         cockpitJobs.Result.Items);
                     RenderEdgeValidation(cockpitEdge.Result);
-                    RenderRootCauseDiagnostics(cockpitBrier.Result, cockpitClv.Result);
+                    RenderRootCauseDiagnostics(
+                        cockpitBrier.Result,
+                        cockpitClv.Result,
+                        cockpitActions.Result);
                     break;
                 case "Markets":
                     RenderMarkets((await _apiClient.GetMarketsAsync(_lifetime.Token)).Items);
@@ -788,7 +789,10 @@ public sealed partial class MainPage : Page
             .ToList();
     }
 
-    private void RenderRootCauseDiagnostics(BrierReportDto brier, ClvReportDto clv)
+    private void RenderRootCauseDiagnostics(
+        BrierReportDto brier,
+        ClvReportDto clv,
+        RootCauseActionsDto actions)
     {
         bool modelDrag = brier.ModelMinusMarket is > 0;
         bool executionDrag = clv.AvgClv is < 0;
@@ -812,16 +816,20 @@ public sealed partial class MainPage : Page
                         ? $" · raw {Number(raw)} on {brier.RawCount} trade(s)"
                         : " · raw model unavailable on old trades")
                 : "No resolved trades with Brier comparison yet.";
-        BrierDiagnosticItems.ItemsSource = BuildBrierDiagnosticItems(brier);
+        Dictionary<string, RootCauseActionDto> actionLookup = actions.Items
+            .ToDictionary(ActionKey, StringComparer.OrdinalIgnoreCase);
+        BrierDiagnosticItems.ItemsSource = BuildBrierDiagnosticItems(brier, actionLookup);
 
         ClvDiagnosticSummary.Text =
             clv.AvgClv is { } avg
                 ? $"Average CLV {Cents(avg)} · beat rate {Percent(clv.ClvBeatRate)} · lower rows are worse entries"
                 : "No closed positions with CLV yet.";
-        ClvDiagnosticItems.ItemsSource = BuildClvDiagnosticItems(clv);
+        ClvDiagnosticItems.ItemsSource = BuildClvDiagnosticItems(clv, actionLookup);
     }
 
-    private static List<DiagnosticBarItem> BuildBrierDiagnosticItems(BrierReportDto report)
+    private static List<DiagnosticBarItem> BuildBrierDiagnosticItems(
+        BrierReportDto report,
+        IReadOnlyDictionary<string, RootCauseActionDto> actions)
     {
         List<BrierSliceDto> slices = report.Slices
             .OrderByDescending(slice => slice.ModelMinusMarket)
@@ -849,14 +857,15 @@ public sealed partial class MainPage : Page
         return slices
             .Select(slice =>
             {
-                DiagnosticAction action = BrierAction(slice);
+                RootCauseActionDto action =
+                    RootCauseAction("brier", slice.Dimension, slice.Value, actions);
                 return new DiagnosticBarItem(
                     $"{Pretty(slice.Dimension)} · {slice.Value}",
                     $"delta {DeltaNumber(slice.ModelMinusMarket)} · n={slice.Count} · edge {Cents(slice.AvgPredictedEdge)}",
                     $"model {Number(slice.BrierModel)} vs market {Number(slice.BrierMarket)} · "
                         + $"return {Percent(slice.AvgRealizedReturn)} · win {Percent(slice.WinRate)}",
-                    action.Label,
-                    action.Accent,
+                    action.Action,
+                    action.Severity,
                     DiagnosticMagnitude(slice.ModelMinusMarket, maxMagnitude),
                     "brier",
                     slice.Dimension,
@@ -866,7 +875,9 @@ public sealed partial class MainPage : Page
             .ToList();
     }
 
-    private static List<DiagnosticBarItem> BuildClvDiagnosticItems(ClvReportDto report)
+    private static List<DiagnosticBarItem> BuildClvDiagnosticItems(
+        ClvReportDto report,
+        IReadOnlyDictionary<string, RootCauseActionDto> actions)
     {
         List<ClvSliceDto> slices = report.Slices
             .OrderBy(slice => slice.AvgClv)
@@ -894,14 +905,15 @@ public sealed partial class MainPage : Page
         return slices
             .Select(slice =>
             {
-                DiagnosticAction action = ClvAction(slice);
+                RootCauseActionDto action =
+                    RootCauseAction("clv", slice.Dimension, slice.Value, actions);
                 return new DiagnosticBarItem(
                     $"{Pretty(slice.Dimension)} · {slice.Value}",
                     $"CLV {Cents(slice.AvgClv)} · beat {Percent(slice.ClvBeatRate)} · n={slice.Count}",
                     $"entry {Percent(slice.AvgEntryPrice)} · fee {Usd(slice.AvgFeeUsd)} · "
                         + $"return {Percent(slice.AvgRealizedReturn)} · win {Percent(slice.WinRate)}",
-                    action.Label,
-                    action.Accent,
+                    action.Action,
+                    action.Severity,
                     DiagnosticMagnitude(slice.AvgClv, maxMagnitude),
                     "clv",
                     slice.Dimension,
@@ -911,85 +923,27 @@ public sealed partial class MainPage : Page
             .ToList();
     }
 
-    private static DiagnosticAction BrierAction(BrierSliceDto slice)
-    {
-        if (slice.Count < 10)
-        {
-            return new DiagnosticAction(
+    private static RootCauseActionDto RootCauseAction(
+        string metric,
+        string dimension,
+        string value,
+        IReadOnlyDictionary<string, RootCauseActionDto> actions) =>
+        actions.TryGetValue(ActionKey(metric, dimension, value), out RootCauseActionDto? action)
+            ? action
+            : new RootCauseActionDto(
+                metric,
+                dimension,
+                value,
+                0,
                 "Watch",
                 "warning",
-                $"Action: keep collecting until n≥10 for this slice; current model-vs-market gap may be noise.");
-        }
+                "Action: backend recommendation unavailable; monitor this slice.");
 
-        if (slice.ModelMinusMarket <= 0)
-        {
-            return new DiagnosticAction(
-                "Keep",
-                "positive",
-                "Action: no model restriction; model is not worse than the market in this slice.");
-        }
+    private static string ActionKey(RootCauseActionDto action) =>
+        ActionKey(action.Metric, action.Dimension, action.Value);
 
-        if (slice.Count >= 30 && slice.ModelMinusMarket >= 0.05)
-        {
-            return new DiagnosticAction(
-                "Block cand.",
-                "negative",
-                "Action: candidate for block/recalibration rule; model is materially worse than market with enough sample.");
-        }
-
-        if (slice.ModelMinusMarket >= 0.02)
-        {
-            return new DiagnosticAction(
-                "Reduce",
-                "warning",
-                "Action: reduce sizing or require stronger edge until Brier delta improves.");
-        }
-
-        return new DiagnosticAction(
-            "Watch",
-            "warning",
-            "Action: mild model drag; monitor before changing rules.");
-    }
-
-    private static DiagnosticAction ClvAction(ClvSliceDto slice)
-    {
-        if (slice.Count < 10)
-        {
-            return new DiagnosticAction(
-                "Watch",
-                "warning",
-                $"Action: keep collecting until n≥10 for this slice; current CLV may be noisy.");
-        }
-
-        if (slice.AvgClv >= 0)
-        {
-            return new DiagnosticAction(
-                "Keep",
-                "positive",
-                "Action: execution quality acceptable; entries beat or match the closing line.");
-        }
-
-        if (slice.Count >= 30 && slice.AvgClv <= -0.03)
-        {
-            return new DiagnosticAction(
-                "Block cand.",
-                "negative",
-                "Action: candidate for block/maker-only rule; repeated entries are far worse than closing line.");
-        }
-
-        if (slice.AvgClv <= -0.01)
-        {
-            return new DiagnosticAction(
-                "Maker only",
-                "warning",
-                "Action: avoid taker-style fills; prefer passive midpoint/maker entry or reduce size.");
-        }
-
-        return new DiagnosticAction(
-            "Watch",
-            "warning",
-            "Action: slight negative CLV; monitor entry quality before changing rules.");
-    }
+    private static string ActionKey(string metric, string dimension, string value) =>
+        $"{metric}:{dimension}:{value}";
 
     private static double DiagnosticMagnitude(double value, double maxMagnitude)
     {
