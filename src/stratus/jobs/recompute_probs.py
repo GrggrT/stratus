@@ -36,6 +36,7 @@ from stratus.services.probability import (
     component_brier_scores,
     deterministic_component,
     ensemble_component,
+    renormalize_event,
     shrink_to_market,
 )
 
@@ -469,6 +470,9 @@ async def recompute_probs(
                 )
             )
 
+        event_by_market = {market.id: market.event_id for market, _ in market_rows}
+        values = _renormalize_event_probabilities(values, event_by_market)
+
         async with session_factory.begin() as session:
             written = await upsert_model_probs(session, values)
         logger.info(
@@ -478,6 +482,46 @@ async def recompute_probs(
             skipped,
         )
         return written, skipped
+
+
+def _renormalize_event_probabilities(
+    values: list[ModelProbabilityValue],
+    event_by_market: dict[int, str],
+) -> list[ModelProbabilityValue]:
+    """Rescale each event's shrunk bucket probabilities back to the raw model
+    total, so an event's buckets form a proper distribution again."""
+    from dataclasses import replace
+
+    groups: dict[str, list[int]] = defaultdict(list)
+    for index, value in enumerate(values):
+        event_id = event_by_market.get(value.market_id)
+        if event_id is not None:
+            groups[event_id].append(index)
+
+    result = list(values)
+    for indices in groups.values():
+        shrunk = [float(values[index].prob) for index in indices]
+        raw_sum = sum(
+            float(values[index].components.get("shrinkage", {}).get("p_model_raw")
+                  or values[index].prob)
+            for index in indices
+        )
+        rescaled, scale = renormalize_event(shrunk, reference_sum=raw_sum)
+        if scale is None:
+            continue
+        for position, index in enumerate(indices):
+            components = dict(values[index].components)
+            components["shrinkage"] = {
+                **components.get("shrinkage", {}),
+                "event_scale": round(scale, 6),
+                "p_final": round(rescaled[position], 6),
+            }
+            result[index] = replace(
+                values[index],
+                prob=Decimal(str(rescaled[position])).quantize(Decimal("0.000001")),
+                components=components,
+            )
+    return result
 
 
 def main() -> None:

@@ -350,3 +350,32 @@ def ks_uniform_pvalue(values: list[float]) -> float | None:
         if abs(term) < 1e-10:
             break
     return max(0.0, min(1.0, 2 * total))
+
+
+def renormalize_event(
+    probabilities: list[float],
+    *,
+    reference_sum: float = 1.0,
+    max_deviation: float = 0.2,
+) -> tuple[list[float], float | None]:
+    """Rescale an event's per-bucket probabilities to a reference total.
+
+    Independent shrinkage toward each bucket's market midpoint breaks the
+    partition: the midpoints of an event carry the market overround (vig), so
+    the shrunk buckets sum above one. Rescaling to the raw model sum (which is
+    a proper distribution) both restores a valid total and strips the vig
+    bias. Returns (rescaled, scale); scale is None when normalization is
+    skipped — a single bucket, a non-positive total, or a reference so far
+    from one that we are looking at partial event coverage, not overround.
+    """
+    if len(probabilities) < 2:
+        return list(probabilities), None
+    total = sum(probabilities)
+    if total <= 0 or abs(reference_sum - 1.0) > max_deviation:
+        return list(probabilities), None
+    scale = reference_sum / total
+    rescaled = [
+        min(0.999999, max(0.000001, probability * scale))
+        for probability in probabilities
+    ]
+    return rescaled, scale

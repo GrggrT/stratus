@@ -214,3 +214,31 @@ def test_pit_and_ks_uniformity() -> None:
     p_clustered = ks_uniform_pvalue(clustered)
     assert p_clustered is not None and p_clustered < 0.01
     assert ks_uniform_pvalue([0.5, 0.5]) is None
+
+
+def test_renormalize_event_strips_overround() -> None:
+    from stratus.services.probability import renormalize_event
+
+    # Shrunk buckets summing to 1.06 (market vig) rescale back to ~1.0.
+    shrunk = [0.53, 0.53]
+    rescaled, scale = renormalize_event(shrunk, reference_sum=1.0)
+    assert scale == pytest.approx(1.0 / 1.06)
+    assert sum(rescaled) == pytest.approx(1.0)
+
+    # Rescales to the raw total when the model itself does not sum to one.
+    rescaled_ref, scale_ref = renormalize_event([0.6, 0.6], reference_sum=0.9)
+    assert sum(rescaled_ref) == pytest.approx(0.9)
+    assert scale_ref == pytest.approx(0.75)
+
+
+def test_renormalize_event_skips_when_not_applicable() -> None:
+    from stratus.services.probability import renormalize_event
+
+    # Single bucket: nothing to normalize against.
+    assert renormalize_event([0.4], reference_sum=1.0) == ([0.4], None)
+    # Non-positive total.
+    assert renormalize_event([0.0, 0.0], reference_sum=1.0) == ([0.0, 0.0], None)
+    # Partial event coverage (reference far from one) is left untouched.
+    values, scale = renormalize_event([0.3, 0.3], reference_sum=0.5)
+    assert scale is None
+    assert values == [0.3, 0.3]
