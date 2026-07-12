@@ -465,3 +465,50 @@ async def test_edge_report_returns_decomposition_and_gate_checklist(
     assert horizon["value"] == "0-6h"
     band = next(item for item in clv["slices"] if item["dimension"] == "price_band")
     assert band["value"] == "0.50-0.75"
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        brier_drilldown_response = await client.get(
+            "/api/v1/root-cause-drilldown"
+            "?mode=paper&metric=brier&dimension=station&value=KLGA"
+        )
+
+    assert brier_drilldown_response.status_code == 200
+    brier_drilldown = brier_drilldown_response.json()
+    assert brier_drilldown["metric"] == "brier"
+    assert brier_drilldown["dimension"] == "station"
+    assert brier_drilldown["value"] == "KLGA"
+    assert brier_drilldown["count"] == 1
+    brier_item = brier_drilldown["items"][0]
+    assert brier_item["record_type"] == "order"
+    assert brier_item["market_id"] == market.id
+    assert brier_item["station_icao"] == "KLGA"
+    assert brier_item["model_probability"] == pytest.approx(0.7)
+    assert brier_item["market_probability"] == pytest.approx(0.6)
+    assert brier_item["raw_model_probability"] == pytest.approx(0.8)
+    assert brier_item["brier_delta"] == pytest.approx(-0.07)
+    assert brier_item["won"] is True
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        clv_drilldown_response = await client.get(
+            "/api/v1/root-cause-drilldown"
+            "?mode=paper&metric=clv&dimension=price_band&value=0.50-0.75"
+        )
+
+    assert clv_drilldown_response.status_code == 200
+    clv_drilldown = clv_drilldown_response.json()
+    assert clv_drilldown["metric"] == "clv"
+    assert clv_drilldown["dimension"] == "price_band"
+    assert clv_drilldown["value"] == "0.50-0.75"
+    assert clv_drilldown["count"] == 1
+    clv_item = clv_drilldown["items"][0]
+    assert clv_item["record_type"] == "position"
+    assert clv_item["market_id"] == market.id
+    assert clv_item["position_id"] == position.id
+    assert clv_item["clv"] == pytest.approx(0.04)
+    assert clv_item["closing_line_price"] == pytest.approx(0.54)
+    assert clv_item["confidence"] == "A"
+    assert clv_item["horizon_bucket"] == "0-6h"

@@ -250,6 +250,47 @@ public sealed record ClvReportDto(
     [property: JsonPropertyName("clv_beat_rate")] double? ClvBeatRate,
     [property: JsonPropertyName("slices")] IReadOnlyList<ClvSliceDto> Slices);
 
+public sealed record RootCauseTradeDto(
+    [property: JsonPropertyName("id")] long Id,
+    [property: JsonPropertyName("record_type")] string RecordType,
+    [property: JsonPropertyName("order_id")] long? OrderId,
+    [property: JsonPropertyName("signal_id")] long? SignalId,
+    [property: JsonPropertyName("position_id")] long? PositionId,
+    [property: JsonPropertyName("market_id")] long MarketId,
+    [property: JsonPropertyName("polymarket_id")] string PolymarketId,
+    [property: JsonPropertyName("station_icao")] string? StationIcao,
+    [property: JsonPropertyName("market_date")] DateOnly MarketDate,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("side")] string Side,
+    [property: JsonPropertyName("confidence")] string? Confidence,
+    [property: JsonPropertyName("horizon_bucket")] string HorizonBucket,
+    [property: JsonPropertyName("timestamp")] DateTimeOffset? Timestamp,
+    [property: JsonPropertyName("closed_at")] DateTimeOffset? ClosedAt,
+    [property: JsonPropertyName("entry_price")] double EntryPrice,
+    [property: JsonPropertyName("closing_line_price")] double? ClosingLinePrice,
+    [property: JsonPropertyName("model_probability")] double? ModelProbability,
+    [property: JsonPropertyName("market_probability")] double? MarketProbability,
+    [property: JsonPropertyName("raw_model_probability")] double? RawModelProbability,
+    [property: JsonPropertyName("predicted_edge")] double? PredictedEdge,
+    [property: JsonPropertyName("brier_model_error")] double? BrierModelError,
+    [property: JsonPropertyName("brier_market_error")] double? BrierMarketError,
+    [property: JsonPropertyName("brier_delta")] double? BrierDelta,
+    [property: JsonPropertyName("clv")] double? Clv,
+    [property: JsonPropertyName("pnl_usd")] double PnlUsd,
+    [property: JsonPropertyName("cost_usd")] double CostUsd,
+    [property: JsonPropertyName("fee_usd")] double? FeeUsd,
+    [property: JsonPropertyName("won")] bool Won,
+    [property: JsonPropertyName("resolved_outcome")] bool? ResolvedOutcome);
+
+public sealed record RootCauseDrilldownDto(
+    [property: JsonPropertyName("generated_at")] DateTimeOffset GeneratedAt,
+    [property: JsonPropertyName("mode")] string Mode,
+    [property: JsonPropertyName("metric")] string Metric,
+    [property: JsonPropertyName("dimension")] string Dimension,
+    [property: JsonPropertyName("value")] string Value,
+    [property: JsonPropertyName("count")] int Count,
+    [property: JsonPropertyName("items")] IReadOnlyList<RootCauseTradeDto> Items);
+
 public sealed record OrderDto(
     [property: JsonPropertyName("id")] long Id,
     [property: JsonPropertyName("polymarket_id")] string PolymarketId,
@@ -280,4 +321,7 @@ public sealed record DiagnosticBarItem(
     string Detail,
     string Status,
     string? Accent,
-    double MagnitudePercent);
+    double MagnitudePercent,
+    string Metric,
+    string Dimension,
+    string Value);

@@ -833,7 +833,10 @@ public sealed partial class MainPage : Page
                     "This panel will show station, horizon, side, confidence, and market-kind root cause.",
                     "Idle",
                     null,
-                    0),
+                    0,
+                    "brier",
+                    string.Empty,
+                    string.Empty),
             ];
         }
 
@@ -846,7 +849,10 @@ public sealed partial class MainPage : Page
                     + $"return {Percent(slice.AvgRealizedReturn)} · win {Percent(slice.WinRate)}",
                 slice.ModelMinusMarket > 0 ? "Worse" : "Better",
                 slice.ModelMinusMarket > 0 ? "negative" : "positive",
-                DiagnosticMagnitude(slice.ModelMinusMarket, maxMagnitude)))
+                DiagnosticMagnitude(slice.ModelMinusMarket, maxMagnitude),
+                "brier",
+                slice.Dimension,
+                slice.Value))
             .ToList();
     }
 
@@ -867,7 +873,10 @@ public sealed partial class MainPage : Page
                     "This panel will show where entries are worse than the closing line.",
                     "Idle",
                     null,
-                    0),
+                    0,
+                    "clv",
+                    string.Empty,
+                    string.Empty),
             ];
         }
 
@@ -880,7 +889,10 @@ public sealed partial class MainPage : Page
                     + $"return {Percent(slice.AvgRealizedReturn)} · win {Percent(slice.WinRate)}",
                 slice.AvgClv < 0 ? "Drag" : "Tailwind",
                 slice.AvgClv < 0 ? "negative" : "positive",
-                DiagnosticMagnitude(slice.AvgClv, maxMagnitude)))
+                DiagnosticMagnitude(slice.AvgClv, maxMagnitude),
+                "clv",
+                slice.Dimension,
+                slice.Value))
             .ToList();
     }
 
@@ -1087,6 +1099,104 @@ public sealed partial class MainPage : Page
                 await LoadCockpitMarketChartAsync(item);
             }
         }
+    }
+
+    private async void RootCauseDiagnosticItems_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is DiagnosticBarItem item
+            && !string.IsNullOrWhiteSpace(item.Metric)
+            && !string.IsNullOrWhiteSpace(item.Dimension)
+            && !string.IsNullOrWhiteSpace(item.Value))
+        {
+            await LoadRootCauseDrilldownAsync(item);
+        }
+    }
+
+    private async Task LoadRootCauseDrilldownAsync(DiagnosticBarItem item)
+    {
+        CockpitDetailStatusTag.Text = "Loading";
+        CockpitDetailStatusBadge.Background = AccentBrush(item.Accent);
+        CockpitDetailTitle.Text = $"Root cause · {item.Title}";
+        CockpitDetailPrimary.Text = item.Subtitle;
+        CockpitDetailSecondary.Text = "Loading concrete trades behind this slice…";
+        CockpitDetailMeta.Text = item.Detail;
+        CockpitDetailHint.Text = "Diagnostic slice: concrete trades and positions behind the selected Brier/CLV bar.";
+
+        try
+        {
+            RootCauseDrilldownDto drilldown =
+                await _apiClient.GetRootCauseDrilldownAsync(
+                    "paper",
+                    item.Metric,
+                    item.Dimension,
+                    item.Value,
+                    _lifetime.Token);
+            RenderRootCauseDrilldown(item, drilldown);
+
+            RootCauseTradeDto? first = drilldown.Items.FirstOrDefault();
+            if (first is not null)
+            {
+                await LoadCockpitMarketChartAsync(new MonitoringListItem(
+                    $"{first.StationIcao ?? "Unmapped"} · {first.MarketDate:MM-dd} · {Pretty(first.Kind)}",
+                    $"{Pretty(first.Side)} · market #{first.MarketId}",
+                    $"Diagnostic source row #{first.Id}",
+                    first.PolymarketId,
+                    item.Metric.ToUpperInvariant(),
+                    item.Accent,
+                    first.MarketId));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            CockpitDetailStatusTag.Text = "Unavailable";
+            CockpitDetailStatusBadge.Background = AccentBrush("warning");
+            CockpitDetailSecondary.Text = $"Root-cause drill-down unavailable: {ex.Message}";
+        }
+    }
+
+    private void RenderRootCauseDrilldown(
+        DiagnosticBarItem slice,
+        RootCauseDrilldownDto drilldown)
+    {
+        CockpitDetailStatusTag.Text =
+            $"{drilldown.Metric.ToUpperInvariant()} · {drilldown.Count}";
+        CockpitDetailStatusBadge.Background = AccentBrush(slice.Accent);
+        CockpitDetailTitle.Text =
+            $"{Pretty(drilldown.Dimension)} · {drilldown.Value}";
+        CockpitDetailPrimary.Text = slice.Subtitle;
+        CockpitDetailSecondary.Text = drilldown.Items.Count == 0
+            ? "No concrete rows matched this slice."
+            : string.Join(
+                Environment.NewLine,
+                drilldown.Items.Take(8).Select(row => FormatRootCauseTrade(row, drilldown.Metric)));
+        CockpitDetailMeta.Text =
+            $"Showing {Math.Min(drilldown.Items.Count, 8)}/{drilldown.Count} row(s) · "
+            + $"sorted by {(drilldown.Metric == "brier" ? "Brier drag" : "worst CLV")} · "
+            + $"generated {LocalTime(drilldown.GeneratedAt)}";
+        CockpitDetailHint.Text =
+            "Selected diagnostic slice. The chart switches to the first matching market when rows are available.";
+    }
+
+    private static string FormatRootCauseTrade(RootCauseTradeDto row, string metric)
+    {
+        string label =
+            $"#{row.Id} · {row.StationIcao ?? "Unmapped"} · {row.MarketDate:MM-dd} · "
+            + $"{Pretty(row.Kind)} · {Pretty(row.Side)}";
+        if (metric == "brier")
+        {
+            return label
+                + $" · Δ {DeltaNumber(row.BrierDelta)}"
+                + $" · model {Number(row.BrierModelError)} vs market {Number(row.BrierMarketError)}"
+                + $" · entry {Percent(row.EntryPrice)} · P&L {Signed(row.PnlUsd)}";
+        }
+
+        return label
+            + $" · CLV {Cents(row.Clv)}"
+            + $" · entry {Percent(row.EntryPrice)} → close {Percent(row.ClosingLinePrice)}"
+            + $" · P&L {Signed(row.PnlUsd)}";
     }
 
     private void CockpitActivityFilterBox_SelectionChanged(object sender, SelectionChangedEventArgs e)

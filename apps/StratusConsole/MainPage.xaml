@@ -504,8 +504,22 @@
                                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                         Text="Waiting for /api/v1/brier-report"
                                         TextWrapping="Wrap" />
-                                    <ItemsControl x:Name="BrierDiagnosticItems">
-                                        <ItemsControl.ItemTemplate>
+                                    <ListView
+                                        x:Name="BrierDiagnosticItems"
+                                        IsItemClickEnabled="True"
+                                        ItemClick="RootCauseDiagnosticItems_ItemClick"
+                                        SelectionMode="Single"
+                                        ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                        ScrollViewer.HorizontalScrollMode="Disabled">
+                                        <ListView.ItemContainerStyle>
+                                            <Style TargetType="ListViewItem">
+                                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                                <Setter Property="Padding" Value="0" />
+                                                <Setter Property="Margin" Value="0,0,0,4" />
+                                                <Setter Property="MinHeight" Value="0" />
+                                            </Style>
+                                        </ListView.ItemContainerStyle>
+                                        <ListView.ItemTemplate>
                                             <DataTemplate x:DataType="models:DiagnosticBarItem">
                                                 <Grid Margin="0,0,0,10" RowSpacing="5">
                                                     <Grid.RowDefinitions>
@@ -543,8 +557,8 @@
                                                     </StackPanel>
                                                 </Grid>
                                             </DataTemplate>
-                                        </ItemsControl.ItemTemplate>
-                                    </ItemsControl>
+                                        </ListView.ItemTemplate>
+                                    </ListView>
                                 </StackPanel>
 
                                 <StackPanel Grid.Column="1" Spacing="8">
@@ -554,8 +568,22 @@
                                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                         Text="Waiting for /api/v1/clv-report"
                                         TextWrapping="Wrap" />
-                                    <ItemsControl x:Name="ClvDiagnosticItems">
-                                        <ItemsControl.ItemTemplate>
+                                    <ListView
+                                        x:Name="ClvDiagnosticItems"
+                                        IsItemClickEnabled="True"
+                                        ItemClick="RootCauseDiagnosticItems_ItemClick"
+                                        SelectionMode="Single"
+                                        ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                        ScrollViewer.HorizontalScrollMode="Disabled">
+                                        <ListView.ItemContainerStyle>
+                                            <Style TargetType="ListViewItem">
+                                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                                <Setter Property="Padding" Value="0" />
+                                                <Setter Property="Margin" Value="0,0,0,4" />
+                                                <Setter Property="MinHeight" Value="0" />
+                                            </Style>
+                                        </ListView.ItemContainerStyle>
+                                        <ListView.ItemTemplate>
                                             <DataTemplate x:DataType="models:DiagnosticBarItem">
                                                 <Grid Margin="0,0,0,10" RowSpacing="5">
                                                     <Grid.RowDefinitions>
@@ -593,8 +621,8 @@
                                                     </StackPanel>
                                                 </Grid>
                                             </DataTemplate>
-                                        </ItemsControl.ItemTemplate>
-                                    </ItemsControl>
+                                        </ListView.ItemTemplate>
+                                    </ListView>
                                 </StackPanel>
                             </Grid>
                         </Grid>

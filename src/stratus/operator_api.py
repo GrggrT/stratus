@@ -27,6 +27,7 @@ from stratus.db.models import (
     Signal,
     SignalStatus,
     Station,
+    TradeSide,
     ValidationCheckpoint,
 )
 from stratus.repositories.analytics import (
@@ -48,6 +49,7 @@ from stratus.services.live_analytics import (
     cumulative_equity,
     edge_calibration,
     edge_slope,
+    price_band,
     raw_model_brier,
     summarize_live_performance,
 )
@@ -304,6 +306,49 @@ class ClvReportResponse(BaseModel):
     slices: list[ClvSliceItem]
 
 
+class RootCauseTradeItem(BaseModel):
+    id: int
+    record_type: str
+    order_id: int | None
+    signal_id: int | None
+    position_id: int | None
+    market_id: int
+    polymarket_id: str
+    station_icao: str | None
+    market_date: date
+    kind: str
+    side: str
+    confidence: str | None
+    horizon_bucket: str
+    timestamp: datetime | None
+    closed_at: datetime | None
+    entry_price: float
+    closing_line_price: float | None
+    model_probability: float | None
+    market_probability: float | None
+    raw_model_probability: float | None
+    predicted_edge: float | None
+    brier_model_error: float | None
+    brier_market_error: float | None
+    brier_delta: float | None
+    clv: float | None
+    pnl_usd: float
+    cost_usd: float
+    fee_usd: float | None
+    won: bool
+    resolved_outcome: bool | None
+
+
+class RootCauseDrilldownResponse(BaseModel):
+    generated_at: datetime
+    mode: str
+    metric: str
+    dimension: str
+    value: str
+    count: int
+    items: list[RootCauseTradeItem]
+
+
 class EquityPointItem(BaseModel):
     t: datetime
     cumulative_pnl_usd: float
@@ -444,6 +489,81 @@ def _settings(request: Request) -> Settings:
 
 def _number(value: Decimal | None) -> float | None:
     return float(value) if value is not None else None
+
+
+_FILLED_ORDER_STATUSES = ("filled", "partially_filled")
+_BRIER_DRILLDOWN_DIMENSIONS = {"station", "kind", "horizon", "confidence", "side"}
+_CLV_DRILLDOWN_DIMENSIONS = {
+    "station",
+    "kind",
+    "horizon",
+    "confidence",
+    "side",
+    "price_band",
+}
+
+
+def _enum_text(value: Any | None) -> str | None:
+    if value is None:
+        return None
+    raw = getattr(value, "value", value)
+    return str(raw)
+
+
+def _side_adjusted_probability(yes_probability: float, side: TradeSide) -> float:
+    return yes_probability if side is TradeSide.BUY_YES else 1 - yes_probability
+
+
+def _root_cause_horizon_bucket(signal_ts: datetime | None, resolves_at: datetime) -> str:
+    if signal_ts is None:
+        return "unknown"
+    hours = (resolves_at - signal_ts).total_seconds() / 3600
+    if hours <= 6:
+        return "0-6h"
+    if hours <= 24:
+        return "6-24h"
+    if hours <= 48:
+        return "24-48h"
+    return "48h+"
+
+
+def _root_cause_raw_model_probability(
+    components: object, side: TradeSide
+) -> float | None:
+    if not isinstance(components, dict):
+        return None
+    shrinkage = components.get("shrinkage")
+    if not isinstance(shrinkage, dict):
+        return None
+    raw = shrinkage.get("p_model_raw")
+    if not isinstance(raw, int | float):
+        return None
+    return _side_adjusted_probability(float(raw), side)
+
+
+def _root_cause_dimension_value(
+    dimension: str,
+    *,
+    station_icao: str | None,
+    kind: Any,
+    horizon_bucket: str,
+    confidence: Any | None,
+    side: TradeSide,
+    entry_price: float | None = None,
+) -> str:
+    if dimension == "station":
+        return station_icao or "unknown"
+    if dimension == "kind":
+        return _enum_text(kind) or "unknown"
+    if dimension == "horizon":
+        return horizon_bucket
+    if dimension == "confidence":
+        return _enum_text(confidence) or "unknown"
+    if dimension == "side":
+        return _enum_text(side) or "unknown"
+    if dimension == "price_band" and entry_price is not None:
+        return price_band(entry_price)
+    return "unknown"
 
 
 def _book_levels(raw: Any, *, reverse: bool, limit: int = 10) -> list[OrderBookLevel]:
@@ -1201,6 +1321,414 @@ async def clv_report(
         avg_clv=summary[0] if summary else None,
         clv_beat_rate=summary[1] if summary else None,
         slices=[_clv_slice_item(slice_) for slice_ in clv_root_cause(outcomes)],
+    )
+
+
+async def _brier_drilldown_items(
+    session: AsyncSession,
+    mode: ExecutionMode,
+    dimension: str,
+    value: str,
+    limit: int,
+) -> tuple[int, list[RootCauseTradeItem]]:
+    pre_signal_midpoint = (
+        select(MarketPrice.midpoint)
+        .where(
+            MarketPrice.market_id == Signal.market_id,
+            MarketPrice.ts <= Signal.ts,
+        )
+        .order_by(MarketPrice.ts.desc())
+        .limit(1)
+        .correlate(Signal)
+        .scalar_subquery()
+    )
+    pre_signal_components = (
+        select(ModelProb.components)
+        .where(
+            ModelProb.market_id == Signal.market_id,
+            ModelProb.ts <= Signal.ts,
+        )
+        .order_by(ModelProb.ts.desc())
+        .limit(1)
+        .correlate(Signal)
+        .scalar_subquery()
+    )
+    rows = (
+        await session.execute(
+            select(
+                Order.id,
+                Signal.id,
+                Market.id,
+                Market.polymarket_id,
+                Station.icao,
+                Market.market_date,
+                Market.kind,
+                Order.side,
+                Order.price,
+                Order.filled_usd,
+                Order.fee_usd,
+                Signal.model_prob,
+                Signal.market_price,
+                Signal.edge,
+                Signal.confidence,
+                Signal.ts,
+                pre_signal_midpoint,
+                pre_signal_components,
+                Market.resolves_at,
+                Market.resolved_outcome,
+            )
+            .join(Signal, Order.signal_id == Signal.id)
+            .join(Market, Signal.market_id == Market.id)
+            .outerjoin(Station, Market.station_id == Station.id)
+            .where(
+                Order.mode == mode,
+                Order.status.in_(_FILLED_ORDER_STATUSES),
+                Order.filled_usd > 0,
+                Market.resolved_outcome.is_not(None),
+            )
+        )
+    ).all()
+
+    items: list[RootCauseTradeItem] = []
+    for (
+        order_id,
+        signal_id,
+        market_id,
+        polymarket_id,
+        station_icao,
+        market_date,
+        kind,
+        side,
+        price,
+        filled_usd,
+        fee_usd,
+        model_prob,
+        signal_market_price,
+        edge,
+        confidence,
+        signal_ts,
+        midpoint,
+        components,
+        resolves_at,
+        resolved_outcome,
+    ) in rows:
+        entry_price = float(price)
+        if entry_price <= 0:
+            continue
+        horizon = _root_cause_horizon_bucket(signal_ts, resolves_at)
+        slice_value = _root_cause_dimension_value(
+            dimension,
+            station_icao=station_icao,
+            kind=kind,
+            horizon_bucket=horizon,
+            confidence=confidence,
+            side=side,
+        )
+        if slice_value != value:
+            continue
+
+        won = (side is TradeSide.BUY_YES) == bool(resolved_outcome)
+        shares = float(filled_usd) / entry_price
+        cost = float(filled_usd) + float(fee_usd or 0)
+        pnl = (shares if won else 0.0) - cost
+        model_side = _side_adjusted_probability(float(model_prob), side)
+        if midpoint is not None:
+            market_side = _side_adjusted_probability(float(midpoint), side)
+        else:
+            market_side = float(signal_market_price)
+        raw_side = _root_cause_raw_model_probability(components, side)
+        outcome = float(won)
+        model_error = (model_side - outcome) ** 2
+        market_error = (market_side - outcome) ** 2
+        items.append(
+            RootCauseTradeItem(
+                id=int(order_id),
+                record_type="order",
+                order_id=int(order_id),
+                signal_id=int(signal_id),
+                position_id=None,
+                market_id=int(market_id),
+                polymarket_id=str(polymarket_id),
+                station_icao=station_icao,
+                market_date=market_date,
+                kind=_enum_text(kind) or "unknown",
+                side=_enum_text(side) or "unknown",
+                confidence=_enum_text(confidence),
+                horizon_bucket=horizon,
+                timestamp=signal_ts,
+                closed_at=None,
+                entry_price=round(entry_price, 6),
+                closing_line_price=None,
+                model_probability=round(model_side, 6),
+                market_probability=round(market_side, 6),
+                raw_model_probability=round(raw_side, 6) if raw_side is not None else None,
+                predicted_edge=round(float(edge), 6),
+                brier_model_error=round(model_error, 6),
+                brier_market_error=round(market_error, 6),
+                brier_delta=round(model_error - market_error, 6),
+                clv=None,
+                pnl_usd=round(pnl, 4),
+                cost_usd=round(cost, 4),
+                fee_usd=_number(fee_usd),
+                won=won,
+                resolved_outcome=bool(resolved_outcome),
+            )
+        )
+
+    items.sort(key=lambda item: item.brier_delta or 0, reverse=True)
+    return len(items), items[:limit]
+
+
+async def _clv_drilldown_items(
+    session: AsyncSession,
+    mode: ExecutionMode,
+    dimension: str,
+    value: str,
+    limit: int,
+) -> tuple[int, list[RootCauseTradeItem]]:
+    representative_confidence = (
+        select(Signal.confidence)
+        .where(
+            Signal.market_id == Position.market_id,
+            Signal.side == Position.side,
+            Signal.status == SignalStatus.EXECUTED,
+            Signal.ts <= Position.closed_at,
+        )
+        .order_by(Signal.ts.desc())
+        .limit(1)
+        .correlate(Position)
+        .scalar_subquery()
+    )
+    representative_signal_ts = (
+        select(Signal.ts)
+        .where(
+            Signal.market_id == Position.market_id,
+            Signal.side == Position.side,
+            Signal.status == SignalStatus.EXECUTED,
+            Signal.ts <= Position.closed_at,
+        )
+        .order_by(Signal.ts.desc())
+        .limit(1)
+        .correlate(Position)
+        .scalar_subquery()
+    )
+    representative_signal_id = (
+        select(Signal.id)
+        .where(
+            Signal.market_id == Position.market_id,
+            Signal.side == Position.side,
+            Signal.status == SignalStatus.EXECUTED,
+            Signal.ts <= Position.closed_at,
+        )
+        .order_by(Signal.ts.desc())
+        .limit(1)
+        .correlate(Position)
+        .scalar_subquery()
+    )
+    representative_model_prob = (
+        select(Signal.model_prob)
+        .where(
+            Signal.market_id == Position.market_id,
+            Signal.side == Position.side,
+            Signal.status == SignalStatus.EXECUTED,
+            Signal.ts <= Position.closed_at,
+        )
+        .order_by(Signal.ts.desc())
+        .limit(1)
+        .correlate(Position)
+        .scalar_subquery()
+    )
+    representative_market_price = (
+        select(Signal.market_price)
+        .where(
+            Signal.market_id == Position.market_id,
+            Signal.side == Position.side,
+            Signal.status == SignalStatus.EXECUTED,
+            Signal.ts <= Position.closed_at,
+        )
+        .order_by(Signal.ts.desc())
+        .limit(1)
+        .correlate(Position)
+        .scalar_subquery()
+    )
+    representative_edge = (
+        select(Signal.edge)
+        .where(
+            Signal.market_id == Position.market_id,
+            Signal.side == Position.side,
+            Signal.status == SignalStatus.EXECUTED,
+            Signal.ts <= Position.closed_at,
+        )
+        .order_by(Signal.ts.desc())
+        .limit(1)
+        .correlate(Position)
+        .scalar_subquery()
+    )
+    rows = (
+        await session.execute(
+            select(
+                Position.id,
+                Market.id,
+                Market.polymarket_id,
+                Station.icao,
+                Market.market_date,
+                Market.kind,
+                Position.side,
+                Position.avg_price,
+                Position.size_usd,
+                Position.fee_usd,
+                Position.pnl_usd,
+                Position.clv,
+                Position.closed_at,
+                Market.resolves_at,
+                Market.resolved_outcome,
+                representative_signal_id,
+                representative_confidence,
+                representative_signal_ts,
+                representative_model_prob,
+                representative_market_price,
+                representative_edge,
+            )
+            .join(Market, Position.market_id == Market.id)
+            .outerjoin(Station, Market.station_id == Station.id)
+            .where(
+                Position.mode == mode,
+                Position.status == PositionStatus.CLOSED,
+                Position.clv.is_not(None),
+            )
+        )
+    ).all()
+
+    items: list[RootCauseTradeItem] = []
+    for (
+        position_id,
+        market_id,
+        polymarket_id,
+        station_icao,
+        market_date,
+        kind,
+        side,
+        avg_price,
+        size_usd,
+        fee_usd,
+        pnl_usd,
+        clv,
+        closed_at,
+        resolves_at,
+        resolved_outcome,
+        signal_id,
+        confidence,
+        signal_ts,
+        model_prob,
+        signal_market_price,
+        edge,
+    ) in rows:
+        entry_price = float(avg_price)
+        clv_value = float(clv)
+        horizon = _root_cause_horizon_bucket(signal_ts, resolves_at)
+        slice_value = _root_cause_dimension_value(
+            dimension,
+            station_icao=station_icao,
+            kind=kind,
+            horizon_bucket=horizon,
+            confidence=confidence,
+            side=side,
+            entry_price=entry_price,
+        )
+        if slice_value != value:
+            continue
+        won = (side is TradeSide.BUY_YES) == bool(resolved_outcome)
+        model_side = (
+            _side_adjusted_probability(float(model_prob), side)
+            if model_prob is not None
+            else None
+        )
+        items.append(
+            RootCauseTradeItem(
+                id=int(position_id),
+                record_type="position",
+                order_id=None,
+                signal_id=int(signal_id) if signal_id is not None else None,
+                position_id=int(position_id),
+                market_id=int(market_id),
+                polymarket_id=str(polymarket_id),
+                station_icao=station_icao,
+                market_date=market_date,
+                kind=_enum_text(kind) or "unknown",
+                side=_enum_text(side) or "unknown",
+                confidence=_enum_text(confidence),
+                horizon_bucket=horizon,
+                timestamp=signal_ts,
+                closed_at=closed_at,
+                entry_price=round(entry_price, 6),
+                closing_line_price=round(entry_price + clv_value, 6),
+                model_probability=round(model_side, 6) if model_side is not None else None,
+                market_probability=(
+                    round(float(signal_market_price), 6)
+                    if signal_market_price is not None
+                    else None
+                ),
+                raw_model_probability=None,
+                predicted_edge=round(float(edge), 6) if edge is not None else None,
+                brier_model_error=None,
+                brier_market_error=None,
+                brier_delta=None,
+                clv=round(clv_value, 6),
+                pnl_usd=round(float(pnl_usd or 0), 4),
+                cost_usd=round(float(size_usd), 4),
+                fee_usd=_number(fee_usd),
+                won=won,
+                resolved_outcome=bool(resolved_outcome),
+            )
+        )
+
+    items.sort(key=lambda item: item.clv if item.clv is not None else 0)
+    return len(items), items[:limit]
+
+
+@router.get("/root-cause-drilldown", response_model=RootCauseDrilldownResponse)
+async def root_cause_drilldown(
+    request: Request,
+    mode: Annotated[str, Query(pattern="^(paper|live)$")] = "paper",
+    metric: Annotated[str, Query(pattern="^(brier|clv)$")] = "brier",
+    dimension: Annotated[str, Query(min_length=1, max_length=32)] = "station",
+    value: Annotated[str, Query(min_length=1, max_length=64)] = "unknown",
+    limit: Annotated[int, Query(ge=1, le=50)] = 25,
+) -> RootCauseDrilldownResponse:
+    """Concrete trades/positions behind a diagnostic slice.
+
+    This powers Cockpit drill-down: clicking "LFPB", "6-24h", "buy_yes",
+    etc. shows the rows that made that Brier or CLV slice bad.
+    """
+    selected_mode = ExecutionMode.LIVE if mode == "live" else ExecutionMode.PAPER
+    if metric == "brier":
+        if dimension not in _BRIER_DRILLDOWN_DIMENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"dimension '{dimension}' is not available for brier",
+            )
+        async with _sessions(request)() as session:
+            total_count, items = await _brier_drilldown_items(
+                session, selected_mode, dimension, value, limit
+            )
+    else:
+        if dimension not in _CLV_DRILLDOWN_DIMENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"dimension '{dimension}' is not available for clv",
+            )
+        async with _sessions(request)() as session:
+            total_count, items = await _clv_drilldown_items(
+                session, selected_mode, dimension, value, limit
+            )
+    return RootCauseDrilldownResponse(
+        generated_at=datetime.now(UTC),
+        mode=mode,
+        metric=metric,
+        dimension=dimension,
+        value=value,
+        count=total_count,
+        items=items,
     )
 
 

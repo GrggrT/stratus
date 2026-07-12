@@ -88,6 +88,20 @@ public sealed class StratusApiClient : IDisposable
         GetRequiredAsync<ClvReportDto>(
             $"api/v1/clv-report?mode={mode}", cancellationToken);
 
+    public Task<RootCauseDrilldownDto> GetRootCauseDrilldownAsync(
+        string mode,
+        string metric,
+        string dimension,
+        string value,
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<RootCauseDrilldownDto>(
+            "api/v1/root-cause-drilldown"
+            + $"?mode={Uri.EscapeDataString(mode)}"
+            + $"&metric={Uri.EscapeDataString(metric)}"
+            + $"&dimension={Uri.EscapeDataString(dimension)}"
+            + $"&value={Uri.EscapeDataString(value)}",
+            cancellationToken);
+
     public Task<EquityResponse> GetLiveEquityAsync(
         CancellationToken cancellationToken = default) =>
         GetRequiredAsync<EquityResponse>("api/v1/live-equity", cancellationToken);
