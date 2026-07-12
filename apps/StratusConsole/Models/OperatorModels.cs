@@ -324,4 +324,5 @@ public sealed record DiagnosticBarItem(
     double MagnitudePercent,
     string Metric,
     string Dimension,
-    string Value);
+    string Value,
+    string ActionDetail = "");

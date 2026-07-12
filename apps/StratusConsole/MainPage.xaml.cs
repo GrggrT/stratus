@@ -62,6 +62,11 @@ public sealed partial class MainPage : Page
         string? Accent,
         Func<Task> Execute);
 
+    private sealed record DiagnosticAction(
+        string Label,
+        string? Accent,
+        string Detail);
+
     private sealed record DrilldownHoverReadout(
         double X,
         double Y,
@@ -842,17 +847,22 @@ public sealed partial class MainPage : Page
 
         double maxMagnitude = slices.Max(slice => Math.Abs(slice.ModelMinusMarket));
         return slices
-            .Select(slice => new DiagnosticBarItem(
-                $"{Pretty(slice.Dimension)} · {slice.Value}",
-                $"delta {DeltaNumber(slice.ModelMinusMarket)} · n={slice.Count} · edge {Cents(slice.AvgPredictedEdge)}",
-                $"model {Number(slice.BrierModel)} vs market {Number(slice.BrierMarket)} · "
-                    + $"return {Percent(slice.AvgRealizedReturn)} · win {Percent(slice.WinRate)}",
-                slice.ModelMinusMarket > 0 ? "Worse" : "Better",
-                slice.ModelMinusMarket > 0 ? "negative" : "positive",
-                DiagnosticMagnitude(slice.ModelMinusMarket, maxMagnitude),
-                "brier",
-                slice.Dimension,
-                slice.Value))
+            .Select(slice =>
+            {
+                DiagnosticAction action = BrierAction(slice);
+                return new DiagnosticBarItem(
+                    $"{Pretty(slice.Dimension)} · {slice.Value}",
+                    $"delta {DeltaNumber(slice.ModelMinusMarket)} · n={slice.Count} · edge {Cents(slice.AvgPredictedEdge)}",
+                    $"model {Number(slice.BrierModel)} vs market {Number(slice.BrierMarket)} · "
+                        + $"return {Percent(slice.AvgRealizedReturn)} · win {Percent(slice.WinRate)}",
+                    action.Label,
+                    action.Accent,
+                    DiagnosticMagnitude(slice.ModelMinusMarket, maxMagnitude),
+                    "brier",
+                    slice.Dimension,
+                    slice.Value,
+                    action.Detail);
+            })
             .ToList();
     }
 
@@ -882,18 +892,103 @@ public sealed partial class MainPage : Page
 
         double maxMagnitude = slices.Max(slice => Math.Abs(slice.AvgClv));
         return slices
-            .Select(slice => new DiagnosticBarItem(
-                $"{Pretty(slice.Dimension)} · {slice.Value}",
-                $"CLV {Cents(slice.AvgClv)} · beat {Percent(slice.ClvBeatRate)} · n={slice.Count}",
-                $"entry {Percent(slice.AvgEntryPrice)} · fee {Usd(slice.AvgFeeUsd)} · "
-                    + $"return {Percent(slice.AvgRealizedReturn)} · win {Percent(slice.WinRate)}",
-                slice.AvgClv < 0 ? "Drag" : "Tailwind",
-                slice.AvgClv < 0 ? "negative" : "positive",
-                DiagnosticMagnitude(slice.AvgClv, maxMagnitude),
-                "clv",
-                slice.Dimension,
-                slice.Value))
+            .Select(slice =>
+            {
+                DiagnosticAction action = ClvAction(slice);
+                return new DiagnosticBarItem(
+                    $"{Pretty(slice.Dimension)} · {slice.Value}",
+                    $"CLV {Cents(slice.AvgClv)} · beat {Percent(slice.ClvBeatRate)} · n={slice.Count}",
+                    $"entry {Percent(slice.AvgEntryPrice)} · fee {Usd(slice.AvgFeeUsd)} · "
+                        + $"return {Percent(slice.AvgRealizedReturn)} · win {Percent(slice.WinRate)}",
+                    action.Label,
+                    action.Accent,
+                    DiagnosticMagnitude(slice.AvgClv, maxMagnitude),
+                    "clv",
+                    slice.Dimension,
+                    slice.Value,
+                    action.Detail);
+            })
             .ToList();
+    }
+
+    private static DiagnosticAction BrierAction(BrierSliceDto slice)
+    {
+        if (slice.Count < 10)
+        {
+            return new DiagnosticAction(
+                "Watch",
+                "warning",
+                $"Action: keep collecting until n≥10 for this slice; current model-vs-market gap may be noise.");
+        }
+
+        if (slice.ModelMinusMarket <= 0)
+        {
+            return new DiagnosticAction(
+                "Keep",
+                "positive",
+                "Action: no model restriction; model is not worse than the market in this slice.");
+        }
+
+        if (slice.Count >= 30 && slice.ModelMinusMarket >= 0.05)
+        {
+            return new DiagnosticAction(
+                "Block cand.",
+                "negative",
+                "Action: candidate for block/recalibration rule; model is materially worse than market with enough sample.");
+        }
+
+        if (slice.ModelMinusMarket >= 0.02)
+        {
+            return new DiagnosticAction(
+                "Reduce",
+                "warning",
+                "Action: reduce sizing or require stronger edge until Brier delta improves.");
+        }
+
+        return new DiagnosticAction(
+            "Watch",
+            "warning",
+            "Action: mild model drag; monitor before changing rules.");
+    }
+
+    private static DiagnosticAction ClvAction(ClvSliceDto slice)
+    {
+        if (slice.Count < 10)
+        {
+            return new DiagnosticAction(
+                "Watch",
+                "warning",
+                $"Action: keep collecting until n≥10 for this slice; current CLV may be noisy.");
+        }
+
+        if (slice.AvgClv >= 0)
+        {
+            return new DiagnosticAction(
+                "Keep",
+                "positive",
+                "Action: execution quality acceptable; entries beat or match the closing line.");
+        }
+
+        if (slice.Count >= 30 && slice.AvgClv <= -0.03)
+        {
+            return new DiagnosticAction(
+                "Block cand.",
+                "negative",
+                "Action: candidate for block/maker-only rule; repeated entries are far worse than closing line.");
+        }
+
+        if (slice.AvgClv <= -0.01)
+        {
+            return new DiagnosticAction(
+                "Maker only",
+                "warning",
+                "Action: avoid taker-style fills; prefer passive midpoint/maker entry or reduce size.");
+        }
+
+        return new DiagnosticAction(
+            "Watch",
+            "warning",
+            "Action: slight negative CLV; monitor entry quality before changing rules.");
     }
 
     private static double DiagnosticMagnitude(double value, double maxMagnitude)
@@ -1117,9 +1212,9 @@ public sealed partial class MainPage : Page
         CockpitDetailStatusTag.Text = "Loading";
         CockpitDetailStatusBadge.Background = AccentBrush(item.Accent);
         CockpitDetailTitle.Text = $"Root cause · {item.Title}";
-        CockpitDetailPrimary.Text = item.Subtitle;
+        CockpitDetailPrimary.Text = $"{item.Status}: {item.ActionDetail}";
         CockpitDetailSecondary.Text = "Loading concrete trades behind this slice…";
-        CockpitDetailMeta.Text = item.Detail;
+        CockpitDetailMeta.Text = $"{item.Subtitle} · {item.Detail}";
         CockpitDetailHint.Text = "Diagnostic slice: concrete trades and positions behind the selected Brier/CLV bar.";
 
         try
@@ -1166,14 +1261,15 @@ public sealed partial class MainPage : Page
         CockpitDetailStatusBadge.Background = AccentBrush(slice.Accent);
         CockpitDetailTitle.Text =
             $"{Pretty(drilldown.Dimension)} · {drilldown.Value}";
-        CockpitDetailPrimary.Text = slice.Subtitle;
+        CockpitDetailPrimary.Text = $"{slice.Status}: {slice.ActionDetail}";
         CockpitDetailSecondary.Text = drilldown.Items.Count == 0
             ? "No concrete rows matched this slice."
             : string.Join(
                 Environment.NewLine,
                 drilldown.Items.Take(8).Select(row => FormatRootCauseTrade(row, drilldown.Metric)));
         CockpitDetailMeta.Text =
-            $"Showing {Math.Min(drilldown.Items.Count, 8)}/{drilldown.Count} row(s) · "
+            $"{slice.Subtitle} · {slice.Detail} · "
+            + $"showing {Math.Min(drilldown.Items.Count, 8)}/{drilldown.Count} row(s) · "
             + $"sorted by {(drilldown.Metric == "brier" ? "Brier drag" : "worst CLV")} · "
             + $"generated {LocalTime(drilldown.GeneratedAt)}";
         CockpitDetailHint.Text =

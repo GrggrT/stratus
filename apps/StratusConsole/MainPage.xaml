@@ -554,6 +554,11 @@
                                                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                                             Text="{x:Bind Detail}"
                                                             TextWrapping="Wrap" />
+                                                        <TextBlock
+                                                            FontSize="12"
+                                                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                            Text="{x:Bind ActionDetail}"
+                                                            TextWrapping="Wrap" />
                                                     </StackPanel>
                                                 </Grid>
                                             </DataTemplate>
@@ -617,6 +622,11 @@
                                                             FontSize="12"
                                                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                                             Text="{x:Bind Detail}"
+                                                            TextWrapping="Wrap" />
+                                                        <TextBlock
+                                                            FontSize="12"
+                                                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                            Text="{x:Bind ActionDetail}"
                                                             TextWrapping="Wrap" />
                                                     </StackPanel>
                                                 </Grid>
