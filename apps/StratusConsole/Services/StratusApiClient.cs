@@ -76,6 +76,18 @@ public sealed class StratusApiClient : IDisposable
         GetRequiredAsync<EdgeReportDto>(
             $"api/v1/edge-report?mode={mode}", cancellationToken);
 
+    public Task<BrierReportDto> GetBrierReportAsync(
+        string mode,
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<BrierReportDto>(
+            $"api/v1/brier-report?mode={mode}", cancellationToken);
+
+    public Task<ClvReportDto> GetClvReportAsync(
+        string mode,
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<ClvReportDto>(
+            $"api/v1/clv-report?mode={mode}", cancellationToken);
+
     public Task<EquityResponse> GetLiveEquityAsync(
         CancellationToken cancellationToken = default) =>
         GetRequiredAsync<EquityResponse>("api/v1/live-equity", cancellationToken);

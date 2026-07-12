@@ -465,6 +465,127 @@
                         </StackPanel>
                     </Border>
 
+                    <Border Style="{StaticResource CockpitCardStyle}">
+                        <Grid RowSpacing="14">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Grid>
+                                <StackPanel Spacing="2">
+                                    <TextBlock FontSize="18" FontWeight="SemiBold" Text="Root-cause diagnostics" />
+                                    <TextBlock
+                                        x:Name="RootCauseSubtitle"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Worst Brier and CLV slices explain whether the problem is model quality or execution quality."
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Border
+                                    x:Name="RootCauseBadge"
+                                    Padding="12,5"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Top"
+                                    Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                    CornerRadius="10">
+                                    <TextBlock x:Name="RootCauseBadgeText" FontWeight="SemiBold" Text="—" />
+                                </Border>
+                            </Grid>
+
+                            <Grid Grid.Row="1" ColumnSpacing="20">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Spacing="8">
+                                    <TextBlock FontSize="16" FontWeight="SemiBold" Text="Model calibration drag" />
+                                    <TextBlock
+                                        x:Name="BrierDiagnosticSummary"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Waiting for /api/v1/brier-report"
+                                        TextWrapping="Wrap" />
+                                    <ItemsControl x:Name="BrierDiagnosticItems">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="models:MonitoringListItem">
+                                                <Grid Margin="0,0,0,8" ColumnSpacing="10">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border
+                                                        Width="10"
+                                                        Height="10"
+                                                        Margin="0,4,0,0"
+                                                        VerticalAlignment="Top"
+                                                        Background="{x:Bind Accent, Converter={StaticResource AccentToBrush}}"
+                                                        CornerRadius="5" />
+                                                    <StackPanel Grid.Column="1" Spacing="2">
+                                                        <TextBlock FontWeight="SemiBold" Text="{x:Bind Title}" TextWrapping="Wrap" />
+                                                        <TextBlock FontSize="12" Text="{x:Bind Subtitle}" TextWrapping="Wrap" />
+                                                        <TextBlock
+                                                            FontSize="12"
+                                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                            Text="{x:Bind Detail}"
+                                                            TextWrapping="Wrap" />
+                                                    </StackPanel>
+                                                    <TextBlock
+                                                        Grid.Column="2"
+                                                        FontSize="12"
+                                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                        Text="{x:Bind Status}" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="1" Spacing="8">
+                                    <TextBlock FontSize="16" FontWeight="SemiBold" Text="Execution / CLV drag" />
+                                    <TextBlock
+                                        x:Name="ClvDiagnosticSummary"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Waiting for /api/v1/clv-report"
+                                        TextWrapping="Wrap" />
+                                    <ItemsControl x:Name="ClvDiagnosticItems">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="models:MonitoringListItem">
+                                                <Grid Margin="0,0,0,8" ColumnSpacing="10">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border
+                                                        Width="10"
+                                                        Height="10"
+                                                        Margin="0,4,0,0"
+                                                        VerticalAlignment="Top"
+                                                        Background="{x:Bind Accent, Converter={StaticResource AccentToBrush}}"
+                                                        CornerRadius="5" />
+                                                    <StackPanel Grid.Column="1" Spacing="2">
+                                                        <TextBlock FontWeight="SemiBold" Text="{x:Bind Title}" TextWrapping="Wrap" />
+                                                        <TextBlock FontSize="12" Text="{x:Bind Subtitle}" TextWrapping="Wrap" />
+                                                        <TextBlock
+                                                            FontSize="12"
+                                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                            Text="{x:Bind Detail}"
+                                                            TextWrapping="Wrap" />
+                                                    </StackPanel>
+                                                    <TextBlock
+                                                        Grid.Column="2"
+                                                        FontSize="12"
+                                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                        Text="{x:Bind Status}" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </Grid>
+                        </Grid>
+                    </Border>
+
                     <Grid ColumnSpacing="16" RowSpacing="16">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="2.2*" />

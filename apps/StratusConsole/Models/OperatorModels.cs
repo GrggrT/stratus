@@ -205,6 +205,51 @@ public sealed record EdgeReportDto(
     [property: JsonPropertyName("gate_passed")] bool GatePassed,
     [property: JsonPropertyName("gate_checks")] IReadOnlyList<GateCheckDto> GateChecks);
 
+public sealed record BrierSliceDto(
+    [property: JsonPropertyName("dimension")] string Dimension,
+    [property: JsonPropertyName("value")] string Value,
+    [property: JsonPropertyName("count")] int Count,
+    [property: JsonPropertyName("brier_model")] double BrierModel,
+    [property: JsonPropertyName("brier_market")] double BrierMarket,
+    [property: JsonPropertyName("model_minus_market")] double ModelMinusMarket,
+    [property: JsonPropertyName("brier_raw_model")] double? BrierRawModel,
+    [property: JsonPropertyName("raw_model_minus_market")] double? RawModelMinusMarket,
+    [property: JsonPropertyName("raw_count")] int RawCount,
+    [property: JsonPropertyName("avg_predicted_edge")] double AvgPredictedEdge,
+    [property: JsonPropertyName("avg_realized_return")] double AvgRealizedReturn,
+    [property: JsonPropertyName("win_rate")] double WinRate);
+
+public sealed record BrierReportDto(
+    [property: JsonPropertyName("generated_at")] DateTimeOffset GeneratedAt,
+    [property: JsonPropertyName("mode")] string Mode,
+    [property: JsonPropertyName("n_resolved_trades")] int ResolvedTrades,
+    [property: JsonPropertyName("brier_model")] double? BrierModel,
+    [property: JsonPropertyName("brier_market")] double? BrierMarket,
+    [property: JsonPropertyName("brier_raw_model")] double? BrierRawModel,
+    [property: JsonPropertyName("raw_count")] int RawCount,
+    [property: JsonPropertyName("model_minus_market")] double? ModelMinusMarket,
+    [property: JsonPropertyName("raw_model_minus_market")] double? RawModelMinusMarket,
+    [property: JsonPropertyName("slices")] IReadOnlyList<BrierSliceDto> Slices);
+
+public sealed record ClvSliceDto(
+    [property: JsonPropertyName("dimension")] string Dimension,
+    [property: JsonPropertyName("value")] string Value,
+    [property: JsonPropertyName("count")] int Count,
+    [property: JsonPropertyName("avg_clv")] double AvgClv,
+    [property: JsonPropertyName("clv_beat_rate")] double ClvBeatRate,
+    [property: JsonPropertyName("avg_entry_price")] double AvgEntryPrice,
+    [property: JsonPropertyName("avg_fee_usd")] double AvgFeeUsd,
+    [property: JsonPropertyName("avg_realized_return")] double AvgRealizedReturn,
+    [property: JsonPropertyName("win_rate")] double WinRate);
+
+public sealed record ClvReportDto(
+    [property: JsonPropertyName("generated_at")] DateTimeOffset GeneratedAt,
+    [property: JsonPropertyName("mode")] string Mode,
+    [property: JsonPropertyName("n_closed_positions")] int ClosedPositions,
+    [property: JsonPropertyName("avg_clv")] double? AvgClv,
+    [property: JsonPropertyName("clv_beat_rate")] double? ClvBeatRate,
+    [property: JsonPropertyName("slices")] IReadOnlyList<ClvSliceDto> Slices);
+
 public sealed record OrderDto(
     [property: JsonPropertyName("id")] long Id,
     [property: JsonPropertyName("polymarket_id")] string PolymarketId,

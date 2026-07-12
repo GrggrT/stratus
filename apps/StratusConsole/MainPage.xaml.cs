@@ -500,6 +500,10 @@ public sealed partial class MainPage : Page
                         _apiClient.GetJobsAsync(_lifetime.Token);
                     Task<EdgeReportDto> cockpitEdge =
                         _apiClient.GetEdgeReportAsync("paper", _lifetime.Token);
+                    Task<BrierReportDto> cockpitBrier =
+                        _apiClient.GetBrierReportAsync("paper", _lifetime.Token);
+                    Task<ClvReportDto> cockpitClv =
+                        _apiClient.GetClvReportAsync("paper", _lifetime.Token);
                     await Task.WhenAll(
                         cockpitOverview,
                         cockpitSignals,
@@ -507,7 +511,9 @@ public sealed partial class MainPage : Page
                         cockpitEquity,
                         cockpitCommands,
                         cockpitJobs,
-                        cockpitEdge);
+                        cockpitEdge,
+                        cockpitBrier,
+                        cockpitClv);
                     RenderCockpit(
                         cockpitOverview.Result,
                         cockpitSignals.Result.Items,
@@ -516,6 +522,7 @@ public sealed partial class MainPage : Page
                         cockpitCommands.Result.Items,
                         cockpitJobs.Result.Items);
                     RenderEdgeValidation(cockpitEdge.Result);
+                    RenderRootCauseDiagnostics(cockpitBrier.Result, cockpitClv.Result);
                     break;
                 case "Markets":
                     RenderMarkets((await _apiClient.GetMarketsAsync(_lifetime.Token)).Items);
@@ -773,6 +780,105 @@ public sealed partial class MainPage : Page
                 string.Empty,
                 check.Passed ? "Passed" : "Blocked",
                 check.Passed ? "positive" : "negative"))
+            .ToList();
+    }
+
+    private void RenderRootCauseDiagnostics(BrierReportDto brier, ClvReportDto clv)
+    {
+        bool modelDrag = brier.ModelMinusMarket is > 0;
+        bool executionDrag = clv.AvgClv is < 0;
+
+        RootCauseBadgeText.Text = (modelDrag, executionDrag) switch
+        {
+            (true, true) => "MODEL + EXECUTION",
+            (true, false) => "MODEL DRAG",
+            (false, true) => "EXECUTION DRAG",
+            _ => "WATCH",
+        };
+        RootCauseBadge.Background = AccentBrush(modelDrag || executionDrag ? "negative" : "positive");
+        RootCauseSubtitle.Text =
+            $"{brier.ResolvedTrades} resolved trade(s) · {clv.ClosedPositions} closed position(s). "
+            + "Negative CLV means bad entry; positive Brier delta means model worse than market.";
+
+        BrierDiagnosticSummary.Text =
+            brier.BrierModel is { } model && brier.BrierMarket is { } market
+                ? $"Overall Brier {Number(model)} vs market {Number(market)} · delta {DeltaNumber(brier.ModelMinusMarket)}"
+                    + (brier.BrierRawModel is { } raw
+                        ? $" · raw {Number(raw)} on {brier.RawCount} trade(s)"
+                        : " · raw model unavailable on old trades")
+                : "No resolved trades with Brier comparison yet.";
+        BrierDiagnosticItems.ItemsSource = BuildBrierDiagnosticItems(brier);
+
+        ClvDiagnosticSummary.Text =
+            clv.AvgClv is { } avg
+                ? $"Average CLV {Cents(avg)} · beat rate {Percent(clv.ClvBeatRate)} · lower rows are worse entries"
+                : "No closed positions with CLV yet.";
+        ClvDiagnosticItems.ItemsSource = BuildClvDiagnosticItems(clv);
+    }
+
+    private static List<MonitoringListItem> BuildBrierDiagnosticItems(BrierReportDto report)
+    {
+        List<BrierSliceDto> slices = report.Slices
+            .OrderByDescending(slice => slice.ModelMinusMarket)
+            .ThenByDescending(slice => slice.Count)
+            .Take(5)
+            .ToList();
+        if (slices.Count == 0)
+        {
+            return
+            [
+                new MonitoringListItem(
+                    "No Brier slices yet",
+                    "Waiting for resolved trades",
+                    "This panel will show station, horizon, side, confidence, and market-kind root cause.",
+                    string.Empty,
+                    "Idle",
+                    null),
+            ];
+        }
+
+        return slices
+            .Select(slice => new MonitoringListItem(
+                $"{Pretty(slice.Dimension)} · {slice.Value}",
+                $"delta {DeltaNumber(slice.ModelMinusMarket)} · n={slice.Count} · edge {Cents(slice.AvgPredictedEdge)}",
+                $"model {Number(slice.BrierModel)} vs market {Number(slice.BrierMarket)} · "
+                    + $"return {Percent(slice.AvgRealizedReturn)} · win {Percent(slice.WinRate)}",
+                string.Empty,
+                slice.ModelMinusMarket > 0 ? "Worse" : "Better",
+                slice.ModelMinusMarket > 0 ? "negative" : "positive"))
+            .ToList();
+    }
+
+    private static List<MonitoringListItem> BuildClvDiagnosticItems(ClvReportDto report)
+    {
+        List<ClvSliceDto> slices = report.Slices
+            .OrderBy(slice => slice.AvgClv)
+            .ThenByDescending(slice => slice.Count)
+            .Take(5)
+            .ToList();
+        if (slices.Count == 0)
+        {
+            return
+            [
+                new MonitoringListItem(
+                    "No CLV slices yet",
+                    "Waiting for closed positions",
+                    "This panel will show where entries are worse than the closing line.",
+                    string.Empty,
+                    "Idle",
+                    null),
+            ];
+        }
+
+        return slices
+            .Select(slice => new MonitoringListItem(
+                $"{Pretty(slice.Dimension)} · {slice.Value}",
+                $"CLV {Cents(slice.AvgClv)} · beat {Percent(slice.ClvBeatRate)} · n={slice.Count}",
+                $"entry {Percent(slice.AvgEntryPrice)} · fee {Usd(slice.AvgFeeUsd)} · "
+                    + $"return {Percent(slice.AvgRealizedReturn)} · win {Percent(slice.WinRate)}",
+                string.Empty,
+                slice.AvgClv < 0 ? "Drag" : "Tailwind",
+                slice.AvgClv < 0 ? "negative" : "positive"))
             .ToList();
     }
 
@@ -4261,6 +4367,12 @@ public sealed partial class MainPage : Page
         GateStatusText.Text = "Unknown";
         GateDetailText.Text = "Validation data unavailable";
         ActivityText.Text = "Monitoring data unavailable";
+        RootCauseBadgeText.Text = "—";
+        RootCauseSubtitle.Text = "Root-cause data unavailable";
+        BrierDiagnosticSummary.Text = "Brier diagnostics unavailable";
+        ClvDiagnosticSummary.Text = "CLV diagnostics unavailable";
+        BrierDiagnosticItems.ItemsSource = null;
+        ClvDiagnosticItems.ItemsSource = null;
     }
 
     private async void RootNavigation_SelectionChanged(
@@ -4345,6 +4457,12 @@ public sealed partial class MainPage : Page
 
     private static string Number(double? value) =>
         value.HasValue ? value.Value.ToString("0.000", CultureInfo.InvariantCulture) : "—";
+
+    private static string DeltaNumber(double? value) =>
+        value.HasValue ? value.Value.ToString("+0.000;-0.000;0.000", CultureInfo.InvariantCulture) : "—";
+
+    private static string Cents(double? value) =>
+        value.HasValue ? $"{value.Value * 100:+0.00;-0.00;0.00}¢" : "—";
 
     private static string LocalTime(DateTimeOffset value) => value.ToLocalTime().ToString("g");
 
