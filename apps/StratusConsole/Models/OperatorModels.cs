@@ -340,3 +340,13 @@ public sealed record DiagnosticBarItem(
     string Dimension,
     string Value,
     string ActionDetail = "");
+
+public sealed record RootCauseTradeListItem(
+    string Market,
+    string Setup,
+    string Model,
+    string Execution,
+    string Outcome,
+    string Status,
+    string? Accent,
+    RootCauseTradeDto Trade);

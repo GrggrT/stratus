@@ -1163,6 +1163,15 @@ public sealed partial class MainPage : Page
 
     private async Task LoadRootCauseDrilldownAsync(DiagnosticBarItem item)
     {
+        RootCauseDrilldownPanel.Visibility = Visibility.Visible;
+        RootCauseDrilldownTitle.Text = $"Loading {item.Title}...";
+        RootCauseDrilldownSubtitle.Text = "Fetching the concrete resolved trades behind this diagnostic slice.";
+        RootCauseDrilldownCount.Text = "...";
+        RootCauseDrilldownMetricLabel.Text = item.Metric == "brier" ? "Average Brier drag" : "Average CLV";
+        RootCauseDrilldownMetric.Text = "...";
+        RootCauseDrilldownPnl.Text = "...";
+        RootCauseDrilldownWinRate.Text = "...";
+        RootCauseTradeList.ItemsSource = null;
         CockpitDetailStatusTag.Text = "Loading";
         CockpitDetailStatusBadge.Background = AccentBrush(item.Accent);
         CockpitDetailTitle.Text = $"Root cause · {item.Title}";
@@ -1181,25 +1190,18 @@ public sealed partial class MainPage : Page
                     item.Value,
                     _lifetime.Token);
             RenderRootCauseDrilldown(item, drilldown);
-
-            RootCauseTradeDto? first = drilldown.Items.FirstOrDefault();
-            if (first is not null)
-            {
-                await LoadCockpitMarketChartAsync(new MonitoringListItem(
-                    $"{first.StationIcao ?? "Unmapped"} · {first.MarketDate:MM-dd} · {Pretty(first.Kind)}",
-                    $"{Pretty(first.Side)} · market #{first.MarketId}",
-                    $"Diagnostic source row #{first.Id}",
-                    first.PolymarketId,
-                    item.Metric.ToUpperInvariant(),
-                    item.Accent,
-                    first.MarketId));
-            }
         }
         catch (OperationCanceledException)
         {
         }
         catch (Exception ex)
         {
+            RootCauseDrilldownTitle.Text = "Diagnostic trades unavailable";
+            RootCauseDrilldownSubtitle.Text = ex.Message;
+            RootCauseDrilldownCount.Text = "—";
+            RootCauseDrilldownMetric.Text = "—";
+            RootCauseDrilldownPnl.Text = "—";
+            RootCauseDrilldownWinRate.Text = "—";
             CockpitDetailStatusTag.Text = "Unavailable";
             CockpitDetailStatusBadge.Background = AccentBrush("warning");
             CockpitDetailSecondary.Text = $"Root-cause drill-down unavailable: {ex.Message}";
@@ -1218,35 +1220,103 @@ public sealed partial class MainPage : Page
         CockpitDetailPrimary.Text = $"{slice.Status}: {slice.ActionDetail}";
         CockpitDetailSecondary.Text = drilldown.Items.Count == 0
             ? "No concrete rows matched this slice."
-            : string.Join(
-                Environment.NewLine,
-                drilldown.Items.Take(8).Select(row => FormatRootCauseTrade(row, drilldown.Metric)));
+            : $"{drilldown.Items.Count} source trade(s) loaded below. Select a row to inspect its market chart.";
         CockpitDetailMeta.Text =
             $"{slice.Subtitle} · {slice.Detail} · "
-            + $"showing {Math.Min(drilldown.Items.Count, 8)}/{drilldown.Count} row(s) · "
+            + $"showing {drilldown.Items.Count}/{drilldown.Count} row(s) · "
             + $"sorted by {(drilldown.Metric == "brier" ? "Brier drag" : "worst CLV")} · "
             + $"generated {LocalTime(drilldown.GeneratedAt)}";
         CockpitDetailHint.Text =
-            "Selected diagnostic slice. The chart switches to the first matching market when rows are available.";
+            "Selected diagnostic slice. Choose a concrete row in the table to switch the chart to that market.";
+
+        IReadOnlyList<RootCauseTradeListItem> rows = BuildRootCauseTradeItems(drilldown);
+        RootCauseDrilldownPanel.Visibility = Visibility.Visible;
+        RootCauseDrilldownTitle.Text = $"{Pretty(drilldown.Dimension)} · {drilldown.Value}";
+        RootCauseDrilldownSubtitle.Text =
+            $"{slice.Status}: {slice.ActionDetail} · click any trade to open its market chart";
+        RootCauseDrilldownCount.Text = $"{drilldown.Items.Count} / {drilldown.Count}";
+        RootCauseDrilldownMetricLabel.Text =
+            drilldown.Metric == "brier" ? "Average Brier drag" : "Average CLV";
+        double? metric = drilldown.Metric == "brier"
+            ? AverageOrNull(drilldown.Items.Select(row => row.BrierDelta))
+            : AverageOrNull(drilldown.Items.Select(row => row.Clv));
+        RootCauseDrilldownMetric.Text = drilldown.Metric == "brier"
+            ? DeltaNumber(metric)
+            : Cents(metric);
+        RootCauseDrilldownMetric.Foreground = AccentBrush(
+            metric is null ? null
+            : metric is > 0 && drilldown.Metric == "brier" ? "negative"
+            : metric is < 0 && drilldown.Metric == "clv" ? "negative"
+            : "positive");
+        double pnl = drilldown.Items.Sum(row => row.PnlUsd);
+        RootCauseDrilldownPnl.Text = Signed(pnl);
+        RootCauseDrilldownPnl.Foreground = AccentBrush(PnlAccent(pnl));
+        RootCauseDrilldownWinRate.Text = drilldown.Items.Count == 0
+            ? "—"
+            : Percent((double)drilldown.Items.Count(row => row.Won) / drilldown.Items.Count);
+        RootCauseTradeList.ItemsSource = rows;
     }
 
-    private static string FormatRootCauseTrade(RootCauseTradeDto row, string metric)
+    private static IReadOnlyList<RootCauseTradeListItem> BuildRootCauseTradeItems(
+        RootCauseDrilldownDto drilldown)
     {
-        string label =
-            $"#{row.Id} · {row.StationIcao ?? "Unmapped"} · {row.MarketDate:MM-dd} · "
-            + $"{Pretty(row.Kind)} · {Pretty(row.Side)}";
-        if (metric == "brier")
+        return drilldown.Items
+            .Select(row => new RootCauseTradeListItem(
+                $"{row.StationIcao ?? "Unmapped"} · {row.MarketDate:MM-dd} · {Pretty(row.Kind)}",
+                $"{Pretty(row.Side)} · {row.Confidence ?? "—"} · {row.HorizonBucket}",
+                drilldown.Metric == "brier"
+                    ? $"Δ {DeltaNumber(row.BrierDelta)} · {Number(row.BrierModelError)} vs {Number(row.BrierMarketError)}"
+                    : $"p {Percent(row.ModelProbability)} vs market {Percent(row.MarketProbability)}",
+                $"entry {Percent(row.EntryPrice)} → close {Percent(row.ClosingLinePrice)} · CLV {Cents(row.Clv)}",
+                $"{Signed(row.PnlUsd)} · cost {Usd(row.CostUsd)}",
+                row.Won ? "WIN" : "LOSS",
+                row.Won ? "positive" : "negative",
+                row))
+            .ToList();
+    }
+
+    private static double? AverageOrNull(IEnumerable<double?> values)
+    {
+        double[] available = values
+            .Where(value => value is not null)
+            .Select(value => value!.Value)
+            .ToArray();
+        return available.Length == 0 ? null : available.Average();
+    }
+
+    private async void RootCauseTradeList_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is not RootCauseTradeListItem item)
         {
-            return label
-                + $" · Δ {DeltaNumber(row.BrierDelta)}"
-                + $" · model {Number(row.BrierModelError)} vs market {Number(row.BrierMarketError)}"
-                + $" · entry {Percent(row.EntryPrice)} · P&L {Signed(row.PnlUsd)}";
+            return;
         }
 
-        return label
-            + $" · CLV {Cents(row.Clv)}"
-            + $" · entry {Percent(row.EntryPrice)} → close {Percent(row.ClosingLinePrice)}"
-            + $" · P&L {Signed(row.PnlUsd)}";
+        RootCauseTradeDto trade = item.Trade;
+        CockpitDetailStatusTag.Text = item.Status;
+        CockpitDetailStatusBadge.Background = AccentBrush(item.Accent);
+        CockpitDetailTitle.Text = item.Market;
+        CockpitDetailPrimary.Text = $"{item.Setup} · {item.Outcome}";
+        CockpitDetailSecondary.Text = $"{item.Model} · {item.Execution}";
+        CockpitDetailMeta.Text =
+            $"source #{trade.Id} · market #{trade.MarketId} · {trade.PolymarketId}"
+            + (trade.ClosedAt is null ? string.Empty : $" · closed {LocalTime(trade.ClosedAt.Value)}");
+        CockpitDetailHint.Text =
+            "Concrete diagnostic trade selected. The chart now shows this market's price and probability history.";
+
+        await LoadCockpitMarketChartAsync(new MonitoringListItem(
+            item.Market,
+            item.Setup,
+            item.Execution,
+            trade.PolymarketId,
+            item.Status,
+            item.Accent,
+            trade.MarketId));
+    }
+
+    private void RootCauseDrilldownClose_Click(object sender, RoutedEventArgs e)
+    {
+        RootCauseDrilldownPanel.Visibility = Visibility.Collapsed;
+        RootCauseTradeList.SelectedItem = null;
     }
 
     private void CockpitActivityFilterBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
