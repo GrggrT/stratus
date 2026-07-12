@@ -56,6 +56,28 @@ class Settings(BaseSettings):
     calibration_window_days: int = Field(default=180, ge=30, le=730)
     calibration_min_samples: int = Field(default=60, ge=20, le=500)
     initial_bankroll_usd: float = Field(default=1080.0, gt=0)
+    # --- Anti-luck trading policy (docs/EDGE_VALIDATION_PLAN.md) ---
+    # Edge must clear execution costs: half-spread plus this buffer (fees are
+    # already priced into the effective-price edge).
+    edge_cost_buffer: float = Field(default=0.02, ge=0, le=0.2)
+    signal_min_edge: float = Field(default=0.05, ge=0, le=0.5)
+    max_spread: float = Field(default=0.04, gt=0, le=0.5)
+    kelly_multiplier: float = Field(default=0.25, gt=0, le=1.0)
+    # Cap on potential payout per position as a bankroll fraction.
+    max_win_fraction: float = Field(default=0.02, gt=0, le=0.5)
+    tail_price_low: float = Field(default=0.10, ge=0, le=0.5)
+    tail_price_high: float = Field(default=0.90, ge=0.5, le=1.0)
+    # Trading gate: calibration rows need at least this many samples before
+    # signals on that station/kind/horizon execute. 0 disables the gate.
+    min_traded_calibration_samples: int = Field(default=30, ge=0, le=1000)
+    # Shrink model probability toward the market: w = n / (n + prior). The
+    # model earns independence with calibration sample size. 0 disables.
+    shrinkage_prior_samples: int = Field(default=30, ge=0, le=1000)
+    # Paper execution: maker simulation posts a limit at the midpoint and
+    # only fills when later snapshots trade through it, instead of paying
+    # the taker ask. TTL bounds how long a resting paper order may wait.
+    paper_maker_execution: bool = True
+    paper_order_ttl_minutes: int = Field(default=30, ge=1, le=240)
     # Accounting timezone for daily/weekly loss limits. America/New_York
     # aligns the reset with the venue day (operator decision, 2026-07-06).
     risk_timezone: str = "America/New_York"

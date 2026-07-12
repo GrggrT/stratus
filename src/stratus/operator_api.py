@@ -29,12 +29,17 @@ from stratus.db.models import (
     Station,
     ValidationCheckpoint,
 )
+from stratus.repositories.analytics import resolved_trade_outcomes
 from stratus.repositories.operator_commands import enqueue_command, recent_commands
 from stratus.repositories.runtime_control import get_runtime_control
 from stratus.services.live_analytics import (
     LivePerformance,
     PositionStat,
+    TradeOutcome,
+    brier_comparison,
     cumulative_equity,
+    edge_calibration,
+    edge_slope,
     summarize_live_performance,
 )
 from stratus.services.operator_commands import validate_command
@@ -191,6 +196,43 @@ class LiveSummaryResponse(BaseModel):
     robust_roi: float | None
     avg_clv: float | None
     clv_beat_rate: float | None
+    # Skill/luck decomposition and bootstrap CIs: the anti-luck view.
+    skill_pnl_usd: float | None
+    luck_pnl_usd: float | None
+    decomposed: int
+    roi_ci_low: float | None
+    roi_ci_high: float | None
+    skill_pnl_ci_low: float | None
+    skill_pnl_ci_high: float | None
+    statistically_positive: bool | None
+    brier_model: float | None
+    brier_market: float | None
+    n_resolved_trades: int
+
+
+class EdgeBucketItem(BaseModel):
+    low: float
+    high: float | None
+    count: int
+    avg_predicted_edge: float | None
+    avg_realized_return: float | None
+
+
+class EdgeReportResponse(BaseModel):
+    generated_at: datetime
+    mode: str
+    n_resolved_trades: int
+    brier_model: float | None
+    brier_market: float | None
+    skill_pnl_usd: float | None
+    luck_pnl_usd: float | None
+    roi_ci_low: float | None
+    roi_ci_high: float | None
+    skill_pnl_ci_low: float | None
+    skill_pnl_ci_high: float | None
+    statistically_positive: bool | None
+    edge_slope: float | None
+    buckets: list[EdgeBucketItem]
 
 
 class EquityPointItem(BaseModel):
@@ -867,6 +909,8 @@ async def _position_stats(
                 Position.clv,
                 Position.size_usd,
                 Position.fee_usd,
+                Position.size_shares,
+                Position.avg_price,
             ).where(Position.mode == mode)
         )
     ).all()
@@ -877,12 +921,17 @@ async def _position_stats(
             clv=_number(clv),
             cost_usd=float(cost),
             fee_usd=_number(fee),
+            size_shares=_number(shares),
+            avg_price=_number(price),
         )
-        for status, pnl, clv, cost, fee in rows
+        for status, pnl, clv, cost, fee, shares, price in rows
     ]
 
 
-def _summary_response(perf: LivePerformance) -> LiveSummaryResponse:
+def _summary_response(
+    perf: LivePerformance, trades: list[TradeOutcome]
+) -> LiveSummaryResponse:
+    briers = brier_comparison(trades)
     return LiveSummaryResponse(
         generated_at=datetime.now(UTC),
         positions=perf.positions,
@@ -898,6 +947,17 @@ def _summary_response(perf: LivePerformance) -> LiveSummaryResponse:
         robust_roi=perf.robust_roi,
         avg_clv=perf.avg_clv,
         clv_beat_rate=perf.clv_beat_rate,
+        skill_pnl_usd=perf.skill_pnl_usd,
+        luck_pnl_usd=perf.luck_pnl_usd,
+        decomposed=perf.decomposed,
+        roi_ci_low=perf.roi_ci_low,
+        roi_ci_high=perf.roi_ci_high,
+        skill_pnl_ci_low=perf.skill_pnl_ci_low,
+        skill_pnl_ci_high=perf.skill_pnl_ci_high,
+        statistically_positive=perf.statistically_positive,
+        brier_model=briers[0] if briers else None,
+        brier_market=briers[1] if briers else None,
+        n_resolved_trades=len(trades),
     )
 
 
@@ -907,7 +967,8 @@ async def live_summary(request: Request) -> LiveSummaryResponse:
         perf = summarize_live_performance(
             await _position_stats(session, ExecutionMode.LIVE)
         )
-    return _summary_response(perf)
+        trades = await resolved_trade_outcomes(session, ExecutionMode.LIVE)
+    return _summary_response(perf, trades)
 
 
 @router.get("/performance-summary", response_model=LiveSummaryResponse)
@@ -920,7 +981,49 @@ async def performance_summary(
         perf = summarize_live_performance(
             await _position_stats(session, selected_mode)
         )
-    return _summary_response(perf)
+        trades = await resolved_trade_outcomes(session, selected_mode)
+    return _summary_response(perf, trades)
+
+
+@router.get("/edge-report", response_model=EdgeReportResponse)
+async def edge_report(
+    request: Request,
+    mode: Annotated[str, Query(pattern="^(paper|live)$")] = "paper",
+) -> EdgeReportResponse:
+    """Is the predicted edge real? Brier model-vs-market, skill/luck split,
+    bootstrap CIs and realised return per predicted-edge bucket."""
+    selected_mode = ExecutionMode.LIVE if mode == "live" else ExecutionMode.PAPER
+    async with _sessions(request)() as session:
+        perf = summarize_live_performance(
+            await _position_stats(session, selected_mode)
+        )
+        trades = await resolved_trade_outcomes(session, selected_mode)
+    briers = brier_comparison(trades)
+    return EdgeReportResponse(
+        generated_at=datetime.now(UTC),
+        mode=mode,
+        n_resolved_trades=len(trades),
+        brier_model=briers[0] if briers else None,
+        brier_market=briers[1] if briers else None,
+        skill_pnl_usd=perf.skill_pnl_usd,
+        luck_pnl_usd=perf.luck_pnl_usd,
+        roi_ci_low=perf.roi_ci_low,
+        roi_ci_high=perf.roi_ci_high,
+        skill_pnl_ci_low=perf.skill_pnl_ci_low,
+        skill_pnl_ci_high=perf.skill_pnl_ci_high,
+        statistically_positive=perf.statistically_positive,
+        edge_slope=edge_slope(trades),
+        buckets=[
+            EdgeBucketItem(
+                low=bucket.low,
+                high=bucket.high,
+                count=bucket.count,
+                avg_predicted_edge=bucket.avg_predicted_edge,
+                avg_realized_return=bucket.avg_realized_return,
+            )
+            for bucket in edge_calibration(trades)
+        ],
+    )
 
 
 async def _equity_response(request: Request, mode: ExecutionMode) -> EquityResponse:

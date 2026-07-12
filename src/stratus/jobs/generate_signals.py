@@ -29,13 +29,42 @@ from stratus.repositories.execution import in_flight_live_exposure
 from stratus.repositories.risk import enforce_loss_limits
 from stratus.repositories.runtime_control import get_runtime_control
 from stratus.repositories.signals import SignalValue, insert_signals
-from stratus.services.signals import SignalInputs, ensemble_agreement, evaluate_signal
+from stratus.services.signals import (
+    SignalInputs,
+    SignalPolicy,
+    ensemble_agreement,
+    evaluate_signal,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _decimal(value: float, precision: str) -> Decimal:
     return Decimal(str(value)).quantize(Decimal(precision))
+
+
+def signal_policy(settings: Settings) -> SignalPolicy:
+    return SignalPolicy(
+        min_edge=settings.signal_min_edge,
+        max_spread=settings.max_spread,
+        edge_cost_buffer=settings.edge_cost_buffer,
+        kelly_multiplier=settings.kelly_multiplier,
+        max_win_fraction=settings.max_win_fraction,
+        tail_price_low=settings.tail_price_low,
+        tail_price_high=settings.tail_price_high,
+        min_calibration_samples=settings.min_traded_calibration_samples,
+    )
+
+
+def _calibration_samples(components: dict[str, object]) -> int:
+    """Calibration depth recorded by recompute_probs alongside shrinkage.
+    Missing metadata (pre-upgrade rows) reads as uncalibrated — fail closed."""
+    shrinkage = components.get("shrinkage")
+    if isinstance(shrinkage, dict):
+        n = shrinkage.get("n")
+        if isinstance(n, int) and n >= 0:
+            return n
+    return 0
 
 
 async def generate_signals(
@@ -146,6 +175,7 @@ async def generate_signals(
         if loss_limits.weekly_breached:
             global_reasons.append("weekly_loss_limit")
 
+        policy = signal_policy(settings)
         candidates = []
         for market, _station in market_rows:
             probability = latest_probs.get(market.id)
@@ -170,8 +200,10 @@ async def generate_signals(
                     ensemble_yes_agreement=agreement_yes,
                     bankroll_usd=bankroll_usd,
                     fee_rate=float(market.fee_rate) if market.fees_enabled else 0.0,
+                    calibration_samples=_calibration_samples(probability.components),
                 ),
                 now,
+                policy,
             )
             candidates.append((decision.edge, market, probability, price, decision))
 

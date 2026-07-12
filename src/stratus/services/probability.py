@@ -274,3 +274,79 @@ def blend_probabilities(
         climate_weight=climate_weight,
         climate_sample_n=climate_sample_n,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ShrinkageResult:
+    probability: float
+    weight: float
+    applied: bool
+
+
+def shrink_to_market(
+    model_probability: float,
+    market_probability: float | None,
+    *,
+    calibration_samples: int,
+    prior_samples: int,
+) -> ShrinkageResult:
+    """Shrink the model probability toward the market price.
+
+    p_used = w * p_model + (1 - w) * p_market, with w = n / (n + prior).
+    Until the calibration sample has earned trust, the model barely deviates
+    from the market, edges collapse to zero and unsupported signals vanish —
+    the core anti-luck mechanism. prior_samples == 0 disables shrinkage; a
+    missing market anchor leaves the model probability untouched but reports
+    applied=False so callers can see the gap.
+    """
+    weight = (
+        calibration_samples / (calibration_samples + prior_samples)
+        if prior_samples > 0
+        else 1.0
+    )
+    if market_probability is None or prior_samples <= 0:
+        return ShrinkageResult(
+            probability=min(1.0, max(0.0, model_probability)),
+            weight=weight,
+            applied=False,
+        )
+    blended = weight * model_probability + (1 - weight) * market_probability
+    return ShrinkageResult(
+        probability=min(0.999999, max(0.000001, blended)),
+        weight=weight,
+        applied=True,
+    )
+
+
+def pit_value(actual_c: float, mean_c: float, sigma_c: float) -> float:
+    """Probability integral transform of the observed value under the
+    predicted normal. Honest forecast distributions produce uniform PITs;
+    a hump means overdispersion, a U-shape means overconfidence."""
+    if sigma_c <= 0:
+        raise ValueError("sigma_c must be positive")
+    z = (actual_c - mean_c) / (sigma_c * math.sqrt(2))
+    return 0.5 * (1 + math.erf(z))
+
+
+def ks_uniform_pvalue(values: list[float]) -> float | None:
+    """Asymptotic Kolmogorov-Smirnov p-value against U(0,1).
+
+    None below five samples where the asymptotic approximation is
+    meaningless. Small p == the PIT histogram is not uniform and the
+    predicted sigma cannot be trusted."""
+    n = len(values)
+    if n < 5:
+        return None
+    ordered = sorted(values)
+    statistic = max(
+        max((index + 1) / n - value, value - index / n)
+        for index, value in enumerate(ordered)
+    )
+    lam = (math.sqrt(n) + 0.12 + 0.11 / math.sqrt(n)) * statistic
+    total = 0.0
+    for k in range(1, 101):
+        term = (-1) ** (k - 1) * math.exp(-2 * k * k * lam * lam)
+        total += term
+        if abs(term) < 1e-10:
+            break
+    return max(0.0, min(1.0, 2 * total))

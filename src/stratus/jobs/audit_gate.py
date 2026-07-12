@@ -83,6 +83,14 @@ async def audit_gate(
                 "clv_samples": gate.clv_samples,
                 "average_clv": gate.average_clv,
                 "roi": gate.roi,
+                "checks": [
+                    {
+                        "name": check.name,
+                        "passed": check.passed,
+                        "detail": check.detail,
+                    }
+                    for check in gate.checks
+                ],
             }
             session.add(
                 ValidationCheckpoint(

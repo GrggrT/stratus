@@ -30,6 +30,11 @@ LIVE_STATUS_UNCONFIRMED = "submit_unconfirmed"
 LIVE_STATUS_CANCEL_REQUESTED = "cancel_requested"
 LIVE_STATUS_CANCELED = "canceled"
 
+# Paper maker lifecycle: a resting simulated limit order waits for the market
+# to trade through it; TTL expiry marks it unfilled instead of paying taker.
+PAPER_STATUS_RESTING = "paper_resting"
+PAPER_STATUS_UNFILLED = "unfilled_maker"
+
 
 @dataclass(frozen=True, slots=True)
 class PaperExecutionValue:
@@ -316,6 +321,58 @@ async def record_live_bankroll(
     return 1
 
 
+async def _aggregate_paper_position(
+    session: AsyncSession,
+    *,
+    market_id: int,
+    side: TradeSide,
+    avg_price: Decimal,
+    size_shares: Decimal,
+    total_cost_usd: Decimal,
+    fee_usd: Decimal,
+) -> None:
+    """Fold one paper fill into the open (market, side) position, keeping a
+    single aggregated row per market/side instead of one row per top-up."""
+    position = await session.scalar(
+        select(Position)
+        .where(
+            Position.market_id == market_id,
+            Position.mode == ExecutionMode.PAPER,
+            Position.side == side,
+            Position.status == PositionStatus.OPEN,
+        )
+        .order_by(Position.id)
+        .with_for_update()
+    )
+    if position is None:
+        session.add(
+            Position(
+                market_id=market_id,
+                mode=ExecutionMode.PAPER,
+                side=side,
+                avg_price=avg_price,
+                size_shares=size_shares,
+                size_usd=total_cost_usd,
+                fee_usd=fee_usd,
+                status=PositionStatus.OPEN,
+            )
+        )
+        return
+    combined_shares = position.size_shares + size_shares
+    if combined_shares > 0:
+        position.avg_price = (
+            (position.avg_price * position.size_shares + avg_price * size_shares)
+            / combined_shares
+        ).quantize(Decimal("0.000001"))
+    position.size_shares = combined_shares.quantize(Decimal("0.000001"))
+    position.size_usd = (position.size_usd + total_cost_usd).quantize(
+        Decimal("0.0001")
+    )
+    position.fee_usd = ((position.fee_usd or Decimal(0)) + fee_usd).quantize(
+        Decimal("0.00001")
+    )
+
+
 async def persist_paper_executions(
     session: AsyncSession, values: list[PaperExecutionValue]
 ) -> int:
@@ -347,48 +404,135 @@ async def persist_paper_executions(
                 filled_at=value.filled_at,
             )
         )
-        position = await session.scalar(
-            select(Position)
-            .where(
-                Position.market_id == value.market_id,
-                Position.mode == ExecutionMode.PAPER,
-                Position.side == value.side,
-                Position.status == PositionStatus.OPEN,
-            )
-            .order_by(Position.id)
-            .with_for_update()
+        await _aggregate_paper_position(
+            session,
+            market_id=value.market_id,
+            side=value.side,
+            avg_price=value.avg_price,
+            size_shares=value.size_shares,
+            total_cost_usd=value.total_cost_usd,
+            fee_usd=value.fee_usd,
         )
-        if position is None:
-            session.add(
-                Position(
-                    market_id=value.market_id,
-                    mode=ExecutionMode.PAPER,
-                    side=value.side,
-                    avg_price=value.avg_price,
-                    size_shares=value.size_shares,
-                    size_usd=value.total_cost_usd,
-                    fee_usd=value.fee_usd,
-                    status=PositionStatus.OPEN,
-                )
-            )
-        else:
-            combined_shares = position.size_shares + value.size_shares
-            if combined_shares > 0:
-                position.avg_price = (
-                    (
-                        position.avg_price * position.size_shares
-                        + value.avg_price * value.size_shares
-                    )
-                    / combined_shares
-                ).quantize(Decimal("0.000001"))
-            position.size_shares = combined_shares.quantize(Decimal("0.000001"))
-            position.size_usd = (position.size_usd + value.total_cost_usd).quantize(
-                Decimal("0.0001")
-            )
-            position.fee_usd = ((position.fee_usd or Decimal(0)) + value.fee_usd).quantize(
-                Decimal("0.00001")
-            )
         signal.status = SignalStatus.EXECUTED
         written += 1
     await session.flush()
     return written
+
+
+@dataclass(frozen=True, slots=True)
+class RestingPaperOrder:
+    signal_id: int
+    side: TradeSide
+    limit_price: Decimal
+    size_usd: Decimal
+
+
+async def insert_resting_paper_orders(
+    session: AsyncSession, values: list[RestingPaperOrder]
+) -> int:
+    """Post simulated maker limits. Idempotent per signal thanks to
+    uq_orders_signal_mode — a signal already holding a paper order (resting
+    or filled) is never double-posted."""
+    written = 0
+    for value in values:
+        statement = (
+            insert(Order)
+            .values(
+                signal_id=value.signal_id,
+                mode=ExecutionMode.PAPER,
+                clob_order_id=f"paper-{value.signal_id}",
+                side=value.side,
+                price=value.limit_price,
+                size_usd=value.size_usd,
+                filled_usd=Decimal(0),
+                status=PAPER_STATUS_RESTING,
+            )
+            .on_conflict_do_nothing(constraint="uq_orders_signal_mode")
+            .returning(Order.id)
+        )
+        if (await session.execute(statement)).scalar_one_or_none() is not None:
+            written += 1
+    return written
+
+
+async def resting_paper_orders(session: AsyncSession) -> dict[int, Order]:
+    """Resting maker orders keyed by signal id, locked for this cycle."""
+    rows = (
+        await session.execute(
+            select(Order)
+            .where(
+                Order.mode == ExecutionMode.PAPER,
+                Order.status == PAPER_STATUS_RESTING,
+            )
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars().all()
+    return {order.signal_id: order for order in rows}
+
+
+@dataclass(frozen=True, slots=True)
+class MakerFillValue:
+    order_id: int
+    signal_id: int
+    market_id: int
+    side: TradeSide
+    limit_price: Decimal
+    size_shares: Decimal
+    filled_usd: Decimal
+    fee_usd: Decimal
+    total_cost_usd: Decimal
+    filled_at: datetime
+
+
+async def persist_maker_fills(
+    session: AsyncSession, fills: list[MakerFillValue]
+) -> int:
+    written = 0
+    for fill in fills:
+        order = await session.get(Order, fill.order_id, with_for_update=True)
+        if order is None or order.status != PAPER_STATUS_RESTING:
+            continue
+        signal = await session.scalar(
+            select(Signal)
+            .where(Signal.id == fill.signal_id)
+            .with_for_update(skip_locked=True)
+        )
+        if signal is None or signal.status is not SignalStatus.PENDING:
+            continue
+        order.status = LIVE_STATUS_FILLED
+        order.filled_usd = fill.filled_usd
+        order.fee_usd = fill.fee_usd
+        order.filled_at = fill.filled_at
+        await _aggregate_paper_position(
+            session,
+            market_id=fill.market_id,
+            side=fill.side,
+            avg_price=fill.limit_price,
+            size_shares=fill.size_shares,
+            total_cost_usd=fill.total_cost_usd,
+            fee_usd=fill.fee_usd,
+        )
+        signal.status = SignalStatus.EXECUTED
+        written += 1
+    await session.flush()
+    return written
+
+
+async def expire_resting_paper_orders(
+    session: AsyncSession, signal_ids: list[int]
+) -> int:
+    """TTL expiry for maker orders whose signals just expired. The unfilled
+    rate is itself a quality metric — it prices how often our passive quote
+    was never reached."""
+    if not signal_ids:
+        return 0
+    result = await session.execute(
+        update(Order)
+        .where(
+            Order.signal_id.in_(signal_ids),
+            Order.mode == ExecutionMode.PAPER,
+            Order.status == PAPER_STATUS_RESTING,
+        )
+        .values(status=PAPER_STATUS_UNFILLED)
+    )
+    return dml_rowcount(result)

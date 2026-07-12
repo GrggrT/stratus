@@ -22,6 +22,32 @@ class SignalInputs:
     ensemble_yes_agreement: float
     bankroll_usd: float
     fee_rate: float = 0.0
+    # Calibration sample count backing this market's probability (station/
+    # kind/horizon bucket). Zero means the model runs on defaults and has not
+    # earned the right to disagree with the market.
+    calibration_samples: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SignalPolicy:
+    """Trading thresholds. Every value mirrors a Settings field so nothing is
+    hardcoded; defaults match the validation-stage (anti-luck) configuration."""
+
+    min_edge: float = 0.05
+    max_spread: float = 0.04
+    # Edge must clear execution costs with margin: half the spread plus this
+    # buffer (fees are already inside the effective-price edge).
+    edge_cost_buffer: float = 0.02
+    kelly_multiplier: float = 0.25
+    # Cap on potential PAYOUT per position, as a fraction of bankroll. Caps
+    # by cost alone let a $38 longshot carry a 20%-of-bankroll payout.
+    max_win_fraction: float = 0.02
+    tail_price_low: float = 0.10
+    tail_price_high: float = 0.90
+    min_calibration_samples: int = 30
+
+
+DEFAULT_POLICY = SignalPolicy()
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +94,9 @@ def full_kelly_fraction(true_probability: float, entry_price: float) -> float:
     return max(0.0, (true_probability - entry_price) / (1 - entry_price))
 
 
-def evaluate_signal(inputs: SignalInputs, now: datetime) -> SignalDecision:
+def evaluate_signal(
+    inputs: SignalInputs, now: datetime, policy: SignalPolicy = DEFAULT_POLICY
+) -> SignalDecision:
     effective_yes = inputs.best_ask + inputs.fee_rate * inputs.best_ask * (
         1 - inputs.best_ask
     )
@@ -103,15 +131,41 @@ def evaluate_signal(inputs: SignalInputs, now: datetime) -> SignalDecision:
     else:
         confidence = SignalConfidence.C
 
-    quarter_kelly = 0.25 * full_kelly_fraction(true_probability, effective_price)
-    kelly_fraction = min(quarter_kelly, CONFIDENCE_CAPS[confidence])
+    scaled_kelly = policy.kelly_multiplier * full_kelly_fraction(
+        true_probability, effective_price
+    )
+    kelly_fraction = min(scaled_kelly, CONFIDENCE_CAPS[confidence])
     size_usd = inputs.bankroll_usd * kelly_fraction
+    # Cap by potential payout, not just cost: shares = size/entry, payout on a
+    # win is shares x (1 - entry). Shrinks longshots instead of banning them.
+    if 0 < entry_price < 1 and inputs.bankroll_usd > 0:
+        win_per_usd = (1 - entry_price) / entry_price
+        max_win_usd = policy.max_win_fraction * inputs.bankroll_usd
+        if win_per_usd > 0 and size_usd * win_per_usd > max_win_usd:
+            size_usd = max_win_usd / win_per_usd
+            kelly_fraction = size_usd / inputs.bankroll_usd
+
     spread = inputs.best_ask - inputs.best_bid
+    half_spread = spread / 2
+    calibrated = inputs.calibration_samples >= policy.min_calibration_samples
+    # Tail entries are the most calibration-sensitive; they need a deeper
+    # sample than the base gate before real (or even paper) money rides them.
+    tail_calibrated = inputs.calibration_samples >= 3 * policy.min_calibration_samples
     reasons = []
-    if edge < 0.05:
-        reasons.append("edge_below_0.05")
-    if spread > 0.04:
-        reasons.append("spread_above_0.04")
+    if edge < policy.min_edge:
+        reasons.append("edge_below_min")
+    if edge < half_spread + policy.edge_cost_buffer:
+        reasons.append("edge_below_costs")
+    if spread > policy.max_spread:
+        reasons.append("spread_too_wide")
+    if policy.min_calibration_samples > 0 and not calibrated:
+        reasons.append("station_uncalibrated")
+    if (
+        policy.min_calibration_samples > 0
+        and not tail_calibrated
+        and not policy.tail_price_low <= entry_price <= policy.tail_price_high
+    ):
+        reasons.append("tail_uncalibrated")
     if inputs.horizon_h > 48:
         reasons.append("horizon_above_48h")
     if inputs.horizon_h <= 0:

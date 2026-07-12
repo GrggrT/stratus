@@ -1,6 +1,14 @@
 # План: убрать фактор удачи из результатов STRATUS
 
-Status: план edge-validation после первых реализованных paper-результатов.
+Status: внедрено 2026-07-12 (P0–P4). Декомпозиция skill/luck вычисляется из
+CLV без миграций; maker-симуляция заменила taker-исполнение в paper;
+shrinkage к рынку взвешивается по sample_n калибровки; live-гейт использует
+формальный чеклист (см. `calculate_live_gate`). Отчётность:
+`/api/v1/performance-summary`, `/api/v1/edge-report`, weekly Telegram
+edge-report (пн 08:30 Berlin). PIT-валидация — в health-аудите
+(`pit_miscalibrated`). Примечание: до заполнения `calibration` (bootstrap IEM
++ previous runs + recalibrate) shrinkage удерживает edge около нуля и новые
+сигналы скипаются с `station_uncalibrated` — это ожидаемое поведение.
 
 Last updated: 2026-07-12.
 

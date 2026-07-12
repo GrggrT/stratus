@@ -23,11 +23,13 @@ from stratus.db.models import (
     PositionStatus,
     Station,
 )
+from stratus.repositories.analytics import resolved_trade_outcomes
 from stratus.repositories.job_runs import collector_uptime
 from stratus.repositories.runtime_control import get_runtime_control
 from stratus.services.live_analytics import (
     EquityPoint,
     PositionStat,
+    brier_comparison,
     cumulative_equity,
     summarize_live_performance,
 )
@@ -41,6 +43,13 @@ class StationScore:
 
 
 @dataclass(frozen=True, slots=True)
+class GateCheck:
+    name: str
+    passed: bool
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
 class LiveGate:
     passed: bool
     station_scores: tuple[StationScore, ...]
@@ -48,6 +57,7 @@ class LiveGate:
     clv_samples: int
     average_clv: float | None
     roi: float
+    checks: tuple[GateCheck, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,9 +331,18 @@ async def live_equity_chart(session: AsyncSession) -> bytes | None:
     return render_equity_chart(await _live_equity_points(session))
 
 
+def _check(name: str, passed: bool, detail: str) -> GateCheck:
+    return GateCheck(name=name, passed=passed, detail=detail)
+
+
 async def calculate_live_gate(
     session: AsyncSession, initial_bankroll_usd: float
 ) -> LiveGate:
+    """Formal "edge is proven" gate (docs/EDGE_VALIDATION_PLAN.md P4).
+
+    Every check must pass before live mode is reachable. The decision rides
+    on skill_pnl and statistical significance, never on raw ROI, which one
+    lucky tail trade can carry."""
     resolved = await _resolved_probability_rows(session)
     by_station: dict[str, list[float]] = defaultdict(list)
     for icao, outcome, probability in resolved:
@@ -340,26 +359,98 @@ async def calculate_live_gate(
             )
         )
     ).scalars().all()
-    clvs = [float(position.clv) for position in positions if position.clv is not None]
+    perf = summarize_live_performance(
+        [
+            PositionStat(
+                closed=True,
+                pnl_usd=float(p.pnl_usd) if p.pnl_usd is not None else None,
+                clv=float(p.clv) if p.clv is not None else None,
+                cost_usd=float(p.size_usd),
+                fee_usd=float(p.fee_usd) if p.fee_usd is not None else None,
+                size_shares=float(p.size_shares),
+                avg_price=float(p.avg_price),
+            )
+            for p in positions
+        ]
+    )
+    trades = await resolved_trade_outcomes(session, ExecutionMode.PAPER)
+    briers = brier_comparison(trades)
+    clvs = [float(p.clv) for p in positions if p.clv is not None]
     average_clv = sum(clvs) / len(clvs) if clvs else None
-    pnl = sum(float(position.pnl_usd or 0) for position in positions)
+    pnl = sum(float(p.pnl_usd or 0) for p in positions)
     roi = pnl / initial_bankroll_usd
-    passed = (
-        len(station_scores) == 3
-        and all(score.count >= 100 and score.brier < 0.18 for score in station_scores)
-        and len(positions) >= 100
-        and len(clvs) >= 100
-        and average_clv is not None
-        and average_clv > 0.015
-        and roi > 0
+
+    stations_ok = len(station_scores) == 3 and all(
+        score.count >= 100 and score.brier < 0.18 for score in station_scores
+    )
+    checks = (
+        _check(
+            "stations_calibrated",
+            stations_ok,
+            "; ".join(
+                f"{s.icao} n={s.count} brier={s.brier:.3f}" for s in station_scores
+            )
+            or "no resolved probability samples",
+        ),
+        _check(
+            "resolved_positions_200",
+            len(positions) >= 200,
+            f"{len(positions)}/200 closed paper positions",
+        ),
+        _check("clv_samples_100", len(clvs) >= 100, f"{len(clvs)}/100 CLV samples"),
+        _check(
+            "avg_clv_positive",
+            average_clv is not None and average_clv > 0.015,
+            f"avg CLV {average_clv:+.4f}" if average_clv is not None else "no CLV",
+        ),
+        _check(
+            "clv_beat_rate_52",
+            perf.clv_beat_rate is not None and perf.clv_beat_rate >= 0.52,
+            (
+                f"beat rate {perf.clv_beat_rate:.1%}"
+                if perf.clv_beat_rate is not None
+                else "no CLV"
+            ),
+        ),
+        _check(
+            "roi_ci_excludes_zero",
+            perf.roi_ci_low is not None and perf.roi_ci_low > 0,
+            (
+                f"ROI 95% CI [{perf.roi_ci_low:+.4f}, {perf.roi_ci_high:+.4f}]"
+                if perf.roi_ci_low is not None and perf.roi_ci_high is not None
+                else "CI unavailable"
+            ),
+        ),
+        _check(
+            "skill_pnl_significant",
+            perf.skill_pnl_ci_low is not None and perf.skill_pnl_ci_low > 0,
+            (
+                f"skill ${perf.skill_pnl_usd:+.2f}, CI low "
+                f"${perf.skill_pnl_ci_low:+.2f}"
+                if perf.skill_pnl_usd is not None
+                and perf.skill_pnl_ci_low is not None
+                else "decomposition unavailable"
+            ),
+        ),
+        _check(
+            "brier_model_beats_market",
+            briers is not None and briers[0] < briers[1],
+            (
+                f"model {briers[0]:.4f} vs market {briers[1]:.4f} "
+                f"(n={len(trades)})"
+                if briers is not None
+                else "no resolved trades"
+            ),
+        ),
     )
     return LiveGate(
-        passed,
-        station_scores,
-        len(positions),
-        len(clvs),
-        average_clv,
-        roi,
+        passed=all(check.passed for check in checks),
+        station_scores=station_scores,
+        resolved_positions=len(positions),
+        clv_samples=len(clvs),
+        average_clv=average_clv,
+        roi=roi,
+        checks=checks,
     )
 
 
@@ -470,6 +561,8 @@ async def live_report(session: AsyncSession) -> str:
                 Position.clv,
                 Position.size_usd,
                 Position.fee_usd,
+                Position.size_shares,
+                Position.avg_price,
             ).where(Position.mode == ExecutionMode.LIVE)
         )
     ).all()
@@ -481,8 +574,10 @@ async def live_report(session: AsyncSession) -> str:
                 clv=float(clv) if clv is not None else None,
                 cost_usd=float(cost),
                 fee_usd=float(fee) if fee is not None else None,
+                size_shares=float(shares) if shares is not None else None,
+                avg_price=float(price) if price is not None else None,
             )
-            for status, pnl, clv, cost, fee in rows
+            for status, pnl, clv, cost, fee, shares, price in rows
         ]
     )
     if perf.positions == 0:
@@ -491,15 +586,35 @@ async def live_report(session: AsyncSession) -> str:
     roi = "n/a" if perf.roi is None else f"{perf.roi:+.2%}"
     clv = "n/a" if perf.avg_clv is None else f"{perf.avg_clv:+.3f}"
     beat = "n/a" if perf.clv_beat_rate is None else f"{perf.clv_beat_rate:.0%}"
-    return "\n".join(
-        [
-            "Live performance",
-            f"Positions: {perf.positions} ({perf.open} open, {perf.closed} closed)",
-            f"P&L: ${perf.total_pnl_usd:+.2f} · ROI {roi} · win rate {win_rate}",
-            f"Avg CLV: {clv} · beat closing line: {beat}",
-            f"Fees paid: ${perf.total_fees_usd:.2f}",
-        ]
-    )
+    lines = [
+        "Live performance",
+        f"Positions: {perf.positions} ({perf.open} open, {perf.closed} closed)",
+        f"P&L: ${perf.total_pnl_usd:+.2f} · ROI {roi} · win rate {win_rate}",
+        f"Avg CLV: {clv} · beat closing line: {beat}",
+        f"Fees paid: ${perf.total_fees_usd:.2f}",
+    ]
+    if perf.skill_pnl_usd is not None and perf.luck_pnl_usd is not None:
+        lines.append(
+            f"Skill/luck split: ${perf.skill_pnl_usd:+.2f} skill · "
+            f"${perf.luck_pnl_usd:+.2f} luck ({perf.decomposed} decomposed)"
+        )
+    return "\n".join(lines)
+
+
+async def edge_report_text(
+    session: AsyncSession, initial_bankroll_usd: float
+) -> str:
+    """Weekly anti-luck digest: the live-gate checklist with its numbers.
+    Shows exactly what is already proven and what is still missing."""
+    gate = await calculate_live_gate(session, initial_bankroll_usd)
+    lines = [
+        "STRATUS edge report (paper)",
+        f"Live gate: {'PASS' if gate.passed else 'BLOCKED'}",
+    ]
+    for check in gate.checks:
+        marker = "✅" if check.passed else "❌"
+        lines.append(f"{marker} {check.name}: {check.detail}")
+    return "\n".join(lines)
 
 
 async def daily_report(session: AsyncSession, now: datetime | None = None) -> str:

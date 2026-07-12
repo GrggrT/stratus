@@ -32,6 +32,7 @@ from stratus.repositories.job_runs import collector_uptime
 from stratus.repositories.risk import enforce_loss_limits
 from stratus.repositories.runtime_control import set_kill_switch
 from stratus.repositories.telegram import enqueue_notification
+from stratus.services.probability import ks_uniform_pvalue, pit_value
 from stratus.services.reconciliation import clear_mismatches, find_resolution_mismatches
 
 logger = logging.getLogger(__name__)
@@ -218,6 +219,65 @@ async def audit_health(
                     }
                 )
 
+            # PIT uniformity: is the predicted temperature distribution
+            # honest? One sample per station/day/kind (bucket markets of one
+            # event share the same forecast and actual).
+            pit_rows = (
+                await session.execute(
+                    select(
+                        Market.station_id,
+                        Market.market_date,
+                        Market.kind,
+                        DailyActual.temp_c,
+                        ModelProb.components,
+                    )
+                    .join(
+                        DailyActual,
+                        and_(
+                            DailyActual.station_id == Market.station_id,
+                            DailyActual.date == Market.market_date,
+                            DailyActual.kind == Market.kind,
+                        ),
+                    )
+                    .join(ModelProb, ModelProb.market_id == Market.id)
+                    .where(
+                        Market.resolved_outcome.is_not(None),
+                        Market.resolves_at >= now - timedelta(days=30),
+                        ModelProb.ts <= Market.resolves_at,
+                    )
+                    .distinct(Market.id)
+                    .order_by(Market.id, ModelProb.ts.desc())
+                )
+            ).all()
+            pits: dict[tuple[int | None, object, object], float] = {}
+            for station_id, market_date, kind, temp_c, details in pit_rows:
+                key = (station_id, market_date, kind)
+                if key in pits or not isinstance(details, dict):
+                    continue
+                blend = details.get("blend")
+                if not isinstance(blend, dict):
+                    continue
+                mean_c = blend.get("mean_c")
+                sigma_c = blend.get("sigma_c")
+                if (
+                    isinstance(mean_c, int | float)
+                    and isinstance(sigma_c, int | float)
+                    and sigma_c > 0
+                ):
+                    pits[key] = pit_value(float(temp_c), float(mean_c), float(sigma_c))
+            if len(pits) >= 30:
+                p_value = ks_uniform_pvalue(list(pits.values()))
+                if p_value is not None and p_value < 0.01:
+                    issues.append(
+                        {
+                            "code": "pit_miscalibrated",
+                            "detail": (
+                                f"forecast distribution fails uniformity: "
+                                f"KS p={p_value:.4f} over {len(pits)} station-days"
+                            ),
+                        }
+                    )
+
             active_markets = (
                 await session.execute(
                     select(Market).where(Market.status == MarketStatus.ACTIVE)
@@ -340,12 +400,15 @@ async def audit_health(
             if missing_clv:
                 issues.append({"code": "clv_missing", "detail": str(missing_clv)})
 
+            # Maker orders legitimately rest for the whole TTL; only signals
+            # that outlived it plus a scheduler-cycle slack are stuck.
             stale_pending = await session.scalar(
                 select(func.count())
                 .select_from(Signal)
                 .where(
                     Signal.status == SignalStatus.PENDING,
-                    Signal.ts < now - timedelta(minutes=10),
+                    Signal.ts
+                    < now - timedelta(minutes=settings.paper_order_ttl_minutes + 5),
                 )
             )
             if stale_pending:

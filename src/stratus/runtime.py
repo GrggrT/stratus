@@ -36,6 +36,7 @@ from stratus.jobs.prune_signals import prune_signals
 from stratus.jobs.recalibrate_emos import recalibrate_emos
 from stratus.jobs.recompute_probs import recompute_probs
 from stratus.jobs.settle_markets import settle_markets
+from stratus.jobs.weekly_edge_report import weekly_edge_report
 from stratus.repositories.job_runs import record_job_run
 from stratus.repositories.telegram import enqueue_notification
 
@@ -189,6 +190,13 @@ def build_scheduler(
             audit_gate,
             CronTrigger(hour=8, minute=0, timezone=ZoneInfo("Europe/Berlin")),
             "validation-gate",
+        ),
+        (
+            weekly_edge_report,
+            CronTrigger(
+                day_of_week="mon", hour=8, minute=30, timezone=ZoneInfo("Europe/Berlin")
+            ),
+            "edge-report",
         ),
         (
             prune_signals,

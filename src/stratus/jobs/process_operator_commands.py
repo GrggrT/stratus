@@ -94,7 +94,16 @@ async def _execute_set_mode(
         return "rejected", "Live mode blocked: no trading wallet is configured."
     gate = await calculate_live_gate(session, settings.initial_bankroll_usd)
     if not gate.passed:
-        return "rejected", "Live mode blocked: the validation gate has not passed."
+        failing = "; ".join(
+            f"{check.name} ({check.detail})"
+            for check in gate.checks
+            if not check.passed
+        )
+        return (
+            "rejected",
+            "Live mode blocked: the validation gate has not passed. "
+            f"Failing: {failing or 'no checklist available'}.",
+        )
     control = await get_runtime_control(session)
     now = datetime.now(UTC)
     if control.live_confirmation_until is None or control.live_confirmation_until < now:

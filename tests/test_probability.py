@@ -162,3 +162,55 @@ def test_adaptive_weights_wait_for_complete_sample() -> None:
 
     assert adaptive is False
     assert [component.weight for component in weighted] == [0.7, 0.3]
+
+
+def test_shrink_to_market_weights_by_calibration_depth() -> None:
+    from stratus.services.probability import shrink_to_market
+
+    # No calibration: the model has no say, p_used == market.
+    cold = shrink_to_market(0.9, 0.5, calibration_samples=0, prior_samples=30)
+    assert cold.applied is True
+    assert cold.weight == 0.0
+    assert cold.probability == 0.5
+
+    # n == prior -> half weight.
+    warm = shrink_to_market(0.9, 0.5, calibration_samples=30, prior_samples=30)
+    assert warm.weight == 0.5
+    assert warm.probability == 0.7
+
+    # Deep calibration -> mostly the model.
+    deep = shrink_to_market(0.9, 0.5, calibration_samples=270, prior_samples=30)
+    assert deep.weight == 0.9
+    assert abs(deep.probability - 0.86) < 1e-9
+
+    # Disabled prior or missing market anchor leaves the model untouched.
+    off = shrink_to_market(0.9, 0.5, calibration_samples=0, prior_samples=0)
+    assert off.applied is False and off.probability == 0.9
+    anchorless = shrink_to_market(0.9, None, calibration_samples=0, prior_samples=30)
+    assert anchorless.applied is False and anchorless.probability == 0.9
+    # Output stays inside the open unit interval.
+    clamped = shrink_to_market(1.0, 1.0, calibration_samples=30, prior_samples=30)
+    assert clamped.probability == 0.999999
+
+
+def test_pit_and_ks_uniformity() -> None:
+    import math
+
+    from stratus.services.probability import ks_uniform_pvalue, pit_value
+
+    assert pit_value(20.0, 20.0, 2.0) == 0.5
+    assert pit_value(24.0, 20.0, 2.0) == pytest.approx(
+        0.5 * (1 + math.erf(2 / math.sqrt(2)))
+    )
+    with pytest.raises(ValueError):
+        pit_value(20.0, 20.0, 0.0)
+
+    # A near-uniform grid should not be rejected...
+    uniform = [(i + 0.5) / 40 for i in range(40)]
+    p_uniform = ks_uniform_pvalue(uniform)
+    assert p_uniform is not None and p_uniform > 0.5
+    # ...while an overconfident U-shape (all mass at the edges) is.
+    clustered = [0.01] * 20 + [0.99] * 20
+    p_clustered = ks_uniform_pvalue(clustered)
+    assert p_clustered is not None and p_clustered < 0.01
+    assert ks_uniform_pvalue([0.5, 0.5]) is None

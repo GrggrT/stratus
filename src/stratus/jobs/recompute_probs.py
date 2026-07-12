@@ -17,6 +17,7 @@ from stratus.db.models import (
     DailyActual,
     Forecast,
     Market,
+    MarketPrice,
     MarketStatus,
     ModelProb,
     Station,
@@ -35,6 +36,7 @@ from stratus.services.probability import (
     component_brier_scores,
     deterministic_component,
     ensemble_component,
+    shrink_to_market,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,6 +52,35 @@ DEFAULT_WEIGHTS = {
 BUCKET_ORDER = ("0-6h", "6-24h", "24-48h", "48h+")
 BRIER_WEIGHT_K = 5.0
 BRIER_WEIGHT_MIN_SAMPLES = 30
+# A market anchor older than this is not a usable shrinkage target; the
+# price cycle refreshes snapshots every minute on active markets.
+SHRINKAGE_PRICE_MAX_AGE = timedelta(minutes=30)
+
+
+def _calibration_depth(
+    calibrations: dict[tuple[int, str, str, Any], Calibration],
+    *,
+    station_id: int,
+    target_bucket: str,
+    kind: Any,
+) -> int:
+    """Sample depth of the calibration actually backing this probability.
+
+    Mirrors _pick_calibration: each model contributes the row nearest to the
+    trading horizon bucket (the same fallback used to compute the
+    probability), and the deepest model wins. Zero when nothing is
+    calibrated — the shrinkage weight and the trading gate both read this.
+    """
+    target_index = BUCKET_ORDER.index(target_bucket)
+    nearest_by_model: dict[str, tuple[int, int]] = {}
+    for (candidate_station, model, bucket, candidate_kind), row in calibrations.items():
+        if candidate_station != station_id or candidate_kind != kind:
+            continue
+        distance = abs(BUCKET_ORDER.index(bucket) - target_index)
+        current = nearest_by_model.get(model)
+        if current is None or distance < current[0]:
+            nearest_by_model[model] = (distance, row.sample_n)
+    return max((sample_n for _, sample_n in nearest_by_model.values()), default=0)
 
 
 def _pick_calibration(
@@ -160,6 +191,21 @@ async def recompute_probs(
                     )
                 )
             ).scalars().all()
+            latest_prices = {
+                price.market_id: price
+                for price in (
+                    await session.execute(
+                        select(MarketPrice)
+                        .where(
+                            MarketPrice.market_id.in_(
+                                [market.id for market, _ in market_rows]
+                            )
+                        )
+                        .distinct(MarketPrice.market_id)
+                        .order_by(MarketPrice.market_id, MarketPrice.ts.desc())
+                    )
+                ).scalars()
+            }
             resolved_probability_rows = (
                 await session.execute(
                     select(
@@ -380,11 +426,43 @@ async def recompute_probs(
                 ),
                 "weight_min_samples": BRIER_WEIGHT_MIN_SAMPLES,
             }
+
+            # Anti-luck shrinkage: until the calibration sample has earned
+            # trust, the published probability stays near the market and the
+            # edge collapses. Both raw and used values are recorded.
+            calibration_n = _calibration_depth(
+                calibrations,
+                station_id=station.id,
+                target_bucket=target_bucket,
+                kind=market.kind,
+            )
+            price = latest_prices.get(market.id)
+            market_anchor = (
+                float(price.midpoint)
+                if price is not None and now - price.ts <= SHRINKAGE_PRICE_MAX_AGE
+                else None
+            )
+            shrinkage = shrink_to_market(
+                result.probability,
+                market_anchor,
+                calibration_samples=calibration_n,
+                prior_samples=settings.shrinkage_prior_samples,
+            )
+            component_details["shrinkage"] = {
+                "p_model_raw": round(result.probability, 6),
+                "p_market": market_anchor,
+                "weight": round(shrinkage.weight, 6),
+                "n": calibration_n,
+                "n0": settings.shrinkage_prior_samples,
+                "applied": shrinkage.applied,
+            }
             values.append(
                 ModelProbabilityValue(
                     market_id=market.id,
                     ts=calculation_time,
-                    prob=Decimal(str(result.probability)).quantize(Decimal("0.000001")),
+                    prob=Decimal(str(shrinkage.probability)).quantize(
+                        Decimal("0.000001")
+                    ),
                     sigma=Decimal(str(result.sigma_c)).quantize(Decimal("0.0001")),
                     horizon_h=Decimal(str(horizon_h)).quantize(Decimal("0.01")),
                     components=component_details,

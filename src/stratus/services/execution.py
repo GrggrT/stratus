@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from typing import Any
 
 
@@ -102,6 +102,68 @@ def walk_ask_book(
         avg_price=(filled_usd / filled_shares).quantize(Decimal("0.000001")),
         filled_usd=filled_usd.quantize(Decimal("0.0001")),
         size_shares=filled_shares.quantize(Decimal("0.000001")),
+        fee_usd=fee_usd,
+        total_cost_usd=(filled_usd + fee_usd).quantize(Decimal("0.0001")),
+    )
+
+
+TICK = Decimal("0.001")
+
+
+def best_bid_ask(book: dict[str, Any]) -> tuple[Decimal, Decimal] | None:
+    """Best bid/ask of the executed-side book. None when either side is empty
+    (no maker quote can be formed against a one-sided book)."""
+    best: dict[str, Decimal] = {}
+    for side, pick in (("bids", max), ("asks", min)):
+        raw = book.get(side)
+        if not isinstance(raw, list) or not raw:
+            return None
+        prices = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise PaperExecutionError(f"{side} level must be an object")
+            try:
+                price = Decimal(str(item["price"]))
+            except (KeyError, InvalidOperation) as exc:
+                raise PaperExecutionError(f"{side} level is invalid") from exc
+            if not Decimal(0) < price < Decimal(1):
+                raise PaperExecutionError(f"{side} level is out of range")
+            prices.append(price)
+        best[side] = pick(prices)
+    if best["bids"] >= best["asks"]:
+        raise PaperExecutionError("book is crossed")
+    return best["bids"], best["asks"]
+
+
+def maker_limit_price(best_bid: Decimal, best_ask: Decimal) -> Decimal | None:
+    """Passive limit for the paper maker: the midpoint floored to the tick.
+    Never crosses the ask; None when the book leaves no room for a bid."""
+    midpoint = (best_bid + best_ask) / 2
+    limit = midpoint.quantize(TICK, rounding=ROUND_FLOOR)
+    limit = min(limit, best_ask)
+    if limit <= 0:
+        return None
+    return limit
+
+
+def maker_fill(
+    *,
+    limit_price: Decimal,
+    target_usd: Decimal,
+    fee_rate: Decimal = Decimal(0),
+) -> PaperFill:
+    """Deterministic full fill at our own limit once the market trades
+    through it. Maker-side fees only (zero on taker-only fee markets)."""
+    fee_per_share = fee_rate * limit_price * (Decimal(1) - limit_price)
+    shares = (target_usd / (limit_price + fee_per_share)).quantize(
+        Decimal("0.000001")
+    )
+    filled_usd = (shares * limit_price).quantize(Decimal("0.0001"))
+    fee_usd = (shares * fee_per_share).quantize(Decimal("0.00001"))
+    return PaperFill(
+        avg_price=limit_price,
+        filled_usd=filled_usd,
+        size_shares=shares,
         fee_usd=fee_usd,
         total_cost_usd=(filled_usd + fee_usd).quantize(Decimal("0.0001")),
     )
