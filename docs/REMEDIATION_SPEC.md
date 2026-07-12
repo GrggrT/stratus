@@ -7,6 +7,10 @@ migration and are intentionally not bundled here.
 Source: full-codebase review of 2026-07-06 (all money paths read in full;
 88 tests green, ruff clean at the time of writing).
 
+Related follow-up: `docs/QUALITY_ROADMAP.md` defines the post-remediation
+quality plan: data reconciliation, model validation, signal hardening,
+operator console, and live-readiness gates.
+
 ## Goals
 
 1. Close the one externally reachable attack surface (Postgres).
