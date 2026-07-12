@@ -29,16 +29,22 @@ from stratus.db.models import (
     Station,
     ValidationCheckpoint,
 )
-from stratus.repositories.analytics import resolved_trade_outcomes
+from stratus.repositories.analytics import (
+    resolved_clv_outcomes,
+    resolved_trade_outcomes,
+)
 from stratus.repositories.operator_commands import enqueue_command, recent_commands
 from stratus.repositories.runtime_control import get_runtime_control
 from stratus.services.live_analytics import (
     BrierSlice,
+    ClvSlice,
     LivePerformance,
     PositionStat,
     TradeOutcome,
     brier_comparison,
     brier_root_cause,
+    clv_root_cause,
+    clv_summary,
     cumulative_equity,
     edge_calibration,
     edge_slope,
@@ -275,6 +281,27 @@ class BrierReportResponse(BaseModel):
     model_minus_market: float | None
     raw_model_minus_market: float | None
     slices: list[BrierSliceItem]
+
+
+class ClvSliceItem(BaseModel):
+    dimension: str
+    value: str
+    count: int
+    avg_clv: float
+    clv_beat_rate: float
+    avg_entry_price: float
+    avg_fee_usd: float
+    avg_realized_return: float
+    win_rate: float
+
+
+class ClvReportResponse(BaseModel):
+    generated_at: datetime
+    mode: str
+    n_closed_positions: int
+    avg_clv: float | None
+    clv_beat_rate: float | None
+    slices: list[ClvSliceItem]
 
 
 class EquityPointItem(BaseModel):
@@ -1134,6 +1161,46 @@ async def brier_report(
             else None
         ),
         slices=[_brier_slice_item(slice_) for slice_ in brier_root_cause(trades)],
+    )
+
+
+def _clv_slice_item(slice_: ClvSlice) -> ClvSliceItem:
+    return ClvSliceItem(
+        dimension=slice_.dimension,
+        value=slice_.value,
+        count=slice_.count,
+        avg_clv=slice_.avg_clv,
+        clv_beat_rate=slice_.clv_beat_rate,
+        avg_entry_price=slice_.avg_entry_price,
+        avg_fee_usd=slice_.avg_fee_usd,
+        avg_realized_return=slice_.avg_realized_return,
+        win_rate=slice_.win_rate,
+    )
+
+
+@router.get("/clv-report", response_model=ClvReportResponse)
+async def clv_report(
+    request: Request,
+    mode: Annotated[str, Query(pattern="^(paper|live)$")] = "paper",
+) -> ClvReportResponse:
+    """Entry-quality root cause: where do we enter worse than the market?
+
+    Closing-line value by station, kind, horizon, confidence, side and entry
+    price band. Negative avg_clv in a slice means we systematically pay up
+    (spread / slippage / adverse selection) entering those trades. Slices are
+    sorted worst-CLV first within each dimension.
+    """
+    selected_mode = ExecutionMode.LIVE if mode == "live" else ExecutionMode.PAPER
+    async with _sessions(request)() as session:
+        outcomes = await resolved_clv_outcomes(session, selected_mode)
+    summary = clv_summary(outcomes)
+    return ClvReportResponse(
+        generated_at=datetime.now(UTC),
+        mode=mode,
+        n_closed_positions=len(outcomes),
+        avg_clv=summary[0] if summary else None,
+        clv_beat_rate=summary[1] if summary else None,
+        slices=[_clv_slice_item(slice_) for slice_ in clv_root_cause(outcomes)],
     )
 
 

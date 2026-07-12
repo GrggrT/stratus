@@ -243,3 +243,70 @@ def test_brier_comparison_and_edge_calibration() -> None:
         s for s in slices if s.dimension == "confidence" and s.value == "A"
     )
     assert confidence_a.avg_predicted_edge == 0.2
+
+
+
+def test_price_band_labels() -> None:
+    from stratus.services.live_analytics import price_band
+
+    assert price_band(0.05) == "0.00-0.10"
+    assert price_band(0.10) == "0.10-0.25"
+    assert price_band(0.30) == "0.25-0.50"
+    assert price_band(0.95) == "0.90-1.00"
+    assert price_band(1.0) == "0.90-1.00"
+
+
+def _clv(clv: float, **kw: object):
+    from stratus.services.live_analytics import ClvOutcome
+
+    base: dict[str, object] = {
+        "clv": clv,
+        "entry_price": 0.5,
+        "pnl_usd": 1.0,
+        "cost_usd": 20.0,
+        "fee_usd": 0.04,
+        "won": clv > 0,
+        "station_icao": "KLGA",
+        "kind": "high",
+        "side": "buy_yes",
+        "confidence": "B",
+        "horizon_bucket": "6-24h",
+    }
+    base.update(kw)
+    return ClvOutcome(**base)  # type: ignore[arg-type]
+
+
+def test_clv_root_cause_slices_and_worst_first_order() -> None:
+    from stratus.services.live_analytics import clv_root_cause, clv_summary
+
+    outcomes = [
+        _clv(0.05, station_icao="KLGA"),
+        _clv(-0.03, station_icao="LFPB"),
+        _clv(-0.01, station_icao="LFPB"),
+        _clv(0.02, station_icao="EGLC", entry_price=0.95),
+    ]
+    summary = clv_summary(outcomes)
+    assert summary is not None
+    avg, beat = summary
+    assert avg == pytest.approx((0.05 - 0.03 - 0.01 + 0.02) / 4, abs=1e-6)
+    assert beat == pytest.approx(0.5)
+
+    slices = clv_root_cause(outcomes)
+    stations = [s for s in slices if s.dimension == "station"]
+    # Worst CLV first within the dimension: LFPB (avg -0.02) before EGLC/KLGA.
+    assert stations[0].value == "LFPB"
+    assert stations[0].count == 2
+    assert stations[0].avg_clv == pytest.approx(-0.02)
+    assert stations[0].clv_beat_rate == 0.0
+
+    # The tail entry (0.95) lands in the 0.90-1.00 price band.
+    bands = {s.value for s in slices if s.dimension == "price_band"}
+    assert "0.90-1.00" in bands
+    assert "0.50-0.75" in bands  # the 0.5 entries ([0.50, 0.75))
+
+
+def test_clv_summary_empty() -> None:
+    from stratus.services.live_analytics import clv_root_cause, clv_summary
+
+    assert clv_summary([]) is None
+    assert clv_root_cause([]) == ()

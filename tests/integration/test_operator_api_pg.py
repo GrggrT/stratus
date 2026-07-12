@@ -436,3 +436,32 @@ async def test_edge_report_returns_decomposition_and_gate_checklist(
     )
     assert station["count"] == 1
     assert station["model_minus_market"] == pytest.approx(-0.07)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        clv_response = await client.get("/api/v1/clv-report?mode=paper")
+
+    assert clv_response.status_code == 200
+    clv = clv_response.json()
+    assert clv["n_closed_positions"] == 1
+    assert clv["avg_clv"] == pytest.approx(0.04)
+    assert clv["clv_beat_rate"] == pytest.approx(1.0)
+    dimensions = {item["dimension"] for item in clv["slices"]}
+    assert dimensions == {
+        "station", "kind", "horizon", "confidence", "side", "price_band"
+    }
+    clv_station = next(
+        item for item in clv["slices"]
+        if item["dimension"] == "station" and item["value"] == "KLGA"
+    )
+    assert clv_station["count"] == 1
+    assert clv_station["avg_clv"] == pytest.approx(0.04)
+    assert clv_station["avg_entry_price"] == pytest.approx(0.5)
+    # Confidence and horizon come from the representative executed signal.
+    confidence = next(item for item in clv["slices"] if item["dimension"] == "confidence")
+    assert confidence["value"] == "A"
+    horizon = next(item for item in clv["slices"] if item["dimension"] == "horizon")
+    assert horizon["value"] == "0-6h"
+    band = next(item for item in clv["slices"] if item["dimension"] == "price_band")
+    assert band["value"] == "0.50-0.75"

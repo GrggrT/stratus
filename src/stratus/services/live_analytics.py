@@ -404,3 +404,125 @@ def edge_slope(trades: list[TradeOutcome]) -> float | None:
         return None
     covariance = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys, strict=True))
     return round(covariance / variance, 6)
+
+
+_PRICE_BANDS: tuple[tuple[float, float], ...] = (
+    (0.0, 0.10),
+    (0.10, 0.25),
+    (0.25, 0.50),
+    (0.50, 0.75),
+    (0.75, 0.90),
+    (0.90, 1.01),
+)
+
+
+def price_band(entry_price: float) -> str:
+    """Coarse entry-price band label, e.g. '0.25-0.50'. Tail bands are where
+    calibration and slippage bite hardest, so they get their own buckets."""
+    for low, high in _PRICE_BANDS:
+        if low <= entry_price < high:
+            upper = min(high, 1.0)
+            return f"{low:.2f}-{upper:.2f}"
+    return "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ClvOutcome:
+    """One closed position scored by closing-line value: did we enter better
+    (positive CLV) or worse (negative) than the pre-resolution market close?
+    Side-adjusted, so CLV is expressed for the side we actually bought."""
+
+    clv: float
+    entry_price: float
+    pnl_usd: float
+    cost_usd: float
+    fee_usd: float
+    won: bool
+    station_icao: str | None = None
+    kind: str | None = None
+    side: str | None = None
+    confidence: str | None = None
+    horizon_bucket: str | None = None
+
+    @property
+    def realized_return(self) -> float:
+        return self.pnl_usd / self.cost_usd if self.cost_usd > 0 else 0.0
+
+    @property
+    def price_band(self) -> str:
+        return price_band(self.entry_price)
+
+
+@dataclass(frozen=True, slots=True)
+class ClvSlice:
+    dimension: str
+    value: str
+    count: int
+    avg_clv: float
+    clv_beat_rate: float
+    avg_entry_price: float
+    avg_fee_usd: float
+    avg_realized_return: float
+    win_rate: float
+
+
+def clv_summary(outcomes: list[ClvOutcome]) -> tuple[float, float] | None:
+    """(avg_clv, clv_beat_rate) over all outcomes, or None when empty."""
+    if not outcomes:
+        return None
+    avg = sum(o.clv for o in outcomes) / len(outcomes)
+    beat = sum(1 for o in outcomes if o.clv > 0) / len(outcomes)
+    return round(avg, 6), round(beat, 6)
+
+
+_CLV_DIMENSIONS: tuple[tuple[str, str], ...] = (
+    ("station", "station_icao"),
+    ("kind", "kind"),
+    ("horizon", "horizon_bucket"),
+    ("confidence", "confidence"),
+    ("side", "side"),
+    ("price_band", "price_band"),
+)
+
+
+def clv_root_cause(outcomes: list[ClvOutcome]) -> tuple[ClvSlice, ...]:
+    """Closing-line value by explanatory slice: where do we enter worse than
+    the market? Negative avg_clv means we systematically pay up (spread /
+    slippage / adverse selection) in that slice. Descriptive, like the Brier
+    report — small-sample slices stay visible with their counts. Sorted worst
+    (most negative CLV) first within each dimension."""
+    slices: list[ClvSlice] = []
+    for dimension, attr in _CLV_DIMENSIONS:
+        values = sorted({str(getattr(o, attr) or "unknown") for o in outcomes})
+        for value in values:
+            members = [
+                o for o in outcomes if str(getattr(o, attr) or "unknown") == value
+            ]
+            if not members:
+                continue
+            slices.append(
+                ClvSlice(
+                    dimension=dimension,
+                    value=value,
+                    count=len(members),
+                    avg_clv=round(sum(o.clv for o in members) / len(members), 6),
+                    clv_beat_rate=round(
+                        sum(1 for o in members if o.clv > 0) / len(members), 6
+                    ),
+                    avg_entry_price=round(
+                        sum(o.entry_price for o in members) / len(members), 6
+                    ),
+                    avg_fee_usd=round(
+                        sum(o.fee_usd for o in members) / len(members), 6
+                    ),
+                    avg_realized_return=round(
+                        sum(o.realized_return for o in members) / len(members), 6
+                    ),
+                    win_rate=round(
+                        sum(1 for o in members if o.won) / len(members), 6
+                    ),
+                )
+            )
+    return tuple(
+        sorted(slices, key=lambda s: (s.dimension, s.avg_clv, s.value))
+    )

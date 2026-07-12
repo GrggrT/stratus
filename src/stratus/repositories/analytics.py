@@ -9,11 +9,14 @@ from stratus.db.models import (
     MarketPrice,
     ModelProb,
     Order,
+    Position,
+    PositionStatus,
     Signal,
+    SignalStatus,
     Station,
     TradeSide,
 )
-from stratus.services.live_analytics import TradeOutcome
+from stratus.services.live_analytics import ClvOutcome, TradeOutcome
 
 # Orders that actually put money at risk. Resting/failed/canceled orders carry
 # no outcome to score.
@@ -161,3 +164,106 @@ def _horizon_bucket(signal_ts: object, resolves_at: object) -> str:
     if hours <= 48:
         return "24-48h"
     return "48h+"
+
+
+async def resolved_clv_outcomes(
+    session: AsyncSession, mode: ExecutionMode
+) -> list[ClvOutcome]:
+    """Closed positions scored by their stored closing-line value.
+
+    Position-level (not order-level) so avg_clv reconciles exactly with the
+    gate and performance summary. Confidence and horizon come from the most
+    recent executed signal on the same market/side at or before close — a
+    representative anchor, since a paper position may aggregate several fills.
+    """
+    representative_confidence = (
+        select(Signal.confidence)
+        .where(
+            Signal.market_id == Position.market_id,
+            Signal.side == Position.side,
+            Signal.status == SignalStatus.EXECUTED,
+            Signal.ts <= Position.closed_at,
+        )
+        .order_by(Signal.ts.desc())
+        .limit(1)
+        .correlate(Position)
+        .scalar_subquery()
+    )
+    representative_signal_ts = (
+        select(Signal.ts)
+        .where(
+            Signal.market_id == Position.market_id,
+            Signal.side == Position.side,
+            Signal.status == SignalStatus.EXECUTED,
+            Signal.ts <= Position.closed_at,
+        )
+        .order_by(Signal.ts.desc())
+        .limit(1)
+        .correlate(Position)
+        .scalar_subquery()
+    )
+    rows = (
+        await session.execute(
+            select(
+                Position.clv,
+                Position.avg_price,
+                Position.pnl_usd,
+                Position.size_usd,
+                Position.fee_usd,
+                Position.side,
+                Market.kind,
+                Market.resolves_at,
+                Market.resolved_outcome,
+                Station.icao,
+                representative_confidence,
+                representative_signal_ts,
+            )
+            .join(Market, Position.market_id == Market.id)
+            .outerjoin(Station, Market.station_id == Station.id)
+            .where(
+                Position.mode == mode,
+                Position.status == PositionStatus.CLOSED,
+                Position.clv.is_not(None),
+            )
+        )
+    ).all()
+
+    outcomes = []
+    for (
+        clv,
+        entry,
+        pnl_usd,
+        size_usd,
+        fee_usd,
+        side,
+        kind,
+        resolves_at,
+        resolved,
+        station_icao,
+        confidence,
+        signal_ts,
+    ) in rows:
+        won = (side is TradeSide.BUY_YES) == bool(resolved)
+        outcomes.append(
+            ClvOutcome(
+                clv=float(clv),
+                entry_price=float(entry),
+                pnl_usd=float(pnl_usd or 0),
+                cost_usd=float(size_usd),
+                fee_usd=float(fee_usd or 0),
+                won=won,
+                station_icao=station_icao,
+                kind=kind.value if hasattr(kind, "value") else str(kind),
+                side=side.value if hasattr(side, "value") else str(side),
+                confidence=(
+                    confidence.value if hasattr(confidence, "value")
+                    else str(confidence) if confidence is not None else None
+                ),
+                horizon_bucket=(
+                    _horizon_bucket(signal_ts, resolves_at)
+                    if signal_ts is not None
+                    else "unknown"
+                ),
+            )
+        )
+    return outcomes
