@@ -228,6 +228,12 @@ class TradeOutcome:
     pnl_usd: float
     cost_usd: float
     predicted_edge: float
+    raw_model_prob: float | None = None
+    station_icao: str | None = None
+    kind: str | None = None
+    horizon_bucket: str | None = None
+    confidence: str | None = None
+    side: str | None = None
 
     @property
     def realized_return(self) -> float:
@@ -242,6 +248,99 @@ def brier_comparison(trades: list[TradeOutcome]) -> tuple[float, float] | None:
     model = sum((t.model_prob - float(t.won)) ** 2 for t in trades) / len(trades)
     market = sum((t.market_prob - float(t.won)) ** 2 for t in trades) / len(trades)
     return round(model, 6), round(market, 6)
+
+
+def raw_model_brier(trades: list[TradeOutcome]) -> tuple[float, int] | None:
+    """Brier for the pre-shrink model probability when available.
+
+    This tells whether shrinkage is helping. It is optional because older
+    signals may not have model-probability component metadata.
+    """
+    available = [
+        (float(t.raw_model_prob), float(t.won))
+        for t in trades
+        if t.raw_model_prob is not None
+    ]
+    if not available:
+        return None
+    value = sum((probability - outcome) ** 2 for probability, outcome in available) / len(
+        available
+    )
+    return round(value, 6), len(available)
+
+
+@dataclass(frozen=True, slots=True)
+class BrierSlice:
+    dimension: str
+    value: str
+    count: int
+    brier_model: float
+    brier_market: float
+    model_minus_market: float
+    brier_raw_model: float | None
+    raw_model_minus_market: float | None
+    raw_count: int
+    avg_predicted_edge: float
+    avg_realized_return: float
+    win_rate: float
+
+
+_BRIER_DIMENSIONS: tuple[tuple[str, str], ...] = (
+    ("station", "station_icao"),
+    ("kind", "kind"),
+    ("horizon", "horizon_bucket"),
+    ("confidence", "confidence"),
+    ("side", "side"),
+)
+
+
+def brier_root_cause(trades: list[TradeOutcome]) -> tuple[BrierSlice, ...]:
+    """Brier model-vs-market by explanatory slices.
+
+    Positive model_minus_market means the model is worse than the market in
+    that slice. The report is intentionally descriptive: small sample slices
+    remain visible with their counts rather than being hidden.
+    """
+    slices: list[BrierSlice] = []
+    for dimension, attr in _BRIER_DIMENSIONS:
+        values = sorted({str(getattr(t, attr) or "unknown") for t in trades})
+        for value in values:
+            members = [t for t in trades if str(getattr(t, attr) or "unknown") == value]
+            briers = brier_comparison(members)
+            if briers is None:
+                continue
+            model, market = briers
+            raw = raw_model_brier(members)
+            raw_value = raw[0] if raw is not None else None
+            raw_count = raw[1] if raw is not None else 0
+            slices.append(
+                BrierSlice(
+                    dimension=dimension,
+                    value=value,
+                    count=len(members),
+                    brier_model=model,
+                    brier_market=market,
+                    model_minus_market=round(model - market, 6),
+                    brier_raw_model=raw_value,
+                    raw_model_minus_market=(
+                        round(raw_value - market, 6) if raw_value is not None else None
+                    ),
+                    raw_count=raw_count,
+                    avg_predicted_edge=round(
+                        sum(t.predicted_edge for t in members) / len(members), 6
+                    ),
+                    avg_realized_return=round(
+                        sum(t.realized_return for t in members) / len(members), 6
+                    ),
+                    win_rate=round(sum(1 for t in members if t.won) / len(members), 6),
+                )
+            )
+    return tuple(
+        sorted(
+            slices,
+            key=lambda s: (s.dimension, -s.model_minus_market, s.value),
+        )
+    )
 
 
 EDGE_BUCKET_BOUNDS: tuple[tuple[float, float | None], ...] = (

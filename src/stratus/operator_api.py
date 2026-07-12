@@ -33,13 +33,16 @@ from stratus.repositories.analytics import resolved_trade_outcomes
 from stratus.repositories.operator_commands import enqueue_command, recent_commands
 from stratus.repositories.runtime_control import get_runtime_control
 from stratus.services.live_analytics import (
+    BrierSlice,
     LivePerformance,
     PositionStat,
     TradeOutcome,
     brier_comparison,
+    brier_root_cause,
     cumulative_equity,
     edge_calibration,
     edge_slope,
+    raw_model_brier,
     summarize_live_performance,
 )
 from stratus.services.operator_commands import validate_command
@@ -244,6 +247,34 @@ class EdgeReportResponse(BaseModel):
     # from the paper track record, regardless of the mode filter above).
     gate_passed: bool
     gate_checks: list[GateCheckItem]
+
+
+class BrierSliceItem(BaseModel):
+    dimension: str
+    value: str
+    count: int
+    brier_model: float
+    brier_market: float
+    model_minus_market: float
+    brier_raw_model: float | None
+    raw_model_minus_market: float | None
+    raw_count: int
+    avg_predicted_edge: float
+    avg_realized_return: float
+    win_rate: float
+
+
+class BrierReportResponse(BaseModel):
+    generated_at: datetime
+    mode: str
+    n_resolved_trades: int
+    brier_model: float | None
+    brier_market: float | None
+    brier_raw_model: float | None
+    raw_count: int
+    model_minus_market: float | None
+    raw_model_minus_market: float | None
+    slices: list[BrierSliceItem]
 
 
 class EquityPointItem(BaseModel):
@@ -1045,6 +1076,64 @@ async def edge_report(
             GateCheckItem(name=check.name, passed=check.passed, detail=check.detail)
             for check in gate.checks
         ],
+    )
+
+
+def _brier_slice_item(slice_: BrierSlice) -> BrierSliceItem:
+    return BrierSliceItem(
+        dimension=slice_.dimension,
+        value=slice_.value,
+        count=slice_.count,
+        brier_model=slice_.brier_model,
+        brier_market=slice_.brier_market,
+        model_minus_market=slice_.model_minus_market,
+        brier_raw_model=slice_.brier_raw_model,
+        raw_model_minus_market=slice_.raw_model_minus_market,
+        raw_count=slice_.raw_count,
+        avg_predicted_edge=slice_.avg_predicted_edge,
+        avg_realized_return=slice_.avg_realized_return,
+        win_rate=slice_.win_rate,
+    )
+
+
+@router.get("/brier-report", response_model=BrierReportResponse)
+async def brier_report(
+    request: Request,
+    mode: Annotated[str, Query(pattern="^(paper|live)$")] = "paper",
+) -> BrierReportResponse:
+    """Root-cause where the model is worse or better than the market.
+
+    Positive *_minus_market values mean the model has higher Brier error than
+    the market in that slice. raw_model fields use the pre-shrink probability
+    when component metadata is available.
+    """
+    selected_mode = ExecutionMode.LIVE if mode == "live" else ExecutionMode.PAPER
+    async with _sessions(request)() as session:
+        trades = await resolved_trade_outcomes(session, selected_mode)
+    briers = brier_comparison(trades)
+    raw = raw_model_brier(trades)
+    brier_model = briers[0] if briers else None
+    brier_market = briers[1] if briers else None
+    brier_raw_model = raw[0] if raw else None
+    return BrierReportResponse(
+        generated_at=datetime.now(UTC),
+        mode=mode,
+        n_resolved_trades=len(trades),
+        brier_model=brier_model,
+        brier_market=brier_market,
+        brier_raw_model=brier_raw_model,
+        raw_count=raw[1] if raw else 0,
+        model_minus_market=(
+            round(brier_model - brier_market, 6)
+            if brier_model is not None and brier_market is not None
+            else None
+        ),
+        raw_model_minus_market=(
+            round(brier_raw_model - brier_market, 6)
+            if brier_raw_model is not None and brier_market is not None
+            else None
+        ),
+        slices=[_brier_slice_item(slice_) for slice_ in brier_root_cause(trades)],
     )
 
 

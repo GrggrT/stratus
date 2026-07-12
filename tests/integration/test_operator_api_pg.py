@@ -368,6 +368,21 @@ async def test_edge_report_returns_decomposition_and_gate_checklist(
         session.add(signal)
         await session.flush()
         session.add(
+            MarketPrice(
+                market_id=market.id, ts=NOW - timedelta(minutes=6),
+                best_bid=Decimal("0.590000"), best_ask=Decimal("0.610000"),
+                midpoint=Decimal("0.600000"), bid_depth_usd=Decimal("100"),
+                ask_depth_usd=Decimal("100"),
+            )
+        )
+        session.add(
+            ModelProb(
+                market_id=market.id, ts=signal.ts, prob=Decimal("0.700000"),
+                sigma=Decimal("1.0000"), horizon_h=Decimal("0.08"),
+                components={"shrinkage": {"p_model_raw": 0.8}},
+            )
+        )
+        session.add(
             Order(
                 signal_id=signal.id, mode=ExecutionMode.PAPER,
                 clob_order_id=f"paper-{signal.id}", side=TradeSide.BUY_YES,
@@ -403,3 +418,21 @@ async def test_edge_report_returns_decomposition_and_gate_checklist(
         "brier_model_beats_market",
     }
     assert any(not check["passed"] for check in body["gate_checks"])
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        brier_response = await client.get("/api/v1/brier-report?mode=paper")
+
+    assert brier_response.status_code == 200
+    brier = brier_response.json()
+    assert brier["n_resolved_trades"] == 1
+    assert brier["brier_model"] == pytest.approx(0.09)
+    assert brier["brier_market"] == pytest.approx(0.16)
+    assert brier["brier_raw_model"] == pytest.approx(0.04)
+    station = next(
+        item for item in brier["slices"]
+        if item["dimension"] == "station" and item["value"] == "KLGA"
+    )
+    assert station["count"] == 1
+    assert station["model_minus_market"] == pytest.approx(-0.07)

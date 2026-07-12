@@ -4,11 +4,12 @@ Status: внедрено 2026-07-12 (P0–P4). Декомпозиция skill/lu
 CLV без миграций; maker-симуляция заменила taker-исполнение в paper;
 shrinkage к рынку взвешивается по sample_n калибровки; live-гейт использует
 формальный чеклист (см. `calculate_live_gate`). Отчётность:
-`/api/v1/performance-summary`, `/api/v1/edge-report`, weekly Telegram
-edge-report (пн 08:30 Berlin). PIT-валидация — в health-аудите
-(`pit_miscalibrated`). Примечание: до заполнения `calibration` (bootstrap IEM
-+ previous runs + recalibrate) shrinkage удерживает edge около нуля и новые
-сигналы скипаются с `station_uncalibrated` — это ожидаемое поведение.
+`/api/v1/performance-summary`, `/api/v1/edge-report`,
+`/api/v1/brier-report`, weekly Telegram edge-report (пн 08:30 Berlin).
+PIT-валидация — в health-аудите (`pit_miscalibrated`). Примечание: до
+заполнения `calibration` (bootstrap IEM + previous runs + recalibrate)
+shrinkage удерживает edge около нуля и новые сигналы скипаются с
+`station_uncalibrated` — это ожидаемое поведение.
 
 Last updated: 2026-07-12.
 
@@ -132,6 +133,16 @@ brier_model < brier_market
 ```text
 /api/v1/edge-report?mode=paper|live
 ```
+
+Дополнительно реализован root-cause endpoint:
+
+```text
+/api/v1/brier-report?mode=paper|live
+```
+
+Он отдаёт общий Brier model-vs-market и срезы по station/kind/horizon/
+confidence/side. Positive `model_minus_market` означает, что модель в этом
+срезе хуже рынка.
 
 ## P1. Исполнение: перестать платить спред
 

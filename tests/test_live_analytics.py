@@ -187,8 +187,10 @@ def test_brier_comparison_and_edge_calibration() -> None:
     from stratus.services.live_analytics import (
         TradeOutcome,
         brier_comparison,
+        brier_root_cause,
         edge_calibration,
         edge_slope,
+        raw_model_brier,
     )
 
     trades = [
@@ -196,14 +198,20 @@ def test_brier_comparison_and_edge_calibration() -> None:
         TradeOutcome(
             model_prob=0.8, market_prob=0.6, won=True,
             pnl_usd=8.0, cost_usd=12.0, predicted_edge=0.20,
+            raw_model_prob=0.9, station_icao="KLGA", kind="high",
+            horizon_bucket="0-6h", confidence="A", side="buy_yes",
         ),
         TradeOutcome(
             model_prob=0.2, market_prob=0.4, won=False,
             pnl_usd=-4.0, cost_usd=8.0, predicted_edge=0.02,
+            raw_model_prob=0.1, station_icao="KLGA", kind="high",
+            horizon_bucket="0-6h", confidence="C", side="buy_no",
         ),
         TradeOutcome(
             model_prob=0.7, market_prob=0.55, won=True,
             pnl_usd=4.5, cost_usd=11.0, predicted_edge=0.08,
+            raw_model_prob=None, station_icao="EGLC", kind="low",
+            horizon_bucket="6-24h", confidence="B", side="buy_yes",
         ),
     ]
     briers = brier_comparison(trades)
@@ -211,6 +219,9 @@ def test_brier_comparison_and_edge_calibration() -> None:
     brier_model, brier_market = briers
     assert brier_model < brier_market
     assert brier_comparison([]) is None
+    raw = raw_model_brier(trades)
+    assert raw is not None
+    assert raw[1] == 2
 
     buckets = edge_calibration(trades)
     assert [b.count for b in buckets] == [1, 0, 1, 1]
@@ -220,3 +231,15 @@ def test_brier_comparison_and_edge_calibration() -> None:
     slope = edge_slope(trades)
     assert slope is not None and slope > 0
     assert edge_slope(trades[:2]) is None
+
+    slices = brier_root_cause(trades)
+    station_klga = next(
+        s for s in slices if s.dimension == "station" and s.value == "KLGA"
+    )
+    assert station_klga.count == 2
+    assert station_klga.raw_count == 2
+    assert station_klga.model_minus_market < 0
+    confidence_a = next(
+        s for s in slices if s.dimension == "confidence" and s.value == "A"
+    )
+    assert confidence_a.avg_predicted_edge == 0.2
