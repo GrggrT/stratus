@@ -168,7 +168,42 @@ public sealed record LiveSummaryDto(
     [property: JsonPropertyName("total_fees_usd")] double TotalFeesUsd,
     [property: JsonPropertyName("roi")] double? Roi,
     [property: JsonPropertyName("avg_clv")] double? AvgClv,
-    [property: JsonPropertyName("clv_beat_rate")] double? ClvBeatRate);
+    [property: JsonPropertyName("clv_beat_rate")] double? ClvBeatRate,
+    [property: JsonPropertyName("skill_pnl_usd")] double? SkillPnlUsd = null,
+    [property: JsonPropertyName("luck_pnl_usd")] double? LuckPnlUsd = null,
+    [property: JsonPropertyName("statistically_positive")] bool? StatisticallyPositive = null,
+    [property: JsonPropertyName("brier_model")] double? BrierModel = null,
+    [property: JsonPropertyName("brier_market")] double? BrierMarket = null);
+
+public sealed record EdgeBucketDto(
+    [property: JsonPropertyName("low")] double Low,
+    [property: JsonPropertyName("high")] double? High,
+    [property: JsonPropertyName("count")] int Count,
+    [property: JsonPropertyName("avg_predicted_edge")] double? AvgPredictedEdge,
+    [property: JsonPropertyName("avg_realized_return")] double? AvgRealizedReturn);
+
+public sealed record GateCheckDto(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("passed")] bool Passed,
+    [property: JsonPropertyName("detail")] string Detail);
+
+public sealed record EdgeReportDto(
+    [property: JsonPropertyName("generated_at")] DateTimeOffset GeneratedAt,
+    [property: JsonPropertyName("mode")] string Mode,
+    [property: JsonPropertyName("n_resolved_trades")] int ResolvedTrades,
+    [property: JsonPropertyName("brier_model")] double? BrierModel,
+    [property: JsonPropertyName("brier_market")] double? BrierMarket,
+    [property: JsonPropertyName("skill_pnl_usd")] double? SkillPnlUsd,
+    [property: JsonPropertyName("luck_pnl_usd")] double? LuckPnlUsd,
+    [property: JsonPropertyName("roi_ci_low")] double? RoiCiLow,
+    [property: JsonPropertyName("roi_ci_high")] double? RoiCiHigh,
+    [property: JsonPropertyName("skill_pnl_ci_low")] double? SkillPnlCiLow,
+    [property: JsonPropertyName("skill_pnl_ci_high")] double? SkillPnlCiHigh,
+    [property: JsonPropertyName("statistically_positive")] bool? StatisticallyPositive,
+    [property: JsonPropertyName("edge_slope")] double? EdgeSlope,
+    [property: JsonPropertyName("buckets")] IReadOnlyList<EdgeBucketDto> Buckets,
+    [property: JsonPropertyName("gate_passed")] bool GatePassed,
+    [property: JsonPropertyName("gate_checks")] IReadOnlyList<GateCheckDto> GateChecks);
 
 public sealed record OrderDto(
     [property: JsonPropertyName("id")] long Id,

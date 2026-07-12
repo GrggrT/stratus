@@ -43,6 +43,7 @@ from stratus.services.live_analytics import (
     summarize_live_performance,
 )
 from stratus.services.operator_commands import validate_command
+from stratus.services.telegram_reports import calculate_live_gate
 
 router = APIRouter(prefix="/api/v1", tags=["operator-monitoring"])
 SessionFactory = async_sessionmaker[AsyncSession]
@@ -218,6 +219,12 @@ class EdgeBucketItem(BaseModel):
     avg_realized_return: float | None
 
 
+class GateCheckItem(BaseModel):
+    name: str
+    passed: bool
+    detail: str
+
+
 class EdgeReportResponse(BaseModel):
     generated_at: datetime
     mode: str
@@ -233,6 +240,10 @@ class EdgeReportResponse(BaseModel):
     statistically_positive: bool | None
     edge_slope: float | None
     buckets: list[EdgeBucketItem]
+    # Formal "edge is proven" checklist gating live mode (always computed
+    # from the paper track record, regardless of the mode filter above).
+    gate_passed: bool
+    gate_checks: list[GateCheckItem]
 
 
 class EquityPointItem(BaseModel):
@@ -367,6 +378,10 @@ class CommandsResponse(BaseModel):
 
 def _sessions(request: Request) -> SessionFactory:
     return cast(SessionFactory, request.app.state.sessions)
+
+
+def _settings(request: Request) -> Settings:
+    return cast(Settings, request.app.state.settings)
 
 
 def _number(value: Decimal | None) -> float | None:
@@ -993,11 +1008,13 @@ async def edge_report(
     """Is the predicted edge real? Brier model-vs-market, skill/luck split,
     bootstrap CIs and realised return per predicted-edge bucket."""
     selected_mode = ExecutionMode.LIVE if mode == "live" else ExecutionMode.PAPER
+    settings = _settings(request)
     async with _sessions(request)() as session:
         perf = summarize_live_performance(
             await _position_stats(session, selected_mode)
         )
         trades = await resolved_trade_outcomes(session, selected_mode)
+        gate = await calculate_live_gate(session, settings.initial_bankroll_usd)
     briers = brier_comparison(trades)
     return EdgeReportResponse(
         generated_at=datetime.now(UTC),
@@ -1022,6 +1039,11 @@ async def edge_report(
                 avg_realized_return=bucket.avg_realized_return,
             )
             for bucket in edge_calibration(trades)
+        ],
+        gate_passed=gate.passed,
+        gate_checks=[
+            GateCheckItem(name=check.name, passed=check.passed, detail=check.detail)
+            for check in gate.checks
         ],
     )
 

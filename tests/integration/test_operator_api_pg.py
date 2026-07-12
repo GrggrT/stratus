@@ -329,3 +329,77 @@ async def test_performance_summary_endpoint_supports_paper_robust_metrics(
     assert body["roi"] == 0.8
     assert body["robust_pnl_usd"] == -20.0
     assert body["robust_roi"] == -0.4
+
+
+async def test_edge_report_returns_decomposition_and_gate_checklist(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    async with db_sessions.begin() as session:
+        station = Station(
+            icao="KLGA", name="LaGuardia", city="New York City",
+            lat=Decimal("40.77"), lon=Decimal("-73.87"), tz="America/New_York",
+        )
+        session.add(station)
+        await session.flush()
+        market = Market(
+            polymarket_id="pm-edge-1", event_id="ev-1", station_id=station.id,
+            market_date=NOW.date(), kind=WeatherKind.HIGH, rules_raw="rules",
+            resolves_at=NOW, status=MarketStatus.RESOLVED, station_verified=True,
+            resolved_outcome=True,
+        )
+        session.add(market)
+        await session.flush()
+        # A resolved winning paper position with a recorded closing line, plus
+        # its filled order and signal so the edge report can decompose it.
+        position = Position(
+            market_id=market.id, mode=ExecutionMode.PAPER, side=TradeSide.BUY_YES,
+            avg_price=Decimal("0.5"), size_shares=Decimal("40"),
+            size_usd=Decimal("20"), status=PositionStatus.CLOSED,
+            pnl_usd=Decimal("20"), clv=Decimal("0.04"), fee_usd=Decimal("0.04"),
+            closed_at=NOW,
+        )
+        session.add(position)
+        signal = Signal(
+            market_id=market.id, ts=NOW - timedelta(minutes=5), side=TradeSide.BUY_YES,
+            model_prob=Decimal("0.7"), market_price=Decimal("0.5"),
+            edge=Decimal("0.2"), kelly_frac=Decimal("0.02"), size_usd=Decimal("20"),
+            confidence=SignalConfidence.A, status=SignalStatus.EXECUTED,
+        )
+        session.add(signal)
+        await session.flush()
+        session.add(
+            Order(
+                signal_id=signal.id, mode=ExecutionMode.PAPER,
+                clob_order_id=f"paper-{signal.id}", side=TradeSide.BUY_YES,
+                price=Decimal("0.5"), size_usd=Decimal("20"), filled_usd=Decimal("20"),
+                fee_usd=Decimal("0.04"), status="filled", filled_at=NOW,
+            )
+        )
+
+    app = create_app(Settings(database_url=migrated_database_url))
+    app.state.sessions = db_sessions
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/api/v1/edge-report?mode=paper")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["n_resolved_trades"] == 1
+    # skill = 40 * 0.04 - 0.04 = 1.56; luck = pnl - skill = 18.44.
+    assert body["skill_pnl_usd"] == pytest.approx(1.56)
+    assert body["luck_pnl_usd"] == pytest.approx(18.44)
+    # The full formal checklist is present and, on a one-trade sample, blocked.
+    assert body["gate_passed"] is False
+    names = {check["name"] for check in body["gate_checks"]}
+    assert names == {
+        "stations_calibrated",
+        "resolved_positions_200",
+        "clv_samples_100",
+        "avg_clv_positive",
+        "clv_beat_rate_52",
+        "roi_ci_excludes_zero",
+        "skill_pnl_significant",
+        "brier_model_beats_market",
+    }
+    assert any(not check["passed"] for check in body["gate_checks"])

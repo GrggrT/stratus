@@ -498,13 +498,16 @@ public sealed partial class MainPage : Page
                         _apiClient.GetCommandsAsync(_lifetime.Token);
                     Task<CollectionResponse<JobDto>> cockpitJobs =
                         _apiClient.GetJobsAsync(_lifetime.Token);
+                    Task<EdgeReportDto> cockpitEdge =
+                        _apiClient.GetEdgeReportAsync("paper", _lifetime.Token);
                     await Task.WhenAll(
                         cockpitOverview,
                         cockpitSignals,
                         cockpitPositions,
                         cockpitEquity,
                         cockpitCommands,
-                        cockpitJobs);
+                        cockpitJobs,
+                        cockpitEdge);
                     RenderCockpit(
                         cockpitOverview.Result,
                         cockpitSignals.Result.Items,
@@ -512,6 +515,7 @@ public sealed partial class MainPage : Page
                         cockpitEquity.Result.Points,
                         cockpitCommands.Result.Items,
                         cockpitJobs.Result.Items);
+                    RenderEdgeValidation(cockpitEdge.Result);
                     break;
                 case "Markets":
                     RenderMarkets((await _apiClient.GetMarketsAsync(_lifetime.Token)).Items);
@@ -705,6 +709,71 @@ public sealed partial class MainPage : Page
         }
 
         DrawCockpitChart();
+    }
+
+    private static readonly IReadOnlyDictionary<string, string> EdgeCheckLabels =
+        new Dictionary<string, string>
+        {
+            ["stations_calibrated"] = "Stations calibrated",
+            ["resolved_positions_200"] = "≥200 closed positions",
+            ["clv_samples_100"] = "≥100 CLV samples",
+            ["avg_clv_positive"] = "Average CLV positive",
+            ["clv_beat_rate_52"] = "CLV beat rate ≥52%",
+            ["roi_ci_excludes_zero"] = "ROI CI excludes zero",
+            ["skill_pnl_significant"] = "Skill P&L significant",
+            ["brier_model_beats_market"] = "Model beats market (Brier)",
+        };
+
+    private void RenderEdgeValidation(EdgeReportDto edge)
+    {
+        int passed = edge.GateChecks.Count(check => check.Passed);
+        int total = edge.GateChecks.Count;
+
+        EdgeGateBadgeText.Text = edge.GatePassed
+            ? "LIVE-READY"
+            : total == 0 ? "No data" : $"BLOCKED · {passed}/{total}";
+        EdgeGateBadge.Background = AccentBrush(edge.GatePassed ? "positive" : "negative");
+
+        // The continuous edge gate supersedes the day-30/60 checkpoint tile:
+        // it answers "can we go live now" on every refresh.
+        GateStatusText.Text = edge.GatePassed ? "Live-ready" : "Blocked";
+        GateStatusText.Foreground = AccentBrush(edge.GatePassed ? "positive" : "negative");
+        GateDetailText.Text = total == 0
+            ? "No resolved paper trades yet"
+            : $"{passed}/{total} edge checks passed · {edge.ResolvedTrades} resolved trades";
+
+        EdgeSkillText.Text = Signed(edge.SkillPnlUsd);
+        EdgeSkillText.Foreground = AccentBrush(PnlAccent(edge.SkillPnlUsd));
+        EdgeLuckText.Text = Signed(edge.LuckPnlUsd);
+        EdgeLuckText.Foreground = AccentBrush(PnlAccent(edge.LuckPnlUsd));
+
+        if (edge.BrierModel is { } model && edge.BrierMarket is { } market)
+        {
+            EdgeBrierText.Text = $"{model:0.000} vs {market:0.000}";
+            EdgeBrierText.Foreground = AccentBrush(model < market ? "positive" : "negative");
+        }
+        else
+        {
+            EdgeBrierText.Text = "—";
+            EdgeBrierText.Foreground = AccentBrush(null);
+        }
+
+        EdgeCiText.Text = edge.RoiCiLow is { } low && edge.RoiCiHigh is { } high
+            ? $"[{Percent(low)}, {Percent(high)}]"
+            : "—";
+        EdgeCiText.Foreground = AccentBrush(
+            edge.StatisticallyPositive is true ? "positive"
+            : edge.StatisticallyPositive is false ? "warning" : null);
+
+        EdgeChecklistItems.ItemsSource = edge.GateChecks
+            .Select(check => new MonitoringListItem(
+                EdgeCheckLabels.TryGetValue(check.Name, out string? label) ? label : Pretty(check.Name),
+                string.Empty,
+                check.Detail,
+                string.Empty,
+                check.Passed ? "Passed" : "Blocked",
+                check.Passed ? "positive" : "negative"))
+            .ToList();
     }
 
     private static List<MonitoringListItem> BuildCockpitScanner(
