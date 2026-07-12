@@ -816,7 +816,7 @@ public sealed partial class MainPage : Page
         ClvDiagnosticItems.ItemsSource = BuildClvDiagnosticItems(clv);
     }
 
-    private static List<MonitoringListItem> BuildBrierDiagnosticItems(BrierReportDto report)
+    private static List<DiagnosticBarItem> BuildBrierDiagnosticItems(BrierReportDto report)
     {
         List<BrierSliceDto> slices = report.Slices
             .OrderByDescending(slice => slice.ModelMinusMarket)
@@ -827,29 +827,30 @@ public sealed partial class MainPage : Page
         {
             return
             [
-                new MonitoringListItem(
+                new DiagnosticBarItem(
                     "No Brier slices yet",
                     "Waiting for resolved trades",
                     "This panel will show station, horizon, side, confidence, and market-kind root cause.",
-                    string.Empty,
                     "Idle",
-                    null),
+                    null,
+                    0),
             ];
         }
 
+        double maxMagnitude = slices.Max(slice => Math.Abs(slice.ModelMinusMarket));
         return slices
-            .Select(slice => new MonitoringListItem(
+            .Select(slice => new DiagnosticBarItem(
                 $"{Pretty(slice.Dimension)} · {slice.Value}",
                 $"delta {DeltaNumber(slice.ModelMinusMarket)} · n={slice.Count} · edge {Cents(slice.AvgPredictedEdge)}",
                 $"model {Number(slice.BrierModel)} vs market {Number(slice.BrierMarket)} · "
                     + $"return {Percent(slice.AvgRealizedReturn)} · win {Percent(slice.WinRate)}",
-                string.Empty,
                 slice.ModelMinusMarket > 0 ? "Worse" : "Better",
-                slice.ModelMinusMarket > 0 ? "negative" : "positive"))
+                slice.ModelMinusMarket > 0 ? "negative" : "positive",
+                DiagnosticMagnitude(slice.ModelMinusMarket, maxMagnitude)))
             .ToList();
     }
 
-    private static List<MonitoringListItem> BuildClvDiagnosticItems(ClvReportDto report)
+    private static List<DiagnosticBarItem> BuildClvDiagnosticItems(ClvReportDto report)
     {
         List<ClvSliceDto> slices = report.Slices
             .OrderBy(slice => slice.AvgClv)
@@ -860,26 +861,37 @@ public sealed partial class MainPage : Page
         {
             return
             [
-                new MonitoringListItem(
+                new DiagnosticBarItem(
                     "No CLV slices yet",
                     "Waiting for closed positions",
                     "This panel will show where entries are worse than the closing line.",
-                    string.Empty,
                     "Idle",
-                    null),
+                    null,
+                    0),
             ];
         }
 
+        double maxMagnitude = slices.Max(slice => Math.Abs(slice.AvgClv));
         return slices
-            .Select(slice => new MonitoringListItem(
+            .Select(slice => new DiagnosticBarItem(
                 $"{Pretty(slice.Dimension)} · {slice.Value}",
                 $"CLV {Cents(slice.AvgClv)} · beat {Percent(slice.ClvBeatRate)} · n={slice.Count}",
                 $"entry {Percent(slice.AvgEntryPrice)} · fee {Usd(slice.AvgFeeUsd)} · "
                     + $"return {Percent(slice.AvgRealizedReturn)} · win {Percent(slice.WinRate)}",
-                string.Empty,
                 slice.AvgClv < 0 ? "Drag" : "Tailwind",
-                slice.AvgClv < 0 ? "negative" : "positive"))
+                slice.AvgClv < 0 ? "negative" : "positive",
+                DiagnosticMagnitude(slice.AvgClv, maxMagnitude)))
             .ToList();
+    }
+
+    private static double DiagnosticMagnitude(double value, double maxMagnitude)
+    {
+        if (maxMagnitude <= 0 || double.IsNaN(maxMagnitude) || double.IsInfinity(maxMagnitude))
+        {
+            return 0;
+        }
+
+        return Math.Clamp(Math.Abs(value) / maxMagnitude * 100, 4, 100);
     }
 
     private static List<MonitoringListItem> BuildCockpitScanner(

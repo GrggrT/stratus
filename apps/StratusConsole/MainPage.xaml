@@ -506,22 +506,34 @@
                                         TextWrapping="Wrap" />
                                     <ItemsControl x:Name="BrierDiagnosticItems">
                                         <ItemsControl.ItemTemplate>
-                                            <DataTemplate x:DataType="models:MonitoringListItem">
-                                                <Grid Margin="0,0,0,8" ColumnSpacing="10">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="Auto" />
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="Auto" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <Border
-                                                        Width="10"
-                                                        Height="10"
-                                                        Margin="0,4,0,0"
-                                                        VerticalAlignment="Top"
-                                                        Background="{x:Bind Accent, Converter={StaticResource AccentToBrush}}"
-                                                        CornerRadius="5" />
-                                                    <StackPanel Grid.Column="1" Spacing="2">
+                                            <DataTemplate x:DataType="models:DiagnosticBarItem">
+                                                <Grid Margin="0,0,0,10" RowSpacing="5">
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
+                                                    </Grid.RowDefinitions>
+                                                    <Grid ColumnSpacing="10">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
                                                         <TextBlock FontWeight="SemiBold" Text="{x:Bind Title}" TextWrapping="Wrap" />
+                                                        <TextBlock
+                                                            Grid.Column="1"
+                                                            FontSize="12"
+                                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                            Text="{x:Bind Status}" />
+                                                    </Grid>
+                                                    <ProgressBar
+                                                        Grid.Row="1"
+                                                        Height="8"
+                                                        AutomationProperties.Name="{x:Bind Title}"
+                                                        Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                                        Foreground="{x:Bind Accent, Converter={StaticResource AccentToBrush}}"
+                                                        Maximum="100"
+                                                        Value="{x:Bind MagnitudePercent}" />
+                                                    <StackPanel Grid.Row="2" Spacing="1">
                                                         <TextBlock FontSize="12" Text="{x:Bind Subtitle}" TextWrapping="Wrap" />
                                                         <TextBlock
                                                             FontSize="12"
@@ -529,11 +541,6 @@
                                                             Text="{x:Bind Detail}"
                                                             TextWrapping="Wrap" />
                                                     </StackPanel>
-                                                    <TextBlock
-                                                        Grid.Column="2"
-                                                        FontSize="12"
-                                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                                        Text="{x:Bind Status}" />
                                                 </Grid>
                                             </DataTemplate>
                                         </ItemsControl.ItemTemplate>
@@ -549,22 +556,34 @@
                                         TextWrapping="Wrap" />
                                     <ItemsControl x:Name="ClvDiagnosticItems">
                                         <ItemsControl.ItemTemplate>
-                                            <DataTemplate x:DataType="models:MonitoringListItem">
-                                                <Grid Margin="0,0,0,8" ColumnSpacing="10">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="Auto" />
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="Auto" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <Border
-                                                        Width="10"
-                                                        Height="10"
-                                                        Margin="0,4,0,0"
-                                                        VerticalAlignment="Top"
-                                                        Background="{x:Bind Accent, Converter={StaticResource AccentToBrush}}"
-                                                        CornerRadius="5" />
-                                                    <StackPanel Grid.Column="1" Spacing="2">
+                                            <DataTemplate x:DataType="models:DiagnosticBarItem">
+                                                <Grid Margin="0,0,0,10" RowSpacing="5">
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
+                                                    </Grid.RowDefinitions>
+                                                    <Grid ColumnSpacing="10">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
                                                         <TextBlock FontWeight="SemiBold" Text="{x:Bind Title}" TextWrapping="Wrap" />
+                                                        <TextBlock
+                                                            Grid.Column="1"
+                                                            FontSize="12"
+                                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                            Text="{x:Bind Status}" />
+                                                    </Grid>
+                                                    <ProgressBar
+                                                        Grid.Row="1"
+                                                        Height="8"
+                                                        AutomationProperties.Name="{x:Bind Title}"
+                                                        Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                                        Foreground="{x:Bind Accent, Converter={StaticResource AccentToBrush}}"
+                                                        Maximum="100"
+                                                        Value="{x:Bind MagnitudePercent}" />
+                                                    <StackPanel Grid.Row="2" Spacing="1">
                                                         <TextBlock FontSize="12" Text="{x:Bind Subtitle}" TextWrapping="Wrap" />
                                                         <TextBlock
                                                             FontSize="12"
@@ -572,11 +591,6 @@
                                                             Text="{x:Bind Detail}"
                                                             TextWrapping="Wrap" />
                                                     </StackPanel>
-                                                    <TextBlock
-                                                        Grid.Column="2"
-                                                        FontSize="12"
-                                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                                        Text="{x:Bind Status}" />
                                                 </Grid>
                                             </DataTemplate>
                                         </ItemsControl.ItemTemplate>

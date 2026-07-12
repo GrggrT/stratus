@@ -273,3 +273,11 @@ public sealed record MonitoringListItem(
     string Status,
     string? Accent = null,
     long? MarketId = null);
+
+public sealed record DiagnosticBarItem(
+    string Title,
+    string Subtitle,
+    string Detail,
+    string Status,
+    string? Accent,
+    double MagnitudePercent);
