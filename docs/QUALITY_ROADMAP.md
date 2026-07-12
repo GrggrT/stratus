@@ -40,6 +40,9 @@ Snapshot from the 2026-07-12 paper run after health/analytics hardening:
 Interpretation: the system is operational, but edge is not proven. The ordinary
 ROI is positive, while robust ROI is negative and average CLV is far below the
 live gate target. This is a paper hypothesis, not a live-ready strategy.
+The realised profit is currently dominated by one outlier winner; until robust
+ROI and CLV improve on a larger resolved sample, positive PnL must be treated
+as variance rather than evidence of edge.
 
 ## Live gate
 
@@ -49,8 +52,10 @@ Live trading must remain blocked until all of the following are true:
 2. Brier score `< 0.18`.
 3. Average CLV `> +0.015`.
 4. Realised ROI `> 0`.
-5. Robust ROI `> 0` after excluding the largest absolute-PnL trade.
-6. Largest single trade contribution is less than 25-30% of total realised PnL.
+5. Robust ROI `> 0` after excluding the largest absolute-PnL trade. Ordinary
+   ROI alone is not sufficient.
+6. Largest single trade contribution is less than 25-30% of total realised PnL;
+   otherwise live remains blocked even if headline ROI is positive.
 7. Health audit has no unresolved `critical` or `blocking` issues.
 8. Austria/KYC/tax readiness is explicitly confirmed.
 9. Wallet, funder, signature type, cancellation path, and emergency stop are
@@ -98,13 +103,28 @@ Goal: prove or reject the forecasting/trading hypothesis with paper data.
 
 Tasks:
 
-1. Add validation summaries by:
+1. Add a paper monitoring checkpoint:
+   - update after each new market resolution;
+   - publish a daily snapshot while paper mode is running;
+   - record closed count, ROI, robust ROI, average CLV, CLV beat rate, largest
+     trade contribution, and drawdown;
+   - explicitly label samples below 100 resolved positions as inconclusive.
+2. Add validation summaries by:
    - station;
    - market kind;
    - forecast horizon;
    - confidence class;
    - event/date.
-2. Track:
+3. Add CLV diagnostics by:
+   - station;
+   - forecast horizon;
+   - confidence class;
+   - market kind;
+   - entry bucket / price band;
+   - before and after fees, spread, and expected slippage.
+4. Block or down-rank signal classes with persistently negative CLV once enough
+   samples exist for that slice.
+5. Track:
    - Brier score;
    - average CLV;
    - CLV beat rate;
@@ -112,8 +132,8 @@ Tasks:
    - robust ROI;
    - largest trade contribution;
    - drawdown.
-3. Add live gate reporting that explains which criteria failed.
-4. Add "single-trade dependency" alerts when realised performance is dominated
+6. Add live gate reporting that explains which criteria failed.
+7. Add "single-trade dependency" alerts when realised performance is dominated
    by one or two outcomes.
 
 Acceptance criteria:
@@ -169,6 +189,9 @@ Tasks:
    - Brier trend;
    - CLV distribution;
    - CLV by station/horizon/confidence;
+   - CLV before and after fees/spread/slippage;
+   - largest trade contribution;
+   - robust ROI trend;
    - calibration chart.
 3. Market drill-down:
    - market price series;
@@ -231,10 +254,11 @@ The next engineering work should follow this order:
 
 1. `resolution_reconciliation` job and tables/API.
 2. Settlement stale classification and operator visibility.
-3. Event probability normalisation and fail-closed signal guard.
-4. Health severity model.
-5. Validation summary endpoint/dashboard data.
-6. Console pages for validation, risk heatmap, and market drill-down.
+3. CLV diagnostics by station, horizon, confidence, and cost/slippage layer.
+4. Event probability normalisation and fail-closed signal guard.
+5. Health severity model.
+6. Validation summary endpoint/dashboard data.
+7. Console pages for validation, risk heatmap, and market drill-down.
 
 UI polish should not outrun the validation layer. A professional-looking
 console is useful only if it exposes correct edge and risk information.
