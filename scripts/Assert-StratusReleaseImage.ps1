@@ -89,7 +89,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 $compose = $composeJson | ConvertFrom-Json
 
-$applicationServices = @('migrate', 'worker', 'binance', 'api', 'telegram')
+$applicationServices = @(
+    'migrate',
+    'worker',
+    'binance-market-stream',
+    'api',
+    'telegram'
+)
 foreach ($serviceName in $applicationServices) {
     $service = $compose.services.$serviceName
     if ($null -eq $service) {

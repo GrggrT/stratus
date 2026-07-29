@@ -20,9 +20,13 @@ def test_release_image_guard_binds_image_revision_environment_and_services() -> 
         "Read-EnvValue -Path $EnvFile -Name "
         "'STRATUS_RELEASE_IMAGE_DIGEST'"
     ) in guard
-    assert (
-        "$applicationServices = @('migrate', 'worker', 'binance', 'api', 'telegram')"
-        in guard
-    )
+    for service_name in (
+        "migrate",
+        "worker",
+        "binance-market-stream",
+        "api",
+        "telegram",
+    ):
+        assert f"'{service_name}'" in guard
     assert "$service.image -ne $Image" in guard
     assert "environment.STRATUS_RELEASE_IMAGE_DIGEST" in guard
