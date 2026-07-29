@@ -171,7 +171,7 @@ foreach ($queueToken in @(
 }
 
 if (-not ('StratusDashboardLoadGateTestHandler' -as [type])) {
-    Add-Type -ReferencedAssemblies @('System.Net.Http.dll') -TypeDefinition @'
+    $testHandlerTypeDefinition = @'
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -240,6 +240,14 @@ public sealed class StratusDashboardLoadGateTestHandler : HttpMessageHandler
     }
 }
 '@
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        Add-Type -TypeDefinition $testHandlerTypeDefinition
+    }
+    else {
+        Add-Type `
+            -ReferencedAssemblies @('System.Net.Http.dll') `
+            -TypeDefinition $testHandlerTypeDefinition
+    }
 }
 
 $queueHandler = [StratusDashboardLoadGateTestHandler]::new()

@@ -442,6 +442,7 @@ function Invoke-EndpointTier {
         [int] $RequestTimeoutSeconds,
 
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [Collections.Generic.List[object]] $Results
     )
 
