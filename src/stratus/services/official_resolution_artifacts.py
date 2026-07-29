@@ -26,9 +26,8 @@ class AuthorizedArtifact:
 
 
 def _is_reparse_point(path: Path) -> bool:
-    try:
-        attributes = path.lstat().st_file_attributes
-    except AttributeError:
+    attributes = getattr(path.lstat(), "st_file_attributes", None)
+    if attributes is None:
         return path.is_symlink()
     return bool(attributes & _REPARSE_POINT)
 

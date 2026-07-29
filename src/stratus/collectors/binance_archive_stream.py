@@ -767,14 +767,18 @@ def system_resource_snapshot(path: Path) -> ResourceSnapshot:
 
 def _available_memory_resources() -> tuple[int | None, int | None]:
     if os.name == "nt":
+        win_dll = getattr(ctypes, "WinDLL", None)
+        get_last_error = getattr(ctypes, "get_last_error", None)
+        if win_dll is None or get_last_error is None:
+            raise OSError("Windows memory APIs are unavailable")
         status = _MemoryStatusEx()
         status.dwLength = ctypes.sizeof(_MemoryStatusEx)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = win_dll("kernel32", use_last_error=True)
         query = kernel32.GlobalMemoryStatusEx
         query.argtypes = [ctypes.POINTER(_MemoryStatusEx)]
         query.restype = ctypes.c_int
         if not query(ctypes.byref(status)):
-            raise OSError(ctypes.get_last_error(), "GlobalMemoryStatusEx failed")
+            raise OSError(get_last_error(), "GlobalMemoryStatusEx failed")
         return int(status.ullAvailPhys), int(status.ullAvailPageFile)
     meminfo = Path("/proc/meminfo")
     if meminfo.exists():
