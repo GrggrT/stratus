@@ -41,23 +41,21 @@ if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
     throw "Release environment file does not exist: $EnvFile"
 }
 
-$inspect = docker image inspect $Image --format (
-    '{{.Id}}|{{.Os}}|{{.Architecture}}|' +
-    '{{index .Config.Labels "org.opencontainers.image.revision"}}'
-)
+$inspectJson = docker image inspect $Image
 if ($LASTEXITCODE -ne 0) {
     throw "Docker image does not exist locally: $Image"
 }
 
-$parts = $inspect -split '\|', 4
-if ($parts.Count -ne 4) {
+$inspectedImages = @($inspectJson | ConvertFrom-Json)
+if ($inspectedImages.Count -ne 1) {
     throw 'Unexpected docker image inspect output.'
 }
+$inspectedImage = $inspectedImages[0]
 
-$actualId = $parts[0]
-$actualOs = $parts[1]
-$actualArchitecture = $parts[2]
-$actualRevision = $parts[3]
+$actualId = [string] $inspectedImage.Id
+$actualOs = [string] $inspectedImage.Os
+$actualArchitecture = [string] $inspectedImage.Architecture
+$actualRevision = [string] $inspectedImage.Config.Labels.'org.opencontainers.image.revision'
 
 if ($actualId -ne "sha256:$ExpectedDigest") {
     throw "Image ID mismatch: expected sha256:$ExpectedDigest, observed $actualId."
@@ -104,7 +102,7 @@ foreach ($serviceName in $applicationServices) {
     if ($service.image -ne $Image) {
         throw "Service $serviceName uses $($service.image), expected $Image."
     }
-    $serviceDigest = $service.environment.STRATUS_RELEASE_IMAGE_DIGEST
+    $serviceDigest = $service.environment.RELEASE_IMAGE_DIGEST
     if ($serviceDigest -ne $ExpectedDigest) {
         throw "Service $serviceName has a release digest different from the candidate image."
     }

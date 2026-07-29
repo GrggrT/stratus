@@ -15,6 +15,8 @@ def test_release_image_guard_binds_image_revision_environment_and_services() -> 
     assert "ValidatePattern('^[0-9a-f]{40}$')" in guard
     assert "sha256:$ExpectedDigest" in guard
     assert "expected linux/amd64" in guard
+    assert "$inspectJson | ConvertFrom-Json" in guard
+    assert "Labels.'org.opencontainers.image.revision'" in guard
     assert 'Read-EnvValue -Path $EnvFile -Name \'STRATUS_IMAGE\'' in guard
     assert (
         "Read-EnvValue -Path $EnvFile -Name "
@@ -29,4 +31,4 @@ def test_release_image_guard_binds_image_revision_environment_and_services() -> 
     ):
         assert f"'{service_name}'" in guard
     assert "$service.image -ne $Image" in guard
-    assert "environment.STRATUS_RELEASE_IMAGE_DIGEST" in guard
+    assert "environment.RELEASE_IMAGE_DIGEST" in guard

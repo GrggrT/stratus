@@ -12,6 +12,12 @@ For console/API development in **PAPER mode only**, use the guarded host-API wor
 Host mode is not isolated from same-user code execution and must never be used for LIVE;
 the production least-privilege boundary requires the containerized runtime.
 
+Production candidate cutover, the API load gate, continuity activation, PAPER canary, and the
+API-only rollback prohibition are defined in
+[`docs/RELEASE_CUTOVER_RUNBOOK.md`](docs/RELEASE_CUTOVER_RUNBOOK.md). Backup restore and
+database-role bootstrap are defined in
+[`docs/BACKUP_RESTORE_RUNBOOK.md`](docs/BACKUP_RESTORE_RUNBOOK.md).
+
 ```powershell
 Copy-Item .env.example .env
 New-Item -ItemType Directory -Force .secrets | Out-Null

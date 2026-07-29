@@ -136,12 +136,16 @@ missing, premature seal, duplicate, nonsealed, or LIVE findings. Query:
 - [x] Hold new execution behind the kill switch before replacement.
 - [x] Record a complete pre-cutover backup path, size, SHA-256, and PostgreSQL version.
 - [x] Restore that exact backup into an isolated database and run integrity checks.
-- [ ] Record the exact rollback image and operator command sequence.
+- [x] Record the exact rollback image and operator command sequence.
 - [ ] Prove rollback cannot relabel candidate evidence into the predecessor epoch.
 - [ ] Stage/deploy the exact candidate artifact while candidate scheduler writes remain blocked
       under the predecessor execution-evidence identity.
 - [ ] Verify API/worker identity, schema, configuration, memory limit, and restart count before
       epoch activation.
+- [ ] Pass the five-minute production-size Dashboard API load gate: zero errors/timeouts,
+      endpoint maximum below 3 seconds, zero idle-in-transaction sessions and lock waiters,
+      active queries drained within 5 seconds, no restart/OOM, and no recurrence of predecessor
+      150-160% sustained PostgreSQL CPU.
 - [x] Confirm zero nonterminal LIVE orders and zero LIVE positions before any PAPER resume.
 
 Backup evidence: marker-bound
@@ -153,6 +157,13 @@ isolated restore and owner/restricted-role boundary checks passed after the requ
 database-ACL bootstrap. Disposable container and volume were removed.
 
 Deployment evidence: `pending`.
+
+Rollback record: `stratus:rollback-epoch21-20260729`,
+`sha256:f487b5a8bfa21d70e264032ba28e248f79e92928acd2158f544f0bc465f0fad4`.
+After successor activation it is API-only; its legacy worker is forbidden because the old
+maintenance topology can write execution evidence even while trading is killed. Exact commands,
+fail-closed checks, and forward-fix requirements are in
+`docs/RELEASE_CUTOVER_RUNBOOK.md`.
 
 ## 8. Continuity plan and successor epoch
 
