@@ -230,9 +230,9 @@ Acceptance requires all items in `docs/PRODUCTION_READINESS_CHECKLIST.md`, inclu
 | Static/unit verification | passed | Ruff clean; strict mypy 173 modules; 880 tests passed, 3 skipped |
 | Clean PostgreSQL verification | passed | clean PostgreSQL 16 CI-equivalent: 1169 passed, 3 skipped in 1052.21s; Release x64 Cockpit build: 0 warnings/errors |
 | Predecessor incident reconciliation | passed | 2026-07-29 20:18:14Z; epoch 21 has 403/403 sealed obligations, zero open rows, zero projection/duplicate/premature-seal violations, zero LIVE |
-| Candidate image/build identity | pending | pending digest |
+| Candidate image/build identity | staged attempt rejected | revision `09945edfd4920df8c6102503accfd24c36c000d6`; image `sha256:3d793e5b64788a37fd0d37635449bf1deeab3cfad4d152c172dd130433951cef`; not an accepted release |
 | Backup and restore proof | passed | marker-bound post-stop backup `stratus_20260729T203148Z_3241d8921b44_1.backup`; independent hashes and full isolated restore accepted |
-| Deployment under fail-closed controls | stopped/drained, candidate pending | audited Polymarket-only stop succeeded 20:16:15Z; quarantine 9/9 then idempotent 0/0; worker stopped; Binance remains killed |
+| Deployment under fail-closed controls | staged API load gate failed; stopped/drained | audited Polymarket-only stop succeeded 20:16:15Z; worker remained stopped; candidate API load gate failed and API was stopped cleanly at 22:39:44Z; Binance remains killed |
 | Successor continuity plan/epoch | pending | pending plan, hashes, and DB timestamp |
 | PAPER canary | pending | pending canary record |
 | Incident closure | pending | requires every acceptance item |
@@ -311,3 +311,31 @@ approximately 150–160% CPU while the old API was running and immediately fell 
 remained engaged. The predecessor API will not be restarted; the candidate must pass a bounded
 dashboard-query/load check under the kill switch before PAPER resume. Query cancellation,
 refresh coalescing, and bounded analytics plans are tracked as P1 operational work.
+
+### Rejected staged API load gate — 2026-07-29
+
+The fail-closed staging attempt used revision
+`09945edfd4920df8c6102503accfd24c36c000d6`, candidate image
+`sha256:3d793e5b64788a37fd0d37635449bf1deeab3cfad4d152c172dd130433951cef`,
+and a 1 GiB API memory limit. The API started at `2026-07-29T22:32:01Z` and was
+stopped cleanly at `2026-07-29T22:39:44Z`. `/healthz` returned 200; `/readyz` returned the
+expected fail-closed 503 because the kill switch was engaged and readiness data was stale.
+
+The bounded load observation recorded independent maxima of 18 PostgreSQL application sessions,
+6 active sessions, and 13 `idle in transaction` sessions. There were no lock waiters. Peak
+container observations were:
+
+- PostgreSQL CPU `308.43%` and memory `2282.5 MiB`;
+- API CPU `126.06%` and memory `463.7 MiB`;
+- zero API/PostgreSQL restarts and zero OOM events.
+
+After the API stopped, the observed application-session drain was `0/0/0` for
+active / `idle in transaction` / lock-waiting sessions. The worker was never started, the active
+epoch was not changed, Polymarket PAPER was not resumed or otherwise mutated, and LIVE remained
+untouched.
+
+This attempt **failed** the production-size API load gate because of the `idle in transaction`
+sessions and severe database/API CPU demand. It is evidence for rejection, not acceptance.
+Successor-epoch activation and PAPER canary remain blocked while query shape, refresh cadence,
+transaction lifetime, and database resource budgets are remediated and a new exact candidate
+passes the gate.

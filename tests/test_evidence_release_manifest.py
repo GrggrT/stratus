@@ -266,6 +266,17 @@ def test_0045_close_precision_semantics_fork_only_predictive_validation() -> Non
     )
 
 
+def test_0046_accuracy_overview_indexes_fork_only_operational_lane() -> None:
+    migration = "migrations/versions/20260730_0046_accuracy_overview_indexes.py"
+
+    assert migration in _LANE_REPOSITORY_SOURCE_FILES["operational_legacy"]
+    assert all(
+        migration not in paths
+        for lane, paths in _LANE_REPOSITORY_SOURCE_FILES.items()
+        if lane != "operational_legacy"
+    )
+
+
 def test_locked_dependency_graph_is_hashed_into_every_lane(tmp_path: Path) -> None:
     for lane in LANE_NAMES:
         assert {"pyproject.toml", "uv.lock"} <= set(

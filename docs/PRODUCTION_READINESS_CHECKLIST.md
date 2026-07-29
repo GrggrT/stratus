@@ -19,7 +19,9 @@ Deployment, successor-epoch activation, and canary are currently **pending**.
 - [ ] Record the candidate image digest: `pending`.
 - [x] Record the dependency/lock identity: Python `uv.lock`; Cockpit
       `apps/StratusConsole/packages.lock.json`; .NET SDK `10.0.301`.
-- [x] Record the Alembic head and prove there is exactly one head: `20260728_0045`.
+- [x] Prove the candidate source has exactly one Alembic head: `20260730_0046`, directly following
+      `20260728_0045`.
+- [x] Record the pre-cutover production head: `20260728_0045`.
 - [ ] Confirm the diff is limited to the reviewed P0 scope plus required tests/docs.
 - [ ] Confirm no execution-cost definition, horizon, grace duration, algebra, or immutable hash
       contract changed without an explicit reviewed migration and continuity decision.
@@ -138,6 +140,10 @@ missing, premature seal, duplicate, nonsealed, or LIVE findings. Query:
 - [x] Restore that exact backup into an isolated database and run integrity checks.
 - [x] Record the exact rollback image and operator command sequence.
 - [ ] Prove rollback cannot relabel candidate evidence into the predecessor epoch.
+- [ ] With global/Polymarket kill and Binance kill engaged and worker/API stopped, run the exact
+      candidate `migrate` service from production head `20260728_0045`.
+- [ ] Before API staging, prove the database is at exactly `20260730_0046` and all three bounded
+      accuracy-overview indexes exist with `indisvalid=true` and `indisready=true`.
 - [ ] Stage/deploy the exact candidate artifact while candidate scheduler writes remain blocked
       under the predecessor execution-evidence identity.
 - [ ] Verify API/worker identity, schema, configuration, memory limit, and restart count before
@@ -156,7 +162,21 @@ Backup evidence: marker-bound
 isolated restore and owner/restricted-role boundary checks passed after the required external
 database-ACL bootstrap. Disposable container and volume were removed.
 
-Deployment evidence: `pending`.
+Deployment evidence: the staged API attempt for revision
+`09945edfd4920df8c6102503accfd24c36c000d6`, image
+`sha256:3d793e5b64788a37fd0d37635449bf1deeab3cfad4d152c172dd130433951cef`,
+and a 1 GiB API limit ran from `2026-07-29T22:32:01Z` through a clean stop at
+`2026-07-29T22:39:44Z`. Health returned 200 and readiness returned the expected fail-closed 503
+for kill/stale state. Independent observed maxima were 18 PostgreSQL application sessions,
+6 active, 13 `idle in transaction`, zero lock waiters, PostgreSQL CPU `308.43%`, API CPU
+`126.06%`, PostgreSQL memory `2282.5 MiB`, and API memory `463.7 MiB`. API/PostgreSQL had zero
+restart and OOM events. After the API stop, application sessions drained to `0/0/0`
+(active / `idle in transaction` / lock-waiting). The worker was not started, the epoch and
+Polymarket PAPER state were untouched, and LIVE remained untouched.
+
+**Disposition: failed, not accepted.** The unchecked load-gate item above remains blocking.
+Query/cadence/transaction-lifetime/database-budget remediation and a new exact-candidate load
+gate are required before successor-epoch activation or PAPER resume.
 
 Rollback record: `stratus:rollback-epoch21-20260729`,
 `sha256:f487b5a8bfa21d70e264032ba28e248f79e92928acd2158f544f0bc465f0fad4`.
@@ -164,6 +184,10 @@ After successor activation it is API-only; its legacy worker is forbidden becaus
 maintenance topology can write execution evidence even while trading is killed. Exact commands,
 fail-closed checks, and forward-fix requirements are in
 `docs/RELEASE_CUTOVER_RUNBOOK.md`.
+
+Schema cutover evidence: `pending`. Revision `20260730_0046` is an index-only operational
+migration. Production remains at `20260728_0045` until the exact-candidate migration and index
+validity checks above are recorded; this statement does not accept deployment or migration.
 
 ## 8. Continuity plan and successor epoch
 

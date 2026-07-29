@@ -47,37 +47,165 @@ The guard must return `verified:true`, `linux/amd64`, the exact revision and dig
 services: `migrate`, `worker`, `binance-market-stream`, `api`, and `telegram`, and positive
 resource limits for both `worker` and `api`.
 
-## 3. Stage the candidate API while fail closed
+## 3. Apply the candidate migration and stage the API while fail closed
 
 Before replacement, query PostgreSQL directly and record runtime controls, zero LIVE state,
-pending commands, active epoch, schema head, and container restart counts. Start only the verified
-API:
+pending commands, active epoch, schema head, and container restart counts. The expected
+pre-migration production head is exactly `20260728_0045`; a different value stops the cutover.
+
+Revision `20260730_0046` is an index-only operational migration for bounded Cockpit/API reads.
+Apply it from the exact verified candidate while global/Polymarket kill and Binance kill are both
+engaged and both the worker and API are stopped:
+
+```powershell
+docker compose stop worker api
+$unexpectedRunning = @(
+  docker compose ps --status running --services |
+    Where-Object { $_ -in @("worker", "api") }
+)
+if ($unexpectedRunning.Count -ne 0) {
+  throw "API/worker must be stopped before migration: $($unexpectedRunning -join ', ')"
+}
+
+# Create without starting so the image can be proved before any DDL executes.
+docker compose create --no-build --pull never --force-recreate migrate
+$migrateContainer = docker compose ps --all -q migrate
+if (@($migrateContainer).Count -ne 1) {
+  throw "Expected exactly one stopped migrate container."
+}
+$migrateImageId = docker inspect $migrateContainer --format "{{.Image}}"
+if ($migrateImageId -ne "sha256:$digest") {
+  docker rm -f $migrateContainer | Out-Null
+  throw "Migrate container image mismatch: $migrateImageId"
+}
+
+docker start $migrateContainer | Out-Null
+$migrateExitCode = [int](docker wait $migrateContainer)
+docker logs $migrateContainer
+docker rm $migrateContainer | Out-Null
+if ($migrateExitCode -ne 0) {
+  throw "Exact-candidate migration failed with exit code $migrateExitCode."
+}
+```
+
+The running-service assertion must return no API or worker before `migrate` runs. `--pull never`,
+the pre-start image-ID assertion, and the stopped-container creation are mandatory: no DDL may
+execute before the exact candidate identity is proven. Do not use the predecessor image's
+migration service. After migration, require exactly one database head, `20260730_0046`, then query
+`pg_index`/`pg_class` and require all three candidate indexes to exist with both
+`indisvalid=true` and `indisready=true`:
+
+- `ix_accuracy_predictions_eligible_expert_ts`;
+- `ix_accuracy_predictions_eligible_expert_version_market_ts`;
+- `ix_model_skill_window_evaluated`.
+
+Use the following read-only assertions through the administrative cutover connection:
+
+```sql
+SELECT version_num
+FROM alembic_version;
+
+SELECT c.relname AS index_name, i.indisvalid, i.indisready
+FROM pg_index AS i
+JOIN pg_class AS c ON c.oid = i.indexrelid
+JOIN pg_namespace AS n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relname IN (
+    'ix_accuracy_predictions_eligible_expert_ts',
+    'ix_accuracy_predictions_eligible_expert_version_market_ts',
+    'ix_model_skill_window_evaluated'
+  )
+ORDER BY c.relname;
+```
+
+The first query must return exactly one row containing `20260730_0046`; the second must return
+exactly three rows and six `true` flags.
+
+Any migration error, unexpected head, missing index, invalid index, or not-ready index stops the
+cutover with the API and worker still off. Only after these checks pass may the verified candidate
+API be staged:
 
 ```powershell
 docker compose up -d --no-build --pull never --no-deps --force-recreate api
 ```
 
 Verify the running container image ID, `RELEASE_IMAGE_DIGEST`, revision label, schema
-`20260728_0045`, memory/restart/OOM state, and loopback-only port. `/healthz` must return 200.
+`20260730_0046`, memory/restart/OOM state, and loopback-only port. `/healthz` must return 200.
 `/readyz` is expected to return 503 with `kill_switch` while the global kill is on; this is the
 correct fail-closed state, not an API failure.
 
 Do not start the worker yet.
 
-## 4. Production-size API load gate
+## 4. Production-size Dashboard HTTP subgate and runtime observation gate
 
 The predecessor API was stopped after repeated Cockpit refreshes drove PostgreSQL to roughly
-150-160% CPU and left long-lived sessions. The candidate must pass a five-minute Dashboard load
-gate before epoch activation. Exercise the actual Dashboard request set every 10 seconds,
-including health/readiness, overview, signals, positions, paper equity, commands, jobs, edge,
-validation ledger, Brier, CLV, root-cause actions, accuracy, selection policy, resolution
-reconciliation, settlement cases, storage capacity, forecast provenance, execution cost,
-official-resolution sources, evidence continuity, and the alerts badge.
+150-160% CPU and left long-lived sessions. Before epoch activation, the candidate must pass both
+the five-minute Dashboard **HTTP subgate** and a separate, simultaneous PostgreSQL/container/
+zero-LIVE/drain observation gate. Neither artifact alone is the production gate. Reproduce the
+intended tiered Cockpit cadence, rather than sending the complete diagnostic request set every ten
+seconds:
 
-Acceptance thresholds:
+- every 10 seconds, refresh core trading state: health/readiness, overview, signals, positions,
+  paper equity, commands, jobs, and the alerts badge;
+- every 60 seconds, refresh evidence/execution state: edge, prospective validation ledger,
+  selection policy, resolution reconciliation, settlement cases, storage capacity, execution
+  cost, and evidence continuity;
+- every 5 minutes, refresh diagnostics: Brier, CLV, root-cause actions, accuracy, forecast
+  provenance, and official-resolution sources.
+
+Before steady-state sampling, perform exactly one cold full/manual refresh that requests all three
+tiers. This proves cold-path behavior without turning diagnostic queries into a ten-second storm.
+Continue the tiered pattern for at least five minutes after that cold refresh.
+
+Use the read-only Windows harness against the staged candidate API. It issues GET requests only,
+uses a work-conserving queue of at most three concurrent reads, and starts each request's timeout
+only when that GET actually starts. It accepts `/readyz` **only** as HTTP 503 with the validated
+kill-switch fail-closed body. `/readyz` HTTP 200 is a release failure during staging, even if every
+other request succeeds. The harness exits non-zero on any other HTTP error, timeout, or
+three-second latency breach. It reads `STRATUS_OPERATOR_API_KEY` without including it in output;
+alternatively pass a `SecureString`:
+
+Because the worker is intentionally off during this gate, `health_audit_stale` or
+`health_audit_missing` is allowed only when the readiness response also contains `kill_switch`.
+`project_halted` is likewise compatible with the staged stop. `database_unavailable`,
+critical/blocking audit reasons, missing `kill_switch`, and unknown reasons fail the gate. The
+harness uses three transport connections because it is GET-only; the Cockpit itself limits reads
+to three while reserving a fourth connection for operator mutations such as emergency Stop.
+
+```powershell
+$secureApiKey = Read-Host "Staged operator API key" -AsSecureString
+.\scripts\Invoke-StratusDashboardLoadGate.ps1 `
+  -BaseUri "http://127.0.0.1:8000/" `
+  -ApiKey $secureApiKey `
+  -SteadyStateSeconds 300 `
+  -OutputPath ".stratus-cache\load-gates\candidate-dashboard.json"
+if ($LASTEXITCODE -ne 0) {
+    throw "Candidate Dashboard HTTP subgate failed with exit code $LASTEXITCODE."
+}
+```
+
+Do not run the harness against the predecessor API or while the worker is being started/stopped.
+The JSON artifact contains every endpoint status/latency/error plus per-endpoint aggregates; it
+contains neither response bodies nor the API key. Its contract is
+`gate=stratus_dashboard_http_load`, `http_passed=true|false`,
+`requires_external_runtime_observation=true`, and `production_gate_passed=null`. Exit code zero
+means only that this HTTP subgate passed; it never accepts the complete production gate.
+
+Collect a separate, timestamp-aligned, read-only runtime-observation artifact in parallel. It must
+contain PostgreSQL session/transaction/lock samples, API and PostgreSQL CPU/memory/restart/OOM
+samples, unchanged global and venue controls, proof that LIVE orders/positions/intents remain
+zero, and the five-second post-load query/session drain result. Without both this runtime artifact
+and the HTTP artifact, the overall production load gate is **not accepted**.
+
+HTTP-subgate thresholds:
 
 - zero request errors and zero client timeouts;
 - every Dashboard endpoint completes in less than the Cockpit's three-second client timeout;
+- every `/readyz` sample is HTTP 503 with `status=not_ready`, contains `kill_switch`, and contains
+  no disallowed readiness reason.
+
+External runtime-observation thresholds:
+
 - PostgreSQL `idle in transaction` sessions remain zero;
 - PostgreSQL lock waiters remain zero;
 - all active Dashboard queries drain within five seconds after load stops;
@@ -213,7 +341,10 @@ The retained predecessor is:
 
 After successor activation this image is an **API-only diagnostic rollback**. Its worker contains
 the old competing scheduler topology and must never be started, even while trading is killed,
-because maintenance jobs can still write execution evidence.
+because maintenance jobs can still write execution evidence. Revision `20260730_0046` is an
+additive, index-only forward schema change: do not downgrade production to `20260728_0045` merely
+to run the predecessor API. This rollback is only a fail-closed diagnostic bridge to a
+forward-fixed candidate; the predecessor `migrate` and `worker` services remain forbidden.
 
 Rollback sequence:
 
@@ -239,8 +370,8 @@ Rollback sequence:
 
 6. Verify the API reports the predecessor digest and a continuity mismatch/fail-closed state.
    Do not activate a plan for the old image and do not start its worker.
-7. Forward-fix, build a new exact candidate, restore the candidate environment, and activate a
-   new reviewed successor epoch before any worker or PAPER resume.
+7. Forward-fix against the current schema, build a new exact candidate, restore the candidate
+   environment, and activate a new reviewed successor epoch before any worker or PAPER resume.
 
 If the candidate worker cannot process the stop command, stop the worker first. The rollback
 remains API-only; no worker may start until a separately audited break-glass action has restored

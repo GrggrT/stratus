@@ -12,7 +12,11 @@ from stratus.repositories.markets import (
     latest_station_before,
     upsert_market,
 )
-from stratus.repositories.model_probs import ModelProbabilityValue, upsert_model_probs
+from stratus.repositories.model_probs import (
+    ModelProbabilityValue,
+    latest_active_market_probability_components,
+    upsert_model_probs,
+)
 from stratus.repositories.signals import prune_signals
 
 
@@ -92,6 +96,32 @@ async def test_model_probability_upsert_validates_batch_size() -> None:
         assert "batch_size" in str(exc)
     else:
         raise AssertionError("batch_size=0 must fail")
+
+
+async def test_latest_active_market_probabilities_use_bounded_lateral_lookups() -> None:
+    session = AsyncMock()
+    result = MagicMock()
+    result.scalars.return_value = (
+        {"version": "latest-a"},
+        {"version": "latest-b"},
+    )
+    session.execute.return_value = result
+
+    components = await latest_active_market_probability_components(session)
+
+    assert components == (
+        {"version": "latest-a"},
+        {"version": "latest-b"},
+    )
+    statement = " ".join(str(session.execute.await_args.args[0]).lower().split())
+    assert "from markets as m" in statement
+    assert "cross join lateral" in statement
+    assert "where mp.market_id = m.id order by mp.ts desc limit 1" in statement
+    assert "m.status = 'active'" in statement
+    assert "m.station_verified is true" in statement
+    assert "s.active is true" in statement
+    assert "s.stage in ('paper', 'approved')" in statement
+    assert "distinct on" not in statement
 
 
 def _discovered_market(**overrides) -> DiscoveredMarket:

@@ -292,6 +292,17 @@ services:
       STRATUS_RUNTIME_PASSWORD_FILE: /run/secrets/stratus_runtime_password
       STRATUS_DATABASE_HOST: postgres
       STRATUS_DATABASE_NAME: stratus
+      # API-only DB guardrail. Worker analytics retain the runtime defaults;
+      # Cockpit requests instead fail at PostgreSQL before its 3s HTTP timeout.
+      STRATUS_DATABASE_APPLICATION_NAME: stratus-api
+      # These release safety budgets are deliberately not host-overridable.
+      # Changing them requires a reviewed source/image/continuity change.
+      STRATUS_DATABASE_STATEMENT_TIMEOUT_MS: "2500"
+      STRATUS_DATABASE_LOCK_TIMEOUT_MS: "1000"
+      STRATUS_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS: "5000"
+      STRATUS_DATABASE_POOL_SIZE: "4"
+      STRATUS_DATABASE_MAX_OVERFLOW: "0"
+      STRATUS_DATABASE_POOL_TIMEOUT_SECONDS: "0.25"
     entrypoint: ["/usr/local/bin/stratus-runtime-entrypoint"]
     secrets:
       - source: stratus-runtime-password

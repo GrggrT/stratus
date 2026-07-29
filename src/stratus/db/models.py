@@ -2736,6 +2736,20 @@ class AccuracyPrediction(Base):
             "evidence_eligible",
             "generated_at",
         ),
+        Index(
+            "ix_accuracy_predictions_eligible_expert_ts",
+            "expert",
+            "ts",
+            postgresql_where=text("evidence_eligible IS TRUE"),
+        ),
+        Index(
+            "ix_accuracy_predictions_eligible_expert_version_market_ts",
+            "expert",
+            "expert_version",
+            "market_id",
+            "ts",
+            postgresql_where=text("evidence_eligible IS TRUE"),
+        ),
         Index("ix_accuracy_predictions_baseline", "baseline_model_prob_id"),
     )
 
@@ -3154,6 +3168,11 @@ class ModelSkillReport(Base):
             "station_id",
             "horizon_bucket",
             "kind",
+            "evaluated_at",
+        ),
+        Index(
+            "ix_model_skill_window_evaluated",
+            "window_days",
             "evaluated_at",
         ),
     )

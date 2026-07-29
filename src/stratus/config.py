@@ -21,6 +21,7 @@ SUPPORTED_ENSEMBLE_MODELS = frozenset({"gefs", "ecmwf_ens"})
 _RUNTIME_PASSWORD = re.compile(r"[A-Za-z0-9._~-]{24,}")
 _DATABASE_HOST = re.compile(r"[A-Za-z0-9.-]+")
 _DATABASE_NAME = re.compile(r"[A-Za-z0-9_-]+")
+_DATABASE_APPLICATION_NAME = re.compile(r"[A-Za-z0-9._-]{1,63}")
 
 
 class _WithoutLegacyDatabaseUrl(PydanticBaseSettingsSource):
@@ -92,6 +93,33 @@ class Settings(BaseSettings):
     stratus_database_host: str = "127.0.0.1"
     stratus_database_port: int = Field(default=5432, ge=1, le=65535)
     stratus_database_name: str = "stratus"
+    # Per-connection runtime PostgreSQL controls. Zero preserves PostgreSQL's
+    # unlimited timeout for legitimate long-running worker analytics; the API
+    # service supplies a strict profile beneath the Cockpit's three-second
+    # HTTP budget.
+    stratus_database_application_name: str = "stratus-runtime"
+    stratus_database_statement_timeout_ms: int = Field(
+        default=0,
+        ge=0,
+        le=300_000,
+    )
+    stratus_database_lock_timeout_ms: int = Field(
+        default=0,
+        ge=0,
+        le=300_000,
+    )
+    stratus_database_idle_transaction_timeout_ms: int = Field(
+        default=0,
+        ge=0,
+        le=3_600_000,
+    )
+    stratus_database_pool_size: int = Field(default=5, ge=1, le=32)
+    stratus_database_max_overflow: int = Field(default=10, ge=0, le=64)
+    stratus_database_pool_timeout_seconds: float = Field(
+        default=30.0,
+        ge=0.05,
+        le=300.0,
+    )
 
     @classmethod
     def settings_customise_sources(
@@ -460,6 +488,15 @@ class Settings(BaseSettings):
     def validate_database_name(cls, value: str) -> str:
         if not _DATABASE_NAME.fullmatch(value):
             raise ValueError("stratus_database_name contains unsafe URL characters")
+        return value
+
+    @field_validator("stratus_database_application_name")
+    @classmethod
+    def validate_database_application_name(cls, value: str) -> str:
+        if not _DATABASE_APPLICATION_NAME.fullmatch(value):
+            raise ValueError(
+                "stratus_database_application_name must contain 1-63 safe characters"
+            )
         return value
 
     def resolved_database_url(self) -> str:

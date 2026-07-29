@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from stratus.config import (
+    MigrationSettings,
     Settings,
     runtime_database_group_role_name,
     runtime_database_role_name,
 )
+from stratus.db import session as database_session
 from stratus.db.session import (
     RuntimeDatabaseBoundaryError,
     _assert_runtime_connection,
+    _runtime_server_settings,
     create_engine,
 )
 
@@ -127,3 +133,148 @@ def test_physical_connection_boundary_is_fail_closed() -> None:
     with pytest.raises(RuntimeDatabaseBoundaryError, match="rejected"):
         _assert_runtime_connection(_Connection(rejected), object())
     assert rejected.closed is True
+
+
+def test_runtime_database_defaults_preserve_long_worker_queries() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.stratus_database_application_name == "stratus-runtime"
+    assert settings.stratus_database_statement_timeout_ms == 0
+    assert settings.stratus_database_lock_timeout_ms == 0
+    assert settings.stratus_database_idle_transaction_timeout_ms == 0
+    assert settings.stratus_database_pool_size == 5
+    assert settings.stratus_database_max_overflow == 10
+    assert settings.stratus_database_pool_timeout_seconds == 30.0
+    assert _runtime_server_settings(settings) == {
+        "application_name": "stratus-runtime",
+        "statement_timeout": "0ms",
+        "lock_timeout": "0ms",
+        "idle_in_transaction_session_timeout": "0ms",
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("stratus_database_statement_timeout_ms", -1),
+        ("stratus_database_lock_timeout_ms", -1),
+        ("stratus_database_idle_transaction_timeout_ms", -1),
+        ("stratus_database_pool_size", 0),
+        ("stratus_database_max_overflow", -1),
+        ("stratus_database_pool_timeout_seconds", 0),
+    ],
+)
+def test_runtime_database_timeout_configuration_fails_closed(
+    field: str,
+    value: int,
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: value})
+
+
+def test_runtime_engine_installs_server_side_timeout_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_name = "stratus"
+    role = runtime_database_role_name(database_name)
+    settings = Settings(
+        _env_file=None,
+        database_url=(
+            f"postgresql+asyncpg://{role}:runtime-password@localhost/"
+            f"{database_name}"
+        ),
+        stratus_database_statement_timeout_ms=2_400,
+        stratus_database_lock_timeout_ms=800,
+        stratus_database_idle_transaction_timeout_ms=4_500,
+        stratus_database_application_name="stratus-api",
+        stratus_database_pool_size=4,
+        stratus_database_max_overflow=0,
+        stratus_database_pool_timeout_seconds=0.25,
+    )
+    captured: dict[str, Any] = {}
+    sync_engine = object()
+
+    class _Engine:
+        def __init__(self) -> None:
+            self.sync_engine = sync_engine
+
+    fake_engine = _Engine()
+
+    def fake_create_async_engine(database_url: str, **kwargs: Any) -> AsyncEngine:
+        captured["database_url"] = database_url
+        captured.update(kwargs)
+        return cast(AsyncEngine, fake_engine)
+
+    def fake_listen(target: object, name: str, listener: object) -> None:
+        captured["listen"] = (target, name, listener)
+
+    monkeypatch.setattr(
+        database_session,
+        "create_async_engine",
+        fake_create_async_engine,
+    )
+    monkeypatch.setattr(database_session.event, "listen", fake_listen)
+
+    engine = create_engine(settings)
+
+    assert engine is fake_engine
+    assert captured["database_url"] == settings.database_url
+    assert captured["pool_pre_ping"] is True
+    assert captured["pool_size"] == 4
+    assert captured["max_overflow"] == 0
+    assert captured["pool_timeout"] == 0.25
+    assert captured["connect_args"] == {
+        "server_settings": {
+            "application_name": "stratus-api",
+            "statement_timeout": "2400ms",
+            "lock_timeout": "800ms",
+            "idle_in_transaction_session_timeout": "4500ms",
+        }
+    }
+    assert captured["listen"] == (
+        sync_engine,
+        "connect",
+        _assert_runtime_connection,
+    )
+
+
+def test_migration_settings_remain_separate_from_runtime_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "MIGRATION_DATABASE_URL",
+        "postgresql+asyncpg://owner:secret@localhost/stratus",
+    )
+    monkeypatch.setenv("STRATUS_DATABASE_STATEMENT_TIMEOUT_MS", "200")
+
+    migration_settings = MigrationSettings(_env_file=None)
+
+    assert migration_settings.model_dump() == {
+        "migration_database_url": (
+            "postgresql+asyncpg://owner:secret@localhost/stratus"
+        )
+    }
+
+
+def test_compose_applies_strict_database_budget_only_to_api() -> None:
+    compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
+    worker = compose.split("\n  worker:\n", maxsplit=1)[1].split(
+        "\n  binance-market-stream:\n",
+        maxsplit=1,
+    )[0]
+    api = compose.split("\n  api:\n", maxsplit=1)[1].split(
+        "\n  backup:\n",
+        maxsplit=1,
+    )[0]
+
+    assert "STRATUS_DATABASE_STATEMENT_TIMEOUT_MS:" not in worker
+    assert "STRATUS_DATABASE_APPLICATION_NAME: stratus-api" in api
+    assert 'STRATUS_DATABASE_STATEMENT_TIMEOUT_MS: "2500"' in api
+    assert 'STRATUS_DATABASE_LOCK_TIMEOUT_MS: "1000"' in api
+    assert 'STRATUS_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS: "5000"' in api
+    assert 'STRATUS_DATABASE_POOL_SIZE: "4"' in api
+    assert 'STRATUS_DATABASE_MAX_OVERFLOW: "0"' in api
+    assert 'STRATUS_DATABASE_POOL_TIMEOUT_SECONDS: "0.25"' in api
+    assert "STRATUS_API_DATABASE_" not in api

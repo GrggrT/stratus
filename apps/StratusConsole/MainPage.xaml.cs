@@ -20,10 +20,12 @@ public sealed partial class MainPage : Page
     private readonly OperatorCredentialStore _credentialStore = new();
     private StratusApiClient _apiClient;
     private readonly DispatcherTimer _refreshTimer = new() { Interval = TimeSpan.FromSeconds(10) };
+    private readonly DashboardRefreshCadence _dashboardRefreshCadence = new();
     private readonly CancellationTokenSource _lifetime = new();
     private string _selectedDestination = "Dashboard";
     private bool _isRefreshing;
-    private bool _refreshPending;
+    private bool _interactiveRefreshPending;
+    private bool _forceAllDashboardDiagnosticsPending;
     private bool _isSubmittingCommand;
     private RuntimeDto? _lastRuntime;
     private HealthSnapshot? _lastHealth;
@@ -54,6 +56,8 @@ public sealed partial class MainPage : Page
     private IReadOnlyList<AlertItemDto> _visibleAlertItems = [];
     private string _alertsQueryState = "unacknowledged";
     private bool _isAcknowledgingAlert;
+    private IReadOnlyList<string?> _evidenceAndExecutionErrors = [];
+    private IReadOnlyList<string?> _accuracyAndProvenanceErrors = [];
     private IReadOnlyList<MonitoringListItem> _collectionAllItems = [];
     private IReadOnlyList<MonitoringListItem> _cockpitActivityItems = [];
     private string _collectionSearchQuery = string.Empty;
@@ -79,6 +83,13 @@ public sealed partial class MainPage : Page
 
     private sealed record DashboardFetch<T>(T? Value, string? Error)
         where T : class;
+
+    private enum RefreshOrigin
+    {
+        Automatic,
+        Interactive,
+        Manual,
+    }
 
     public MainPage()
     {
@@ -108,7 +119,7 @@ public sealed partial class MainPage : Page
     {
         ResizeNavigationContent(RootNavigation.ActualWidth);
         _refreshTimer.Start();
-        await RefreshAsync();
+        await RefreshAsync(RefreshOrigin.Manual);
     }
 
     private void ResizeNavigationContent(double shellWidth)
@@ -172,13 +183,13 @@ public sealed partial class MainPage : Page
     {
         if (AutoRefreshButton.IsChecked == true)
         {
-            await RefreshAsync();
+            await RefreshAsync(RefreshOrigin.Automatic);
         }
     }
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
     {
-        await RefreshAsync();
+        await RefreshAsync(RefreshOrigin.Manual);
     }
 
     private async void CommandPaletteButton_Click(object sender, RoutedEventArgs e)
@@ -316,7 +327,7 @@ public sealed partial class MainPage : Page
                 "refresh reload update sync",
                 "Refresh",
                 null,
-                RefreshAsync),
+                () => RefreshAsync(RefreshOrigin.Manual)),
             new(
                 "Focus list search",
                 "Jump to the current page search box",
@@ -478,17 +489,24 @@ public sealed partial class MainPage : Page
         || ContainsSearch(action.Status, query)
         || ContainsSearch(action.SearchText, query);
 
-    private async Task RefreshAsync()
+    private async Task RefreshAsync(RefreshOrigin origin = RefreshOrigin.Interactive)
     {
         if (_isRefreshing)
         {
-            _refreshPending = true;
+            // DispatcherTimer ticks are intentionally dropped. Only an explicit
+            // user/navigation request may schedule one coalesced follow-up.
+            if (origin != RefreshOrigin.Automatic)
+            {
+                _interactiveRefreshPending = true;
+                _forceAllDashboardDiagnosticsPending |= origin == RefreshOrigin.Manual;
+            }
             return;
         }
 
         _isRefreshing = true;
         RefreshButton.IsEnabled = false;
         string destination = _selectedDestination;
+        bool forceAllDashboardDiagnostics = origin == RefreshOrigin.Manual;
 
         try
         {
@@ -512,7 +530,7 @@ public sealed partial class MainPage : Page
 
             if (destination == _selectedDestination)
             {
-                await LoadDestinationAsync(destination);
+                await LoadDestinationAsync(destination, forceAllDashboardDiagnostics);
             }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
@@ -526,226 +544,26 @@ public sealed partial class MainPage : Page
         {
             RefreshButton.IsEnabled = true;
             _isRefreshing = false;
-            if (_refreshPending && !_lifetime.IsCancellationRequested)
+            if (_interactiveRefreshPending && !_lifetime.IsCancellationRequested)
             {
-                _refreshPending = false;
-                _ = RefreshAsync();
+                bool forceAll = _forceAllDashboardDiagnosticsPending;
+                _interactiveRefreshPending = false;
+                _forceAllDashboardDiagnosticsPending = false;
+                _ = RefreshAsync(forceAll ? RefreshOrigin.Manual : RefreshOrigin.Interactive);
             }
         }
     }
 
-    private async Task LoadDestinationAsync(string destination)
+    private async Task LoadDestinationAsync(
+        string destination,
+        bool forceAllDashboardDiagnostics)
     {
         try
         {
             switch (destination)
             {
                 case "Dashboard":
-                    Task<OverviewResponse> cockpitOverview =
-                        _apiClient.GetOverviewAsync(_lifetime.Token);
-                    Task<CollectionResponse<SignalDto>> cockpitSignals =
-                        _apiClient.GetSignalsAsync(_lifetime.Token);
-                    Task<CollectionResponse<PositionDto>> cockpitPositions =
-                        _apiClient.GetPositionsAsync(_lifetime.Token);
-                    Task<EquityResponse> cockpitEquity =
-                        _apiClient.GetEquityAsync("paper", _lifetime.Token);
-                    Task<CollectionResponse<CommandItem>> cockpitCommands =
-                        _apiClient.GetCommandsAsync(_lifetime.Token);
-                    Task<CollectionResponse<JobDto>> cockpitJobs =
-                        _apiClient.GetJobsAsync(_lifetime.Token);
-                    Task<DashboardFetch<EdgeReportDto>> cockpitEdge = CaptureDashboardFetchAsync(
-                        _apiClient.GetEdgeReportAsync("paper", _lifetime.Token), "edge report");
-                    Task<DashboardFetch<ProspectiveValidationLedgerDto>> cockpitValidationLedger =
-                        CaptureDashboardFetchAsync(
-                            _apiClient.GetProspectiveValidationLedgerAsync(
-                                "paper", _lifetime.Token),
-                            "prospective validation ledger");
-                    Task<DashboardFetch<BrierReportDto>> cockpitBrier = CaptureDashboardFetchAsync(
-                        _apiClient.GetBrierReportAsync("paper", _lifetime.Token), "Brier report");
-                    Task<DashboardFetch<ClvReportDto>> cockpitClv = CaptureDashboardFetchAsync(
-                        _apiClient.GetClvReportAsync("paper", _lifetime.Token), "CLV report");
-                    Task<DashboardFetch<RootCauseActionsDto>> cockpitActions =
-                        CaptureDashboardFetchAsync(
-                            _apiClient.GetRootCauseActionsAsync("paper", _lifetime.Token),
-                            "root-cause actions");
-                    Task<DashboardFetch<AccuracyOverviewDto>> cockpitAccuracy =
-                        CaptureDashboardFetchAsync(
-                            _apiClient.GetAccuracyOverviewAsync(_lifetime.Token),
-                            "accuracy overview");
-                    Task<DashboardFetch<SelectionPolicyReportDto>> cockpitSelection =
-                        CaptureDashboardFetchAsync(
-                            _apiClient.GetSelectionPolicyReportAsync("paper", _lifetime.Token),
-                            "selection policy");
-                    Task<DashboardFetch<ResolutionReconciliationResponseDto>> cockpitReconciliation =
-                        CaptureDashboardFetchAsync(
-                            _apiClient.GetResolutionReconciliationAsync(_lifetime.Token),
-                            "resolution reconciliation");
-                    Task<DashboardFetch<SettlementCasesResponseDto>> cockpitSettlementCases =
-                        CaptureDashboardFetchAsync(
-                            _apiClient.GetSettlementCasesAsync(_lifetime.Token),
-                            "settlement lifecycle");
-                    Task<DashboardFetch<StorageCapacityDto>> cockpitStorage =
-                        CaptureDashboardFetchAsync(
-                            _apiClient.GetStorageCapacityAsync(_lifetime.Token),
-                            "storage capacity");
-                    Task<DashboardFetch<ForecastProvenanceDto>> cockpitForecastProvenance =
-                        CaptureDashboardFetchAsync(
-                            _apiClient.GetForecastProvenanceAsync(_lifetime.Token),
-                            "forecast provenance");
-                    Task<DashboardFetch<ExecutionCostReportDto>> cockpitExecutionCost =
-                        CaptureDashboardFetchAsync(
-                            _apiClient.GetExecutionCostReportAsync("paper", _lifetime.Token),
-                            "execution quality");
-                    Task<DashboardFetch<OfficialResolutionSourcesDto>> cockpitOfficialResolution =
-                        CaptureDashboardFetchAsync(
-                            _apiClient.GetOfficialResolutionSourcesAsync(_lifetime.Token),
-                            "official resolution truth");
-                    Task<DashboardFetch<EvidenceContinuityDto>> cockpitEvidenceContinuity =
-                        CaptureDashboardFetchAsync(
-                            _apiClient.GetEvidenceContinuityAsync(_lifetime.Token),
-                            "prospective evidence clock");
-                    await Task.WhenAll(
-                        cockpitOverview,
-                        cockpitSignals,
-                        cockpitPositions,
-                        cockpitEquity,
-                        cockpitCommands,
-                        cockpitJobs);
-                    RenderCockpit(
-                        cockpitOverview.Result,
-                        cockpitSignals.Result.Items,
-                        cockpitPositions.Result.Items,
-                        cockpitEquity.Result.Points,
-                        cockpitCommands.Result.Items,
-                        cockpitJobs.Result.Items);
-
-                    await Task.WhenAll(
-                        cockpitEdge,
-                        cockpitValidationLedger,
-                        cockpitBrier,
-                        cockpitClv,
-                        cockpitActions,
-                        cockpitAccuracy,
-                        cockpitSelection,
-                        cockpitReconciliation,
-                        cockpitSettlementCases,
-                        cockpitStorage,
-                        cockpitForecastProvenance,
-                        cockpitExecutionCost,
-                        cockpitOfficialResolution,
-                        cockpitEvidenceContinuity);
-                    DashboardFetch<EdgeReportDto> edge = cockpitEdge.Result;
-                    DashboardFetch<ProspectiveValidationLedgerDto> validationLedger =
-                        cockpitValidationLedger.Result;
-                    DashboardFetch<BrierReportDto> brier = cockpitBrier.Result;
-                    DashboardFetch<ClvReportDto> clv = cockpitClv.Result;
-                    DashboardFetch<RootCauseActionsDto> actions = cockpitActions.Result;
-                    DashboardFetch<AccuracyOverviewDto> accuracy = cockpitAccuracy.Result;
-                    DashboardFetch<SelectionPolicyReportDto> selection = cockpitSelection.Result;
-                    DashboardFetch<ResolutionReconciliationResponseDto> reconciliation =
-                        cockpitReconciliation.Result;
-                    DashboardFetch<SettlementCasesResponseDto> settlement =
-                        cockpitSettlementCases.Result;
-                    DashboardFetch<StorageCapacityDto> storage = cockpitStorage.Result;
-                    DashboardFetch<ForecastProvenanceDto> forecastProvenance =
-                        cockpitForecastProvenance.Result;
-                    DashboardFetch<ExecutionCostReportDto> executionCost =
-                        cockpitExecutionCost.Result;
-                    DashboardFetch<OfficialResolutionSourcesDto> officialResolution =
-                        cockpitOfficialResolution.Result;
-                    DashboardFetch<EvidenceContinuityDto> evidenceContinuity =
-                        cockpitEvidenceContinuity.Result;
-
-                    if (edge.Value is not null)
-                    {
-                        RenderEdgeValidation(edge.Value);
-                    }
-                    if (validationLedger.Value is not null)
-                    {
-                        RenderProspectiveValidationLedger(validationLedger.Value);
-                    }
-                    else
-                    {
-                        RenderProspectiveValidationLedgerUnavailable(validationLedger.Error);
-                    }
-                    if (evidenceContinuity.Value is not null)
-                    {
-                        RenderEvidenceContinuity(evidenceContinuity.Value);
-                    }
-                    else
-                    {
-                        RenderEvidenceContinuityUnavailable(evidenceContinuity.Error);
-                    }
-                    if (accuracy.Value is not null)
-                    {
-                        RenderAccuracyOverview(accuracy.Value);
-                    }
-                    if (selection.Value is not null)
-                    {
-                        RenderSelectionPolicy(selection.Value);
-                    }
-                    if (reconciliation.Value is not null
-                        && settlement.Value is not null
-                        && storage.Value is not null)
-                    {
-                        RenderEvidenceOperations(
-                            reconciliation.Value,
-                            settlement.Value,
-                            storage.Value);
-                    }
-                    else
-                    {
-                        RenderEvidenceOperationsDegraded(
-                            reconciliation.Error,
-                            settlement.Error,
-                            storage.Error);
-                    }
-                    if (forecastProvenance.Value is not null)
-                    {
-                        RenderForecastProvenance(forecastProvenance.Value);
-                    }
-                    else
-                    {
-                        RenderForecastProvenanceUnavailable(forecastProvenance.Error);
-                    }
-                    if (executionCost.Value is not null)
-                    {
-                        RenderExecutionQuality(executionCost.Value);
-                    }
-                    else
-                    {
-                        RenderExecutionQualityUnavailable(executionCost.Error);
-                    }
-                    if (officialResolution.Value is not null)
-                    {
-                        RenderOfficialResolutionSources(officialResolution.Value);
-                    }
-                    else
-                    {
-                        RenderOfficialResolutionSourcesUnavailable(officialResolution.Error);
-                    }
-                    if (brier.Value is not null
-                        && clv.Value is not null
-                        && actions.Value is not null)
-                    {
-                        RenderRootCauseDiagnostics(brier.Value, clv.Value, actions.Value);
-                    }
-
-                    RenderDashboardDiagnosticErrors(
-                        edge.Error,
-                        validationLedger.Error,
-                        brier.Error,
-                        clv.Error,
-                        actions.Error,
-                        accuracy.Error,
-                        selection.Error,
-                        reconciliation.Error,
-                        settlement.Error,
-                        storage.Error,
-                        forecastProvenance.Error,
-                        executionCost.Error,
-                        officialResolution.Error,
-                        evidenceContinuity.Error);
+                    await LoadDashboardAsync(forceAllDashboardDiagnostics);
                     break;
                 case "Markets":
                     RenderMarkets((await _apiClient.GetMarketsAsync(_lifetime.Token)).Items);
@@ -842,6 +660,252 @@ public sealed partial class MainPage : Page
         {
             RenderMonitoringError(exception.Message);
         }
+    }
+
+    private async Task LoadDashboardAsync(bool forceAllDiagnostics)
+    {
+        Task<OverviewResponse> cockpitOverview =
+            _apiClient.GetOverviewAsync(_lifetime.Token);
+        Task<CollectionResponse<SignalDto>> cockpitSignals =
+            _apiClient.GetSignalsAsync(_lifetime.Token);
+        Task<CollectionResponse<PositionDto>> cockpitPositions =
+            _apiClient.GetPositionsAsync(_lifetime.Token);
+        Task<EquityResponse> cockpitEquity =
+            _apiClient.GetEquityAsync("paper", _lifetime.Token);
+        Task<CollectionResponse<CommandItem>> cockpitCommands =
+            _apiClient.GetCommandsAsync(_lifetime.Token);
+        Task<CollectionResponse<JobDto>> cockpitJobs =
+            _apiClient.GetJobsAsync(_lifetime.Token);
+        await Task.WhenAll(
+            cockpitOverview,
+            cockpitSignals,
+            cockpitPositions,
+            cockpitEquity,
+            cockpitCommands,
+            cockpitJobs);
+        RenderCockpit(
+            cockpitOverview.Result,
+            cockpitSignals.Result.Items,
+            cockpitPositions.Result.Items,
+            cockpitEquity.Result.Points,
+            cockpitCommands.Result.Items,
+            cockpitJobs.Result.Items);
+
+        DashboardRefreshPlan refreshPlan = _dashboardRefreshCadence.BeginRefresh(
+            DateTimeOffset.UtcNow,
+            forceAllDiagnostics);
+        if (refreshPlan.RefreshEvidenceAndExecution)
+        {
+            await RefreshEvidenceAndExecutionAsync();
+        }
+        if (refreshPlan.RefreshAccuracyAndProvenance)
+        {
+            await RefreshAccuracyAndProvenanceAsync();
+        }
+
+        // Re-apply retained failures after RenderHealth resets the shared banner.
+        RenderDashboardDiagnosticErrors(
+            _evidenceAndExecutionErrors
+                .Concat(_accuracyAndProvenanceErrors)
+                .ToArray());
+    }
+
+    private async Task RefreshEvidenceAndExecutionAsync()
+    {
+        Task<DashboardFetch<EdgeReportDto>> cockpitEdge = CaptureDashboardFetchAsync(
+            _apiClient.GetEdgeReportAsync("paper", _lifetime.Token),
+            "edge report");
+        Task<DashboardFetch<ProspectiveValidationLedgerDto>> cockpitValidationLedger =
+            CaptureDashboardFetchAsync(
+                _apiClient.GetProspectiveValidationLedgerAsync("paper", _lifetime.Token),
+                "prospective validation ledger");
+        Task<DashboardFetch<SelectionPolicyReportDto>> cockpitSelection =
+            CaptureDashboardFetchAsync(
+                _apiClient.GetSelectionPolicyReportAsync("paper", _lifetime.Token),
+                "selection policy");
+        Task<DashboardFetch<ResolutionReconciliationResponseDto>> cockpitReconciliation =
+            CaptureDashboardFetchAsync(
+                _apiClient.GetResolutionReconciliationAsync(_lifetime.Token),
+                "resolution reconciliation");
+        Task<DashboardFetch<SettlementCasesResponseDto>> cockpitSettlementCases =
+            CaptureDashboardFetchAsync(
+                _apiClient.GetSettlementCasesAsync(_lifetime.Token),
+                "settlement lifecycle");
+        Task<DashboardFetch<StorageCapacityDto>> cockpitStorage =
+            CaptureDashboardFetchAsync(
+                _apiClient.GetStorageCapacityAsync(_lifetime.Token),
+                "storage capacity");
+        Task<DashboardFetch<ExecutionCostReportDto>> cockpitExecutionCost =
+            CaptureDashboardFetchAsync(
+                _apiClient.GetExecutionCostReportAsync("paper", _lifetime.Token),
+                "execution quality");
+        Task<DashboardFetch<EvidenceContinuityDto>> cockpitEvidenceContinuity =
+            CaptureDashboardFetchAsync(
+                _apiClient.GetEvidenceContinuityAsync(_lifetime.Token),
+                "prospective evidence clock");
+        await Task.WhenAll(
+            cockpitEdge,
+            cockpitValidationLedger,
+            cockpitSelection,
+            cockpitReconciliation,
+            cockpitSettlementCases,
+            cockpitStorage,
+            cockpitExecutionCost,
+            cockpitEvidenceContinuity);
+
+        DashboardFetch<EdgeReportDto> edge = cockpitEdge.Result;
+        DashboardFetch<ProspectiveValidationLedgerDto> validationLedger =
+            cockpitValidationLedger.Result;
+        DashboardFetch<SelectionPolicyReportDto> selection = cockpitSelection.Result;
+        DashboardFetch<ResolutionReconciliationResponseDto> reconciliation =
+            cockpitReconciliation.Result;
+        DashboardFetch<SettlementCasesResponseDto> settlement =
+            cockpitSettlementCases.Result;
+        DashboardFetch<StorageCapacityDto> storage = cockpitStorage.Result;
+        DashboardFetch<ExecutionCostReportDto> executionCost =
+            cockpitExecutionCost.Result;
+        DashboardFetch<EvidenceContinuityDto> evidenceContinuity =
+            cockpitEvidenceContinuity.Result;
+
+        if (edge.Value is not null)
+        {
+            RenderEdgeValidation(edge.Value);
+        }
+        if (validationLedger.Value is not null)
+        {
+            RenderProspectiveValidationLedger(validationLedger.Value);
+        }
+        else
+        {
+            RenderProspectiveValidationLedgerUnavailable(validationLedger.Error);
+        }
+        if (evidenceContinuity.Value is not null)
+        {
+            RenderEvidenceContinuity(evidenceContinuity.Value);
+        }
+        else
+        {
+            RenderEvidenceContinuityUnavailable(evidenceContinuity.Error);
+        }
+        if (selection.Value is not null)
+        {
+            RenderSelectionPolicy(selection.Value);
+        }
+        if (reconciliation.Value is not null
+            && settlement.Value is not null
+            && storage.Value is not null)
+        {
+            RenderEvidenceOperations(
+                reconciliation.Value,
+                settlement.Value,
+                storage.Value);
+        }
+        else
+        {
+            RenderEvidenceOperationsDegraded(
+                reconciliation.Error,
+                settlement.Error,
+                storage.Error);
+        }
+        if (executionCost.Value is not null)
+        {
+            RenderExecutionQuality(executionCost.Value);
+        }
+        else
+        {
+            RenderExecutionQualityUnavailable(executionCost.Error);
+        }
+
+        _evidenceAndExecutionErrors =
+        [
+            edge.Error,
+            validationLedger.Error,
+            selection.Error,
+            reconciliation.Error,
+            settlement.Error,
+            storage.Error,
+            executionCost.Error,
+            evidenceContinuity.Error,
+        ];
+    }
+
+    private async Task RefreshAccuracyAndProvenanceAsync()
+    {
+        Task<DashboardFetch<BrierReportDto>> cockpitBrier = CaptureDashboardFetchAsync(
+            _apiClient.GetBrierReportAsync("paper", _lifetime.Token),
+            "Brier report");
+        Task<DashboardFetch<ClvReportDto>> cockpitClv = CaptureDashboardFetchAsync(
+            _apiClient.GetClvReportAsync("paper", _lifetime.Token),
+            "CLV report");
+        Task<DashboardFetch<RootCauseActionsDto>> cockpitActions =
+            CaptureDashboardFetchAsync(
+                _apiClient.GetRootCauseActionsAsync("paper", _lifetime.Token),
+                "root-cause actions");
+        Task<DashboardFetch<AccuracyOverviewDto>> cockpitAccuracy =
+            CaptureDashboardFetchAsync(
+                _apiClient.GetAccuracyOverviewAsync(_lifetime.Token),
+                "accuracy overview");
+        Task<DashboardFetch<ForecastProvenanceDto>> cockpitForecastProvenance =
+            CaptureDashboardFetchAsync(
+                _apiClient.GetForecastProvenanceAsync(_lifetime.Token),
+                "forecast provenance");
+        Task<DashboardFetch<OfficialResolutionSourcesDto>> cockpitOfficialResolution =
+            CaptureDashboardFetchAsync(
+                _apiClient.GetOfficialResolutionSourcesAsync(_lifetime.Token),
+                "official resolution truth");
+        await Task.WhenAll(
+            cockpitBrier,
+            cockpitClv,
+            cockpitActions,
+            cockpitAccuracy,
+            cockpitForecastProvenance,
+            cockpitOfficialResolution);
+
+        DashboardFetch<BrierReportDto> brier = cockpitBrier.Result;
+        DashboardFetch<ClvReportDto> clv = cockpitClv.Result;
+        DashboardFetch<RootCauseActionsDto> actions = cockpitActions.Result;
+        DashboardFetch<AccuracyOverviewDto> accuracy = cockpitAccuracy.Result;
+        DashboardFetch<ForecastProvenanceDto> forecastProvenance =
+            cockpitForecastProvenance.Result;
+        DashboardFetch<OfficialResolutionSourcesDto> officialResolution =
+            cockpitOfficialResolution.Result;
+
+        if (accuracy.Value is not null)
+        {
+            RenderAccuracyOverview(accuracy.Value);
+        }
+        if (forecastProvenance.Value is not null)
+        {
+            RenderForecastProvenance(forecastProvenance.Value);
+        }
+        else
+        {
+            RenderForecastProvenanceUnavailable(forecastProvenance.Error);
+        }
+        if (officialResolution.Value is not null)
+        {
+            RenderOfficialResolutionSources(officialResolution.Value);
+        }
+        else
+        {
+            RenderOfficialResolutionSourcesUnavailable(officialResolution.Error);
+        }
+        if (brier.Value is not null
+            && clv.Value is not null
+            && actions.Value is not null)
+        {
+            RenderRootCauseDiagnostics(brier.Value, clv.Value, actions.Value);
+        }
+
+        _accuracyAndProvenanceErrors =
+        [
+            brier.Error,
+            clv.Error,
+            actions.Error,
+            accuracy.Error,
+            forecastProvenance.Error,
+            officialResolution.Error,
+        ];
     }
 
     private async Task<DashboardFetch<T>> CaptureDashboardFetchAsync<T>(
@@ -6130,7 +6194,7 @@ public sealed partial class MainPage : Page
         SystemInfoBar.Message = apiKey is null
             ? "Monitoring remains available only while the backend does not require a key."
             : "The key is stored in Windows Credential Locker and is never displayed.";
-        await RefreshAsync();
+        await RefreshAsync(RefreshOrigin.Manual);
     }
 
     private void ShowCommandWarning(string message)
@@ -7374,7 +7438,7 @@ public sealed partial class MainPage : Page
                 validationPassed ? "positive" : "warning"),
             new(
                 "Refresh cadence",
-                "10 seconds",
+                "10s core · 60s evidence · 5m diagnostics",
                 AutoRefreshButton.IsChecked == true
                     ? "Automatic refresh is enabled"
                     : "Automatic refresh is paused",

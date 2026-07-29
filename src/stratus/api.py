@@ -16,7 +16,10 @@ from sqlalchemy import select
 from stratus.config import Settings, get_settings
 from stratus.db.models import HealthAudit
 from stratus.db.session import create_engine, create_session_factory, verify_runtime_engine
-from stratus.operator_api import EvidenceContinuityResponseCache
+from stratus.operator_api import (
+    AccuracyOverviewResponseCache,
+    EvidenceContinuityResponseCache,
+)
 from stratus.operator_api import router as operator_router
 from stratus.repositories.runtime_control import get_runtime_control
 from stratus.services.health import health_status_blocks_readiness
@@ -90,6 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.accuracy_overview_response_cache = AccuracyOverviewResponseCache()
     app.state.evidence_continuity_response_cache = EvidenceContinuityResponseCache()
     app.include_router(operator_router, dependencies=[Depends(require_operator_api_key)])
 

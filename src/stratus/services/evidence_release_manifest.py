@@ -49,7 +49,7 @@ from stratus.services.selection_policy import (
 
 EVIDENCE_RELEASE_MANIFEST_PROTOCOL = "evidence-release-manifest-v1"
 EVIDENCE_LANE_MANIFEST_PROTOCOL = "evidence-lane-manifest-v1"
-ALEMBIC_HEAD = "20260728_0045"
+ALEMBIC_HEAD = "20260730_0046"
 LANE_NAMES = (
     "execution_evidence",
     "official_resolution_truth",
@@ -335,6 +335,7 @@ _LANE_REPOSITORY_SOURCE_FILES: Mapping[str, tuple[str, ...]] = {
         "migrations/versions/20260715_0039_official_resolution_source_evidence.py",
         "migrations/versions/20260717_0042_station_reliability.py",
         "migrations/versions/20260719_0044_resolution_contract_integrity.py",
+        "migrations/versions/20260730_0046_accuracy_overview_indexes.py",
         "ops/postgres/stratus-pg_hba.conf",
         "pyproject.toml",
         "scripts/Start-StratusDevApi.ps1",

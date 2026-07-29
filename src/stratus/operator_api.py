@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.collectors.clob import ClobClient
@@ -115,6 +115,9 @@ from stratus.repositories.execution_cost_reporting import (
 )
 from stratus.repositories.forecast_provenance_reporting import (
     forecast_provenance_summary,
+)
+from stratus.repositories.model_probs import (
+    latest_active_market_probability_components,
 )
 from stratus.repositories.official_resolution import (
     AUTHORIZED_ARTIFACT_ACQUISITION,
@@ -1711,6 +1714,98 @@ class AccuracyOverviewResponse(BaseModel):
     nonlinear_challengers: NonlinearChallengerItem
     models: list[AccuracyModelItem]
     drift: list[AccuracyDriftItem]
+
+
+class AccuracyOverviewResponseCache:
+    """Per-app bounded cache with one in-flight dashboard computation."""
+
+    __slots__ = (
+        "_clock",
+        "_expires_at",
+        "_failure_backoff_seconds",
+        "_failure_expires_at",
+        "_inflight",
+        "_lock",
+        "_response",
+        "_ttl_seconds",
+    )
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float = 300.0,
+        failure_backoff_seconds: float = 5.0,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        if ttl_seconds <= 0:
+            raise ValueError("accuracy overview cache TTL must be positive")
+        if failure_backoff_seconds <= 0:
+            raise ValueError("accuracy overview cache failure backoff must be positive")
+        self._ttl_seconds = ttl_seconds
+        self._failure_backoff_seconds = failure_backoff_seconds
+        self._clock = clock
+        self._lock = asyncio.Lock()
+        self._response: AccuracyOverviewResponse | None = None
+        self._expires_at = 0.0
+        self._inflight: asyncio.Task[AccuracyOverviewResponse] | None = None
+        self._failure_expires_at = 0.0
+
+    async def get_or_create(
+        self,
+        factory: Callable[[], Awaitable[AccuracyOverviewResponse]],
+    ) -> AccuracyOverviewResponse:
+        cached = self._response
+        if cached is not None and self._clock() < self._expires_at:
+            return cached
+        async with self._lock:
+            cached = self._response
+            if cached is not None and self._clock() < self._expires_at:
+                return cached
+
+            task = self._inflight
+            if (
+                task is None
+                or (task.done() and self._clock() >= self._failure_expires_at)
+            ):
+                task = asyncio.create_task(self._populate(factory))
+                self._inflight = task
+
+        # The computation belongs to the application cache, not to any one
+        # HTTP request. Cancelling a disconnected follower must not cancel the
+        # shared SQL work for all remaining waiters.
+        return await asyncio.shield(task)
+
+    async def _populate(
+        self,
+        factory: Callable[[], Awaitable[AccuracyOverviewResponse]],
+    ) -> AccuracyOverviewResponse:
+        task = asyncio.current_task()
+        try:
+            response = await factory()
+        except Exception:
+            async with self._lock:
+                if self._inflight is task:
+                    self._failure_expires_at = (
+                        self._clock() + self._failure_backoff_seconds
+                    )
+            raise
+
+        async with self._lock:
+            if self._inflight is task:
+                self._response = response
+                self._expires_at = self._clock() + self._ttl_seconds
+                self._inflight = None
+                self._failure_expires_at = 0.0
+        return response
+
+    def invalidate(self) -> None:
+        self._response = None
+        self._expires_at = 0.0
+        task = self._inflight
+        self._inflight = None
+        self._failure_expires_at = 0.0
+        if task is not None and not task.done():
+            task.cancel()
 
 
 class SettlementCalibratorItem(BaseModel):
@@ -3712,25 +3807,7 @@ async def forecast_provenance(request: Request) -> ForecastProvenanceResponse:
     generated_at = datetime.now(UTC)
     async with _sessions(request)() as session:
         summary = await forecast_provenance_summary(session)
-        active_probability_components = (
-            (
-                await session.execute(
-                    select(ModelProb.components)
-                    .join(Market, ModelProb.market_id == Market.id)
-                    .join(Station, Market.station_id == Station.id)
-                    .where(
-                        Market.status == MarketStatus.ACTIVE,
-                        Market.station_verified.is_(True),
-                        Station.active.is_(True),
-                        Station.stage.in_((StationStage.PAPER, StationStage.APPROVED)),
-                    )
-                    .distinct(ModelProb.market_id)
-                    .order_by(ModelProb.market_id, ModelProb.ts.desc())
-                )
-            )
-            .scalars()
-            .all()
-        )
+        active_probability_components = await latest_active_market_probability_components(session)
     complete_active_probabilities = sum(
         model_input_provenance_is_complete(components)
         for components in active_probability_components
@@ -3998,8 +4075,73 @@ async def execution_cost_report_orders(
     )
 
 
-@router.get("/accuracy-overview", response_model=AccuracyOverviewResponse)
-async def accuracy_overview(request: Request) -> AccuracyOverviewResponse:
+_ACCURACY_OVERVIEW_LATEST_EXPERTS = (
+    "censored_gaussian",
+    "conformal_gaussian",
+    "trajectory_nowcast",
+    "hierarchical_emos",
+    "regime_emos",
+    "regularized_stack",
+    "qrf",
+    "analog",
+    "mixture",
+)
+_ACCURACY_OVERVIEW_TIMEOUT_SECONDS = 2.75
+
+
+async def _latest_accuracy_prediction_batches(
+    session: AsyncSession,
+) -> dict[str, list[AccuracyPrediction]]:
+    """Load every expert's latest eligible timestamp in one bounded query."""
+
+    latest_by_expert = (
+        select(
+            AccuracyPrediction.expert.label("expert"),
+            func.max(AccuracyPrediction.ts).label("latest_ts"),
+        )
+        .where(
+            AccuracyPrediction.expert.in_(_ACCURACY_OVERVIEW_LATEST_EXPERTS),
+            AccuracyPrediction.evidence_eligible.is_(True),
+        )
+        .group_by(AccuracyPrediction.expert)
+        .subquery()
+    )
+    rows = (
+        (
+            await session.execute(
+                select(AccuracyPrediction).join(
+                    latest_by_expert,
+                    and_(
+                        AccuracyPrediction.expert == latest_by_expert.c.expert,
+                        AccuracyPrediction.ts == latest_by_expert.c.latest_ts,
+                    ),
+                ).where(AccuracyPrediction.evidence_eligible.is_(True))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    batches: dict[str, list[AccuracyPrediction]] = {
+        expert: [] for expert in _ACCURACY_OVERVIEW_LATEST_EXPERTS
+    }
+    for row in rows:
+        batches[row.expert].append(row)
+    return batches
+
+
+def _accuracy_overview_response_cache(
+    request: Request,
+) -> AccuracyOverviewResponseCache:
+    cache = getattr(request.app.state, "accuracy_overview_response_cache", None)
+    if not isinstance(cache, AccuracyOverviewResponseCache):
+        cache = AccuracyOverviewResponseCache()
+        request.app.state.accuracy_overview_response_cache = cache
+    return cache
+
+
+async def _uncached_accuracy_overview_response(
+    request: Request,
+) -> AccuracyOverviewResponse:
     now = datetime.now(UTC)
     settings = _settings(request)
     pipeline_fingerprint = probability_pipeline_fingerprint(settings)
@@ -4063,20 +4205,29 @@ async def accuracy_overview(request: Request) -> AccuracyOverviewResponse:
             for item in promotion_manifest.promotions
         }
         active_promotion_experts = {item.key.expert for item in promotion_manifest.promotions}
-        contract_count = int(
-            await session.scalar(select(func.count()).select_from(ResolutionContract)) or 0
-        )
-        licensed_count = int(
-            await session.scalar(
-                select(func.count())
-                .select_from(ResolutionContract)
-                .where(ResolutionContract.storage_permitted.is_(True))
+        contract_count, licensed_count, actual_count, qualified = (
+            await session.execute(
+                select(
+                    select(func.count()).select_from(ResolutionContract).scalar_subquery(),
+                    select(func.count())
+                    .select_from(ResolutionContract)
+                    .where(ResolutionContract.storage_permitted.is_(True))
+                    .scalar_subquery(),
+                    select(func.count()).select_from(SettlementActual).scalar_subquery(),
+                    select(func.count())
+                    .select_from(ModelSkillReport)
+                    .where(
+                        ModelSkillReport.eligible.is_(True),
+                        ModelSkillReport.evaluated_at >= now - timedelta(days=2),
+                    )
+                    .scalar_subquery(),
+                )
             )
-            or 0
-        )
-        actual_count = int(
-            await session.scalar(select(func.count()).select_from(SettlementActual)) or 0
-        )
+        ).one()
+        contract_count = int(contract_count or 0)
+        licensed_count = int(licensed_count or 0)
+        actual_count = int(actual_count or 0)
+        qualified = int(qualified or 0)
         # Dashboard metrics are formal evidence, not a blend with legacy rows.
         # The database triggers make every joined component immutable; these
         # predicates mirror the predictive/provenance identity used by formal
@@ -4109,144 +4260,112 @@ async def accuracy_overview(request: Request) -> AccuracyOverviewResponse:
             )
             .subquery()
         )
-        evaluation_count = int(
-            await session.scalar(select(func.count()).select_from(attested_evaluations)) or 0
-        )
-        independent_count = int(
-            await session.scalar(
-                select(func.count(func.distinct(attested_evaluations.c.sample_key)))
+        (
+            evaluation_count,
+            independent_count,
+            mean_model_brier,
+            mean_market_brier,
+        ) = (
+            await session.execute(
+                select(
+                    func.count(),
+                    func.count(func.distinct(attested_evaluations.c.sample_key)),
+                    func.avg(attested_evaluations.c.model_brier),
+                    func.avg(attested_evaluations.c.market_brier),
+                ).select_from(attested_evaluations)
             )
-            or 0
-        )
-        mean_model_brier = await session.scalar(
-            select(func.avg(attested_evaluations.c.model_brier))
-        )
-        mean_market_brier = await session.scalar(
-            select(func.avg(attested_evaluations.c.market_brier)).where(
-                attested_evaluations.c.market_brier.is_not(None)
-            )
-        )
-        qualified = int(
-            await session.scalar(
-                select(func.count())
-                .select_from(ModelSkillReport)
-                .where(
-                    ModelSkillReport.eligible.is_(True),
-                    ModelSkillReport.evaluated_at >= now - timedelta(days=2),
+        ).one()
+        evaluation_count = int(evaluation_count or 0)
+        independent_count = int(independent_count or 0)
+        recent_60_day_reports = list(
+            (
+                await session.execute(
+                    select(ModelSkillReport).where(
+                        ModelSkillReport.window_days == 60,
+                        ModelSkillReport.evaluated_at >= now - timedelta(days=2)
+                    )
                 )
             )
-            or 0
+            .scalars()
+            .all()
         )
         settlement_calibrator = await session.scalar(
             select(SettlementProbabilityCalibrator).where(
                 SettlementProbabilityCalibrator.scope_key == "global:all:all"
             )
         )
+        latest_prediction_batches = await _latest_accuracy_prediction_batches(session)
         recent_censored_reports = [
             row
-            for row in (
-                (
-                    await session.execute(
-                        select(ModelSkillReport).where(
-                            ModelSkillReport.window_days == 60,
-                            ModelSkillReport.evaluated_at >= now - timedelta(days=2),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            for row in recent_60_day_reports
             if row.details.get("expert") == "censored_gaussian"
             and row.details.get("evidence_protocol") == "sealed-v2"
         ]
-        latest_censored_at = await session.scalar(
-            select(func.max(AccuracyPrediction.ts)).where(
-                AccuracyPrediction.expert == "censored_gaussian",
-                AccuracyPrediction.evidence_eligible.is_(True),
-            )
-        )
+        latest_censored_predictions = [
+            row for row in latest_prediction_batches["censored_gaussian"] if row.evidence_eligible
+        ]
         censored_coverage = (
-            (
-                await session.execute(
-                    select(
-                        func.count(),
-                        func.max(AccuracyPrediction.training_sample_n),
-                    ).where(
-                        AccuracyPrediction.expert == "censored_gaussian",
-                        AccuracyPrediction.ts == latest_censored_at,
-                        AccuracyPrediction.evidence_eligible.is_(True),
-                    )
-                )
-            ).one()
-            if latest_censored_at is not None
-            else (0, 0)
+            len(latest_censored_predictions),
+            max(
+                (row.training_sample_n for row in latest_censored_predictions),
+                default=0,
+            ),
         )
-        latest_censored_prediction = await session.scalar(
-            select(AccuracyPrediction)
-            .where(
-                AccuracyPrediction.expert == "censored_gaussian",
-                AccuracyPrediction.evidence_eligible.is_(True),
-            )
-            .order_by(AccuracyPrediction.ts.desc())
-            .limit(1)
+        latest_censored_prediction = max(
+            latest_censored_predictions,
+            key=lambda row: row.id,
+            default=None,
         )
         recent_weighted_reports = [
             row
-            for row in (
-                (
-                    await session.execute(
-                        select(ModelSkillReport).where(
-                            ModelSkillReport.window_days == 60,
-                            ModelSkillReport.evaluated_at >= now - timedelta(days=2),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            for row in recent_60_day_reports
             if row.details.get("expert") == "historical_weighted"
             and row.details.get("expert_version") == WEIGHTED_EXPERT_VERSION
             and row.details.get("evidence_protocol") == "sealed-v2"
         ]
         recent_weighted_shrunk_reports = [
             row
-            for row in (
-                (
-                    await session.execute(
-                        select(ModelSkillReport).where(
-                            ModelSkillReport.window_days == 60,
-                            ModelSkillReport.evaluated_at >= now - timedelta(days=2),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            for row in recent_60_day_reports
             if row.details.get("expert") == "historical_weighted_shrunk"
             and row.details.get("expert_version") == WEIGHTED_SHRUNK_EXPERT_VERSION
             and row.details.get("evidence_protocol") == "sealed-v2"
         ]
-        weighted_current_predictions = (
+        weighted_prediction_rows = (
             (
                 await session.execute(
                     select(AccuracyPrediction)
                     .join(Market, AccuracyPrediction.market_id == Market.id)
                     .where(
-                        AccuracyPrediction.expert == "historical_weighted",
-                        AccuracyPrediction.expert_version == WEIGHTED_EXPERT_VERSION,
+                        (
+                            (AccuracyPrediction.expert == "historical_weighted")
+                            & (AccuracyPrediction.expert_version == WEIGHTED_EXPERT_VERSION)
+                        )
+                        | (
+                            (AccuracyPrediction.expert == "historical_weighted_shrunk")
+                            & (AccuracyPrediction.expert_version == WEIGHTED_SHRUNK_EXPERT_VERSION)
+                        ),
                         AccuracyPrediction.evidence_eligible.is_(True),
                         Market.status == MarketStatus.ACTIVE,
                         Market.resolves_at > now,
                     )
-                    .distinct(AccuracyPrediction.market_id)
-                    .order_by(AccuracyPrediction.market_id, AccuracyPrediction.ts.desc())
+                    .distinct(
+                        AccuracyPrediction.expert,
+                        AccuracyPrediction.market_id,
+                    )
+                    .order_by(
+                        AccuracyPrediction.expert,
+                        AccuracyPrediction.market_id,
+                        AccuracyPrediction.ts.desc(),
+                    )
                 )
             )
             .scalars()
             .all()
         )
         weighted_current_predictions = [
-            row for row in weighted_current_predictions if accuracy_prediction_record_is_valid(row)
+            row
+            for row in weighted_prediction_rows
+            if row.expert == "historical_weighted" and accuracy_prediction_record_is_valid(row)
         ]
         latest_weighted_prediction = max(
             weighted_current_predictions,
@@ -4269,29 +4388,11 @@ async def accuracy_overview(request: Request) -> AccuracyOverviewResponse:
             if weighted_fingerprint is not None
             and row.details.get("experiment_fingerprint") == weighted_fingerprint
         ]
-        weighted_shrunk_current_predictions = (
-            (
-                await session.execute(
-                    select(AccuracyPrediction)
-                    .join(Market, AccuracyPrediction.market_id == Market.id)
-                    .where(
-                        AccuracyPrediction.expert == "historical_weighted_shrunk",
-                        AccuracyPrediction.expert_version == WEIGHTED_SHRUNK_EXPERT_VERSION,
-                        AccuracyPrediction.evidence_eligible.is_(True),
-                        Market.status == MarketStatus.ACTIVE,
-                        Market.resolves_at > now,
-                    )
-                    .distinct(AccuracyPrediction.market_id)
-                    .order_by(AccuracyPrediction.market_id, AccuracyPrediction.ts.desc())
-                )
-            )
-            .scalars()
-            .all()
-        )
         weighted_shrunk_current_predictions = [
             row
-            for row in weighted_shrunk_current_predictions
-            if accuracy_prediction_record_is_valid(row)
+            for row in weighted_prediction_rows
+            if row.expert == "historical_weighted_shrunk"
+            and accuracy_prediction_record_is_valid(row)
         ]
         latest_weighted_shrunk_prediction = max(
             weighted_shrunk_current_predictions,
@@ -4328,204 +4429,74 @@ async def accuracy_overview(request: Request) -> AccuracyOverviewResponse:
             )
             or 0
         )
-        stored_trajectories = int(
-            await session.scalar(select(func.count()).select_from(ForecastTrajectory)) or 0
-        )
-        latest_trajectory_at = await session.scalar(
-            select(func.max(ForecastTrajectory.available_at))
-        )
+        stored_trajectories, latest_trajectory_at = (
+            await session.execute(
+                select(
+                    func.count(ForecastTrajectory.id),
+                    func.max(ForecastTrajectory.available_at),
+                )
+            )
+        ).one()
+        stored_trajectories = int(stored_trajectories or 0)
         recent_trajectory_reports = [
             row
-            for row in (
-                (
-                    await session.execute(
-                        select(ModelSkillReport).where(
-                            ModelSkillReport.window_days == 60,
-                            ModelSkillReport.evaluated_at >= now - timedelta(days=2),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            for row in recent_60_day_reports
             if row.details.get("expert") == "trajectory_ar1"
             and row.details.get("evidence_protocol") == "sealed-v2"
         ]
         recent_conformal_reports = [
             row
-            for row in (
-                (
-                    await session.execute(
-                        select(ModelSkillReport).where(
-                            ModelSkillReport.window_days == 60,
-                            ModelSkillReport.evaluated_at >= now - timedelta(days=2),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            for row in recent_60_day_reports
             if row.details.get("expert") == "conformal_gaussian"
             and row.details.get("evidence_protocol") == "sealed-v2"
         ]
-        latest_conformal_prediction = await session.scalar(
-            select(AccuracyPrediction)
-            .where(
-                AccuracyPrediction.expert == "conformal_gaussian",
-                AccuracyPrediction.evidence_eligible.is_(True),
-            )
-            .order_by(AccuracyPrediction.ts.desc())
-            .limit(1)
+        latest_conformal_prediction = max(
+            (
+                row
+                for row in latest_prediction_batches["conformal_gaussian"]
+                if row.evidence_eligible
+            ),
+            key=lambda row: row.id,
+            default=None,
         )
         recent_nowcast_reports = [
             row
-            for row in (
-                (
-                    await session.execute(
-                        select(ModelSkillReport).where(
-                            ModelSkillReport.window_days == 60,
-                            ModelSkillReport.evaluated_at >= now - timedelta(days=2),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            for row in recent_60_day_reports
             if row.details.get("expert") == "trajectory_nowcast"
             and row.details.get("evidence_protocol") == "sealed-v2"
         ]
-        latest_nowcast_at = await session.scalar(
-            select(func.max(AccuracyPrediction.ts)).where(
-                AccuracyPrediction.expert == "trajectory_nowcast",
-                AccuracyPrediction.evidence_eligible.is_(True),
-            )
-        )
-        current_nowcast_count = (
-            int(
-                await session.scalar(
-                    select(func.count())
-                    .select_from(AccuracyPrediction)
-                    .where(
-                        AccuracyPrediction.expert == "trajectory_nowcast",
-                        AccuracyPrediction.ts == latest_nowcast_at,
-                        AccuracyPrediction.evidence_eligible.is_(True),
-                    )
-                )
-                or 0
-            )
-            if latest_nowcast_at is not None
-            else 0
-        )
-        latest_nowcast_prediction = await session.scalar(
-            select(AccuracyPrediction)
-            .where(
-                AccuracyPrediction.expert == "trajectory_nowcast",
-                AccuracyPrediction.evidence_eligible.is_(True),
-            )
-            .order_by(AccuracyPrediction.ts.desc())
-            .limit(1)
+        latest_nowcast_predictions = [
+            row for row in latest_prediction_batches["trajectory_nowcast"] if row.evidence_eligible
+        ]
+        current_nowcast_count = len(latest_nowcast_predictions)
+        latest_nowcast_prediction = max(
+            latest_nowcast_predictions,
+            key=lambda row: row.id,
+            default=None,
         )
         recent_hierarchical_reports = [
             row
-            for row in (
-                (
-                    await session.execute(
-                        select(ModelSkillReport).where(
-                            ModelSkillReport.window_days == 60,
-                            ModelSkillReport.evaluated_at >= now - timedelta(days=2),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            for row in recent_60_day_reports
             if row.details.get("expert") == "hierarchical_emos"
             and row.details.get("evidence_protocol") == "sealed-v2"
         ]
-        latest_hierarchical_at = await session.scalar(
-            select(func.max(AccuracyPrediction.ts)).where(
-                AccuracyPrediction.expert == "hierarchical_emos",
-                AccuracyPrediction.evidence_eligible.is_(True),
-            )
-        )
-        current_hierarchical_count = (
-            int(
-                await session.scalar(
-                    select(func.count())
-                    .select_from(AccuracyPrediction)
-                    .where(
-                        AccuracyPrediction.expert == "hierarchical_emos",
-                        AccuracyPrediction.ts == latest_hierarchical_at,
-                        AccuracyPrediction.evidence_eligible.is_(True),
-                    )
-                )
-                or 0
-            )
-            if latest_hierarchical_at is not None
-            else 0
-        )
-        latest_hierarchical_prediction = await session.scalar(
-            select(AccuracyPrediction)
-            .where(
-                AccuracyPrediction.expert == "hierarchical_emos",
-                AccuracyPrediction.evidence_eligible.is_(True),
-            )
-            .order_by(AccuracyPrediction.ts.desc())
-            .limit(1)
+        latest_hierarchical_predictions = [
+            row for row in latest_prediction_batches["hierarchical_emos"] if row.evidence_eligible
+        ]
+        current_hierarchical_count = len(latest_hierarchical_predictions)
+        latest_hierarchical_prediction = max(
+            latest_hierarchical_predictions,
+            key=lambda row: row.id,
+            default=None,
         )
         recent_regime_reports = [
             row
-            for row in (
-                (
-                    await session.execute(
-                        select(ModelSkillReport).where(
-                            ModelSkillReport.window_days == 60,
-                            ModelSkillReport.evaluated_at >= now - timedelta(days=2),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            for row in recent_60_day_reports
             if row.details.get("expert") == "regime_emos"
             and row.details.get("evidence_protocol") == "sealed-v2"
         ]
-        latest_regime_at = await session.scalar(
-            select(func.max(AccuracyPrediction.ts)).where(
-                AccuracyPrediction.expert == "regime_emos",
-                AccuracyPrediction.evidence_eligible.is_(True),
-            )
-        )
-        current_regime_count = (
-            int(
-                await session.scalar(
-                    select(func.count())
-                    .select_from(AccuracyPrediction)
-                    .where(
-                        AccuracyPrediction.expert == "regime_emos",
-                        AccuracyPrediction.ts == latest_regime_at,
-                        AccuracyPrediction.evidence_eligible.is_(True),
-                    )
-                )
-                or 0
-            )
-            if latest_regime_at is not None
-            else 0
-        )
-        latest_regime_predictions = (
-            (
-                await session.execute(
-                    select(AccuracyPrediction).where(
-                        AccuracyPrediction.expert == "regime_emos",
-                        AccuracyPrediction.ts == latest_regime_at,
-                    )
-                )
-            )
-            .scalars()
-            .all()
-            if latest_regime_at is not None
-            else []
-        )
+        latest_regime_predictions = latest_prediction_batches["regime_emos"]
+        current_regime_count = sum(row.evidence_eligible for row in latest_regime_predictions)
         latest_regime_prediction = max(
             latest_regime_predictions,
             key=lambda row: abs(
@@ -4535,60 +4506,22 @@ async def accuracy_overview(request: Request) -> AccuracyOverviewResponse:
         )
         recent_stack_reports = [
             row
-            for row in (
-                (
-                    await session.execute(
-                        select(ModelSkillReport).where(
-                            ModelSkillReport.window_days == 60,
-                            ModelSkillReport.evaluated_at >= now - timedelta(days=2),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            for row in recent_60_day_reports
             if row.details.get("expert") == "regularized_stack"
             and row.details.get("evidence_protocol") == "sealed-v2"
         ]
         active_stack_experts = sum(
             item.key.expert == "regularized_stack" for item in promotion_manifest.promotions
         )
-        latest_stack_at = await session.scalar(
-            select(func.max(AccuracyPrediction.ts)).where(
-                AccuracyPrediction.expert == "regularized_stack",
-                AccuracyPrediction.evidence_eligible.is_(True),
-            )
-        )
+        latest_stack_predictions = [
+            row for row in latest_prediction_batches["regularized_stack"] if row.evidence_eligible
+        ]
         stack_coverage = (
-            (
-                await session.execute(
-                    select(
-                        func.count(),
-                        func.max(AccuracyPrediction.training_sample_n),
-                    ).where(
-                        AccuracyPrediction.expert == "regularized_stack",
-                        AccuracyPrediction.ts == latest_stack_at,
-                        AccuracyPrediction.evidence_eligible.is_(True),
-                    )
-                )
-            ).one()
-            if latest_stack_at is not None
-            else (0, 0)
-        )
-        latest_stack_predictions = (
-            (
-                await session.execute(
-                    select(AccuracyPrediction).where(
-                        AccuracyPrediction.expert == "regularized_stack",
-                        AccuracyPrediction.ts == latest_stack_at,
-                        AccuracyPrediction.evidence_eligible.is_(True),
-                    )
-                )
-            )
-            .scalars()
-            .all()
-            if latest_stack_at is not None
-            else []
+            len(latest_stack_predictions),
+            max(
+                (row.training_sample_n for row in latest_stack_predictions),
+                default=0,
+            ),
         )
         representative_stack_prediction = max(
             latest_stack_predictions,
@@ -4598,46 +4531,34 @@ async def accuracy_overview(request: Request) -> AccuracyOverviewResponse:
         nonlinear_expert_names = ("qrf", "analog", "mixture")
         recent_nonlinear_reports = [
             row
-            for row in (
-                (
-                    await session.execute(
-                        select(ModelSkillReport).where(
-                            ModelSkillReport.window_days == 60,
-                            ModelSkillReport.evaluated_at >= now - timedelta(days=2),
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
+            for row in recent_60_day_reports
             if row.details.get("expert") in nonlinear_expert_names
             and row.details.get("evidence_protocol") == "sealed-v2"
         ]
-        latest_nonlinear_at = await session.scalar(
-            select(func.max(AccuracyPrediction.ts)).where(
-                AccuracyPrediction.expert.in_(nonlinear_expert_names),
-                AccuracyPrediction.evidence_eligible.is_(True),
-            )
-        )
-        nonlinear_coverage_rows = (
+        latest_nonlinear_at = max(
             (
-                await session.execute(
-                    select(
-                        AccuracyPrediction.expert,
-                        func.count(),
-                        func.max(AccuracyPrediction.training_sample_n),
-                    )
-                    .where(
-                        AccuracyPrediction.expert.in_(nonlinear_expert_names),
-                        AccuracyPrediction.ts == latest_nonlinear_at,
-                        AccuracyPrediction.evidence_eligible.is_(True),
-                    )
-                    .group_by(AccuracyPrediction.expert)
-                )
-            ).all()
-            if latest_nonlinear_at is not None
-            else []
+                row.ts
+                for expert in nonlinear_expert_names
+                for row in latest_prediction_batches[expert]
+                if row.evidence_eligible
+            ),
+            default=None,
         )
+        nonlinear_coverage_rows = [
+            (
+                expert,
+                len(rows),
+                max((row.training_sample_n for row in rows), default=0),
+            )
+            for expert in nonlinear_expert_names
+            if (
+                rows := [
+                    row
+                    for row in latest_prediction_batches[expert]
+                    if row.evidence_eligible and row.ts == latest_nonlinear_at
+                ]
+            )
+        ]
         nonlinear_coverage = {
             expert: (int(count), int(training_sample_n or 0))
             for expert, count, training_sample_n in nonlinear_coverage_rows
@@ -4653,26 +4574,16 @@ async def accuracy_overview(request: Request) -> AccuracyOverviewResponse:
             .scalars()
             .all()
         )
-        drift_rows = (
-            (
-                await session.execute(
-                    select(ModelDriftEvent)
-                    .where(ModelDriftEvent.detected_at >= now - timedelta(days=7))
-                    .order_by(ModelDriftEvent.detected_at.desc())
-                    .limit(50)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        recent_drift_count = int(
-            await session.scalar(
-                select(func.count())
-                .select_from(ModelDriftEvent)
+        drift_page = (
+            await session.execute(
+                select(ModelDriftEvent, func.count().over())
                 .where(ModelDriftEvent.detected_at >= now - timedelta(days=7))
+                .order_by(ModelDriftEvent.detected_at.desc())
+                .limit(50)
             )
-            or 0
-        )
+        ).all()
+        drift_rows = [row for row, _count in drift_page]
+        recent_drift_count = int(drift_page[0][1]) if drift_page else 0
         active_regime_candidates = (
             (
                 await session.execute(
@@ -5335,6 +5246,23 @@ async def accuracy_overview(request: Request) -> AccuracyOverviewResponse:
             for row in drift_rows
         ],
     )
+
+
+@router.get("/accuracy-overview", response_model=AccuracyOverviewResponse)
+async def accuracy_overview(request: Request) -> AccuracyOverviewResponse:
+    cache = _accuracy_overview_response_cache(request)
+
+    async def bounded_factory() -> AccuracyOverviewResponse:
+        try:
+            async with asyncio.timeout(_ACCURACY_OVERVIEW_TIMEOUT_SECONDS):
+                return await _uncached_accuracy_overview_response(request)
+        except TimeoutError as error:
+            raise HTTPException(
+                status_code=503,
+                detail="accuracy overview exceeded its query-time budget",
+            ) from error
+
+    return await cache.get_or_create(bounded_factory)
 
 
 async def _position_stats(

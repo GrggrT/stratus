@@ -76,7 +76,7 @@ edge is positive. `P6 blocked` and `P7 blocked` are intentional fail-closed stat
 | Now | Freeze, build, and stage the exact candidate while both venue kill switches remain engaged | verified source + restore | clean commit, green CI, immutable image digest, staged identity |
 | Next | Replace heartbeat-only detection with durable execution-obligation SLO metrics and alerts | P0 code | oldest-due/finalizable/late-pickup metrics, tests, operator surface |
 | Completed | Prove the current backup by isolated restore and retain a hash-bound release artifact | P0 candidate | marker-bound archive, independent hashes, PostgreSQL 16.13 full restore, ACL/runtime and ledger reconciliation |
-| Next | Bound Cockpit/API refresh cost and cancel superseded refreshes | P0 candidate API | endpoint query budgets, no idle transactions, coalesced refresh, production-size load test |
+| Runtime acceptance | Bound Cockpit/API refresh cost and cancel superseded refreshes — implementation complete, acceptance pending | P0 candidate API | tiered/coalesced refresh, bounded indexed queries, database timeouts, and a passing production-size load test on a new exact candidate |
 | Next | Automate disaster-recovery role/database-ACL bootstrap | verified restore drill | marker-bound restore command, role provenance, PUBLIC TEMP revoke, restricted-login assertion |
 | Next | Partition/retain the dominant evidence tables without rewriting accepted evidence | P1 capacity review | size/age report, legal/evidence retention decision, reversible partition/archival drill |
 | Next | Freeze the 20-city resolution contract registry before expanding traded stations | P1 | per-city source, station, timezone, day window, unit, rounding, artifact policy |
@@ -119,6 +119,17 @@ The predecessor API also produced repeated expensive Cockpit refresh queries and
 `idle in transaction` sessions: production PostgreSQL fell from roughly 150–160% CPU to
 approximately 0% when that API alone was stopped. It will not be restarted. Candidate staging
 must include bounded endpoint/load verification before PAPER resume.
+
+The Cockpit/API bounding work is implemented in source: core reads remain on the 10-second tier,
+evidence/execution reads move to 60 seconds, diagnostics move to 5 minutes, superseded refreshes
+are cancelled/coalesced, database statements and transaction lifetimes are bounded, and the
+accuracy overview has purpose-built indexes under source head `20260730_0046`. That migration is
+index-only and follows the still-current pre-cutover production head `20260728_0045`.
+
+Runtime acceptance remains pending. The first staged gate on revision `09945edfd492` failed with
+13 observed `idle in transaction` sessions and peak PostgreSQL CPU of `308.43%`; the candidate was
+stopped and not accepted. The implemented remediation must pass a new exact-candidate load gate
+after the controlled `0045 -> 0046` migration before epoch activation or PAPER resume.
 
 ## Definition of quality
 

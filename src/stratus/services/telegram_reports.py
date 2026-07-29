@@ -18,7 +18,6 @@ from stratus.db.models import (
     HealthAudit,
     JobRun,
     Market,
-    MarketStatus,
     ModelProb,
     Position,
     PositionStatus,
@@ -32,6 +31,9 @@ from stratus.repositories.evidence_continuity import (
     current_probability_pipeline_release_epoch,
 )
 from stratus.repositories.job_runs import collector_uptime
+from stratus.repositories.model_probs import (
+    latest_active_market_probability_components,
+)
 from stratus.repositories.runtime_control import get_runtime_control
 from stratus.repositories.validation_ledger import load_prospective_validation_dataset
 from stratus.services.forecast_provenance import model_input_provenance_is_complete
@@ -431,20 +433,8 @@ async def calculate_live_gate(
     roi = pnl / initial_bankroll_usd
 
     active_probability_components = (
-        await session.execute(
-            select(ModelProb.components)
-            .join(Market, ModelProb.market_id == Market.id)
-            .join(Station, Market.station_id == Station.id)
-            .where(
-                Market.status == MarketStatus.ACTIVE,
-                Market.station_verified.is_(True),
-                Station.active.is_(True),
-                Station.stage.in_((StationStage.PAPER, StationStage.APPROVED)),
-            )
-            .distinct(ModelProb.market_id)
-            .order_by(ModelProb.market_id, ModelProb.ts.desc())
-        )
-    ).scalars().all()
+        await latest_active_market_probability_components(session)
+    )
     complete_forecast_provenance = sum(
         model_input_provenance_is_complete(components)
         and probability_pipeline_version(components) == current_pipeline

@@ -8,9 +8,11 @@ import os
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.api import create_app
@@ -331,12 +333,36 @@ async def test_accuracy_overview_excludes_legacy_unattested_evaluations(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        response = await client.get("/api/v1/accuracy-overview")
+    engine = db_sessions.kw["bind"]
+    statement_count = 0
+
+    def count_statement(
+        _connection: Any,
+        _cursor: Any,
+        _statement: str,
+        _parameters: Any,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        nonlocal statement_count
+        statement_count += 1
+
+    event.listen(engine.sync_engine, "before_cursor_execute", count_statement)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/api/v1/accuracy-overview")
+            cold_statement_count = statement_count
+            cached_response = await client.get("/api/v1/accuracy-overview")
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", count_statement)
 
     assert response.status_code == 200
+    assert cached_response.status_code == 200
+    assert cached_response.json() == response.json()
+    assert statement_count == cold_statement_count
+    assert cold_statement_count == 16
     payload = response.json()
     assert payload["benchmark_protocol"] == "clob-dual-v1"
     assert payload["sample_scope"] == "prospective"

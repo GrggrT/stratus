@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.Http.Json;
 using System.Text.Json.Serialization;
 using StratusConsole.Models;
@@ -6,11 +7,26 @@ namespace StratusConsole.Services;
 
 public sealed class StratusApiClient : IDisposable
 {
+    internal const int MaxConcurrentRequestsPerServer = 4;
+    internal const int MaxConcurrentReadRequestsPerServer = 3;
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ServerReadRequestGates =
+        new(StringComparer.OrdinalIgnoreCase);
+
     private readonly HttpClient _httpClient;
+    private readonly SemaphoreSlim _serverReadRequestGate;
 
     public StratusApiClient(Uri baseAddress, string? apiKey = null)
     {
-        _httpClient = new HttpClient
+        string serverKey = baseAddress.GetLeftPart(UriPartial.Authority);
+        _serverReadRequestGate = ServerReadRequestGates.GetOrAdd(
+            serverKey,
+            _ => new SemaphoreSlim(
+                MaxConcurrentReadRequestsPerServer,
+                MaxConcurrentReadRequestsPerServer));
+        _httpClient = new HttpClient(new SocketsHttpHandler
+        {
+            MaxConnectionsPerServer = MaxConcurrentRequestsPerServer,
+        })
         {
             BaseAddress = baseAddress,
             Timeout = TimeSpan.FromSeconds(3),
@@ -346,7 +362,9 @@ public sealed class StratusApiClient : IDisposable
 
     private async Task<T> GetRequiredAsync<T>(string path, CancellationToken cancellationToken)
     {
-        using HttpResponseMessage response = await _httpClient.GetAsync(path, cancellationToken);
+        using HttpResponseMessage response = await SendReadAsync(
+            token => _httpClient.GetAsync(path, token),
+            cancellationToken);
         response.EnsureSuccessStatusCode();
         T? payload = await response.Content.ReadFromJsonAsync<T>(cancellationToken);
         return payload ?? throw new InvalidDataException($"/{path} returned an invalid response.");
@@ -357,7 +375,9 @@ public sealed class StratusApiClient : IDisposable
         bool allowServiceUnavailable,
         CancellationToken cancellationToken)
     {
-        using HttpResponseMessage response = await _httpClient.GetAsync(path, cancellationToken);
+        using HttpResponseMessage response = await SendReadAsync(
+            token => _httpClient.GetAsync(path, token),
+            cancellationToken);
         bool acceptedStatus = response.IsSuccessStatusCode
             || (allowServiceUnavailable && response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable);
         if (!acceptedStatus)
@@ -372,6 +392,24 @@ public sealed class StratusApiClient : IDisposable
         }
 
         return payload;
+    }
+
+    private async Task<HttpResponseMessage> SendReadAsync(
+        Func<CancellationToken, Task<HttpResponseMessage>> send,
+        CancellationToken cancellationToken)
+    {
+        // Keep one of the four transport slots available for authenticated
+        // mutations such as emergency Stop. Queued reads wait outside HttpClient,
+        // so they do not consume the three-second network timeout.
+        await _serverReadRequestGate.WaitAsync(cancellationToken);
+        try
+        {
+            return await send(cancellationToken);
+        }
+        finally
+        {
+            _serverReadRequestGate.Release();
+        }
     }
 
     public void Dispose() => _httpClient.Dispose();

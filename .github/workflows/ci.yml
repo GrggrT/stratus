@@ -44,6 +44,10 @@ jobs:
       - name: Type check
         run: uv run mypy src/stratus
 
+      - name: Validate read-only Dashboard load gate
+        shell: pwsh
+        run: ./scripts/tests/Test-StratusDashboardLoadGate.ps1
+
       - name: Test (unit + Postgres integration)
         env:
           STRATUS_TEST_DATABASE_URL: postgresql+asyncpg://stratus:stratus@localhost:5432/stratus_test

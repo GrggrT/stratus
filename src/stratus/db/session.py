@@ -48,6 +48,23 @@ def _assert_runtime_connection(
         cursor.close()
 
 
+def _runtime_server_settings(settings: Settings) -> dict[str, str]:
+    """Return fail-closed limits installed on every runtime DB connection.
+
+    These are asyncpg ``server_settings``, not database- or role-level ALTERs.
+    Consequently Alembic owner connections, pg_dump, and restore tooling retain
+    the unrestricted budgets required for maintenance work.
+    """
+    return {
+        "application_name": settings.stratus_database_application_name,
+        "statement_timeout": f"{settings.stratus_database_statement_timeout_ms}ms",
+        "lock_timeout": f"{settings.stratus_database_lock_timeout_ms}ms",
+        "idle_in_transaction_session_timeout": (
+            f"{settings.stratus_database_idle_transaction_timeout_ms}ms"
+        ),
+    }
+
+
 def create_engine(settings: Settings) -> AsyncEngine:
     database_url = settings.resolved_database_url()
     parsed_url = make_url(database_url)
@@ -58,7 +75,14 @@ def create_engine(settings: Settings) -> AsyncEngine:
         raise RuntimeDatabaseBoundaryError(
             "runtime entrypoints require the database-scoped stratus_app role"
         )
-    engine = create_async_engine(database_url, pool_pre_ping=True)
+    engine = create_async_engine(
+        database_url,
+        pool_pre_ping=True,
+        pool_size=settings.stratus_database_pool_size,
+        max_overflow=settings.stratus_database_max_overflow,
+        pool_timeout=settings.stratus_database_pool_timeout_seconds,
+        connect_args={"server_settings": _runtime_server_settings(settings)},
+    )
     event.listen(engine.sync_engine, "connect", _assert_runtime_connection)
     return engine
 
