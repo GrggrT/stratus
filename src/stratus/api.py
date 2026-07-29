@@ -15,9 +15,11 @@ from sqlalchemy import select
 
 from stratus.config import Settings, get_settings
 from stratus.db.models import HealthAudit
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import create_engine, create_session_factory, verify_runtime_engine
+from stratus.operator_api import EvidenceContinuityResponseCache
 from stratus.operator_api import router as operator_router
 from stratus.repositories.runtime_control import get_runtime_control
+from stratus.services.health import health_status_blocks_readiness
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +44,9 @@ def evaluate_readiness(
     else:
         if now - audit_time > timedelta(minutes=20):
             reasons.append("health_audit_stale")
-        if audit_status == "critical":
-            reasons.append("health_audit_critical")
+        normalized_status = audit_status.strip().lower()
+        if health_status_blocks_readiness(normalized_status):
+            reasons.append(f"health_audit_{normalized_status}")
     if kill_switch:
         reasons.append("kill_switch")
     if halted_reason:
@@ -72,8 +75,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_engine(settings)
-        app.state.sessions = create_session_factory(engine)
         try:
+            await verify_runtime_engine(engine)
+            app.state.sessions = create_session_factory(engine)
             yield
         finally:
             await engine.dispose()
@@ -86,6 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.evidence_continuity_response_cache = EvidenceContinuityResponseCache()
     app.include_router(operator_router, dependencies=[Depends(require_operator_api_key)])
 
     @app.get("/healthz")

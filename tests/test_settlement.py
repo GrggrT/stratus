@@ -21,12 +21,12 @@ def test_position_pnl_for_winner_and_loser() -> None:
 
 def test_closing_line_value_uses_the_traded_side() -> None:
     assert closing_line_value(
-        side=TradeSide.BUY_YES,
-        yes_midpoint=Decimal("0.65"),
+        traded_side_midpoint=Decimal("0.65"),
         entry_price=Decimal("0.60"),
     ) == Decimal("0.050000")
+    # This is an actual NO midpoint. A synthetic complement of a hypothetical
+    # YES midpoint is deliberately not part of the CLV interface.
     assert closing_line_value(
-        side=TradeSide.BUY_NO,
-        yes_midpoint=Decimal("0.35"),
-        entry_price=Decimal("0.60"),
+        traded_side_midpoint=Decimal("0.57"),
+        entry_price=Decimal("0.52"),
     ) == Decimal("0.050000")

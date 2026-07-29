@@ -10,10 +10,14 @@ from stratus.db.models import SignalConfidence, TradeSide
 @dataclass(frozen=True, slots=True)
 class SignalInputs:
     model_probability: float
-    best_bid: float
-    best_ask: float
-    bid_depth_usd: float
-    ask_depth_usd: float
+    yes_best_bid: float
+    yes_best_ask: float
+    yes_bid_depth_usd: float
+    yes_ask_depth_usd: float
+    no_best_bid: float
+    no_best_ask: float
+    no_bid_depth_usd: float
+    no_ask_depth_usd: float
     horizon_h: float
     market_created_at: datetime
     price_ts: datetime
@@ -34,6 +38,13 @@ class SignalPolicy:
     hardcoded; defaults match the validation-stage (anti-luck) configuration."""
 
     min_edge: float = 0.05
+    # Adverse-selection ceiling. The largest model-vs-market disagreements were
+    # systematically WRONG and unprofitable in paper: model-minus-market Brier
+    # widens and realised outcomes go against the trade exactly where the edge
+    # is biggest (docs/FORECAST_REVIEW_2026-07-21.md, experiment E3). This is the
+    # active counterpart of the shadow edge-cap-Xc family. Reject signals whose
+    # edge exceeds this ceiling. 1.0 disables it (no binary edge can exceed 1).
+    max_edge: float = 0.20
     max_spread: float = 0.04
     # Edge must clear execution costs with margin: half the spread plus this
     # buffer (fees are already inside the effective-price edge).
@@ -97,27 +108,30 @@ def full_kelly_fraction(true_probability: float, entry_price: float) -> float:
 def evaluate_signal(
     inputs: SignalInputs, now: datetime, policy: SignalPolicy = DEFAULT_POLICY
 ) -> SignalDecision:
-    effective_yes = inputs.best_ask + inputs.fee_rate * inputs.best_ask * (
-        1 - inputs.best_ask
+    effective_yes = inputs.yes_best_ask + inputs.fee_rate * inputs.yes_best_ask * (
+        1 - inputs.yes_best_ask
     )
-    no_price = 1 - inputs.best_bid
-    effective_no = no_price + inputs.fee_rate * no_price * (1 - no_price)
+    effective_no = inputs.no_best_ask + inputs.fee_rate * inputs.no_best_ask * (
+        1 - inputs.no_best_ask
+    )
     edge_yes = inputs.model_probability - effective_yes
     edge_no = 1 - inputs.model_probability - effective_no
     if edge_yes >= edge_no:
         side = TradeSide.BUY_YES
-        entry_price = inputs.best_ask
+        entry_price = inputs.yes_best_ask
         true_probability = inputs.model_probability
         effective_price = effective_yes
         edge = edge_yes
-        depth = inputs.ask_depth_usd
+        depth = inputs.yes_ask_depth_usd
+        spread = inputs.yes_best_ask - inputs.yes_best_bid
     else:
         side = TradeSide.BUY_NO
-        entry_price = no_price
+        entry_price = inputs.no_best_ask
         true_probability = 1 - inputs.model_probability
         effective_price = effective_no
         edge = edge_no
-        depth = inputs.bid_depth_usd
+        depth = inputs.no_ask_depth_usd
+        spread = inputs.no_best_ask - inputs.no_best_bid
 
     selected_agreement = (
         inputs.ensemble_yes_agreement
@@ -145,7 +159,6 @@ def evaluate_signal(
             size_usd = max_win_usd / win_per_usd
             kelly_fraction = size_usd / inputs.bankroll_usd
 
-    spread = inputs.best_ask - inputs.best_bid
     half_spread = spread / 2
     calibrated = inputs.calibration_samples >= policy.min_calibration_samples
     # Tail entries are the most calibration-sensitive; they need a deeper
@@ -154,6 +167,11 @@ def evaluate_signal(
     reasons = []
     if edge < policy.min_edge:
         reasons.append("edge_below_min")
+    # An edge larger than the ceiling is a red flag, not an opportunity: it means
+    # the model disagrees with the market by more than has ever paid off, and
+    # those trades were adversely selected (E3). Suppress rather than upsize.
+    if edge > policy.max_edge:
+        reasons.append("edge_above_max")
     if edge < half_spread + policy.edge_cost_buffer:
         reasons.append("edge_below_costs")
     if spread > policy.max_spread:

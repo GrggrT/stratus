@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -22,12 +23,18 @@ from stratus.parsers.market_rules import (
     parse_outcome_tokens,
     station_verification_reason,
 )
+from stratus.repositories.accuracy import upsert_resolution_contract
 from stratus.repositories.markets import (
     DiscoveredMarket,
     latest_station_before,
     upsert_market,
 )
 from stratus.repositories.telegram import enqueue_notification
+from stratus.services.resolution_contracts import (
+    ParsedResolutionContract,
+    ResolutionContractError,
+    parse_resolution_contract,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +46,30 @@ def _parse_timestamp(value: Any, field: str) -> datetime:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise MarketRulesError(f"market has invalid {field}: {value}") from exc
+
+
+def _validate_resolution_contract_date(
+    contract: ParsedResolutionContract, market_date: date
+) -> None:
+    if contract.resolution_date != market_date:
+        raise ResolutionContractError(
+            "resolution rules date does not match the market date: "
+            f"rules={contract.resolution_date.isoformat()} "
+            f"market={market_date.isoformat()}"
+        )
+
+
+async def _upsert_resolution_contract_for_market(
+    session: AsyncSession,
+    contract: ParsedResolutionContract,
+    market_date: date,
+) -> None:
+    _validate_resolution_contract_date(contract, market_date)
+    await upsert_resolution_contract(
+        session,
+        contract,
+        expected_market_date=market_date,
+    )
 
 
 async def discover_markets(
@@ -74,9 +105,7 @@ async def discover_markets(
                 event_resolution_source = event.get("resolutionSource")
                 candidates = extract_station_candidates(rules_raw, event_resolution_source)
                 station = (
-                    stations_by_icao.get(next(iter(candidates)))
-                    if len(candidates) == 1
-                    else None
+                    stations_by_icao.get(next(iter(candidates))) if len(candidates) == 1 else None
                 )
                 previous = await latest_station_before(session, identity.city, identity.market_date)
                 verification_reason = station_verification_reason(
@@ -88,6 +117,27 @@ async def discover_markets(
                     previous_icao=previous.icao if previous else None,
                 )
                 verified = verification_reason is None
+                contract = None
+                if verified and station is not None:
+                    try:
+                        contract = parse_resolution_contract(
+                            event_id=str(event["id"]),
+                            rules_raw=rules_raw,
+                            resolution_source=event_resolution_source,
+                            station_code=station.icao,
+                            local_timezone=station.tz,
+                            statistic=identity.kind,
+                        )
+                    except (KeyError, ResolutionContractError) as exc:
+                        contract = None
+                        verified = False
+                        verification_reason = "resolution_contract_invalid"
+                        logger.warning(
+                            "resolution contract blocked event=%s city=%s error=%s",
+                            event.get("id"),
+                            identity.city,
+                            exc,
+                        )
                 if not verified:
                     blocked += len(event.get("markets") or [])
                     logger.warning(
@@ -102,11 +152,10 @@ async def discover_markets(
 
                 markets = event.get("markets")
                 if not isinstance(markets, list):
-                    logger.warning(
-                        "event %s has no markets array; skipped", event.get("id")
-                    )
+                    logger.warning("event %s has no markets array; skipped", event.get("id"))
                     unparseable += 1
                     continue
+                contract_persisted = False
                 for raw_market in markets:
                     # One malformed market must not abort the whole discovery
                     # run: fail closed for this market only and keep going.
@@ -116,7 +165,12 @@ async def discover_markets(
                                 f"event {event.get('id')} contains an invalid market"
                             )
                         bucket = parse_bucket_boundaries(
-                            str(raw_market.get("groupItemTitle") or "")
+                            str(raw_market.get("groupItemTitle") or ""),
+                            source_increment=(
+                                Decimal(1).scaleb(-contract.decimal_places)
+                                if contract is not None
+                                else Decimal(1)
+                            ),
                         )
                         tokens = parse_outcome_tokens(raw_market)
                         fees = parse_fee_schedule(raw_market)
@@ -131,6 +185,30 @@ async def discover_markets(
                             exc,
                         )
                         continue
+                    # Do not create an active contract until the event has at
+                    # least one parse-valid market that is about to be written.
+                    # The surrounding discovery transaction then commits the
+                    # contract and market atomically; missing/empty/all-invalid
+                    # market arrays cannot leave an orphan contract behind.
+                    if contract is not None and not contract_persisted:
+                        try:
+                            await _upsert_resolution_contract_for_market(
+                                session,
+                                contract,
+                                identity.market_date,
+                            )
+                        except ResolutionContractError as exc:
+                            contract = None
+                            verified = False
+                            verification_reason = "resolution_contract_invalid"
+                            logger.warning(
+                                "resolution contract blocked event=%s city=%s error=%s",
+                                event.get("id"),
+                                identity.city,
+                                exc,
+                            )
+                        else:
+                            contract_persisted = True
                     market_resolution_source = raw_market.get("resolutionSource")
                     # A market-level source disagreement is always blocking.
                     market_candidates = extract_station_candidates(
@@ -170,9 +248,7 @@ async def discover_markets(
                     market, revoked = await upsert_market(session, value)
                     if revoked:
                         await session.flush()
-                        rules_digest = hashlib.sha256(
-                            value.rules_raw.encode()
-                        ).hexdigest()[:12]
+                        rules_digest = hashlib.sha256(value.rules_raw.encode()).hexdigest()[:12]
                         await enqueue_notification(
                             session,
                             f"verify-revoked:{market.id}:{rules_digest}",

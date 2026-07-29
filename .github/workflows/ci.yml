@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
         env:
           POSTGRES_DB: stratus_test
           POSTGRES_USER: stratus
@@ -23,6 +23,11 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.14"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -44,5 +49,24 @@ jobs:
           STRATUS_TEST_DATABASE_URL: postgresql+asyncpg://stratus:stratus@localhost:5432/stratus_test
         run: uv run pytest -q
 
+      - name: Validate Compose
+        env:
+          POSTGRES_PASSWORD: ci-only-owner-password-000000000000
+          STRATUS_RUNTIME_PASSWORD_FILE: ${{ runner.temp }}/stratus_runtime_password
+        run: |
+          umask 077
+          printf '%s\n' 'ci-only-runtime-password-00000000' \
+            > "$STRATUS_RUNTIME_PASSWORD_FILE"
+          docker compose config --quiet
+
       - name: Docker build
-        run: docker build -t stratus:ci .
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            -t stratus:ci .
+          test "$(docker image inspect stratus:ci --format '{{.Os}}/{{.Architecture}}')" \
+            = "linux/amd64"
+          test "$(docker image inspect stratus:ci \
+            --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" \
+            = "${GITHUB_SHA}"

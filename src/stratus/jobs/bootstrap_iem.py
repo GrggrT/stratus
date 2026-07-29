@@ -13,8 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from stratus.collectors.iem import IemClient, IemStation, year_chunks
 from stratus.config import Settings, get_settings
 from stratus.db.models import Observation, Station, WeatherKind
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import create_engine, create_session_factory, verify_runtime_engine
 from stratus.repositories.daily_actuals import DailyActualValue, upsert_daily_actuals
+from stratus.repositories.evidence_continuity import (
+    current_probability_pipeline_release_epoch,
+)
 from stratus.repositories.observations import upsert_observations
 from stratus.services.daily_actuals import (
     IncompleteObservationDayError,
@@ -98,6 +101,7 @@ async def _backfill_daily_actuals(
 async def bootstrap_iem(settings: Settings | None = None) -> tuple[int, int]:
     settings = settings or get_settings()
     engine = create_engine(settings)
+    await verify_runtime_engine(engine)
     session_factory = create_session_factory(engine)
     end = datetime.now(UTC).date()
     start = _subtract_years(end, settings.iem_bootstrap_years)
@@ -106,6 +110,12 @@ async def bootstrap_iem(settings: Settings | None = None) -> tuple[int, int]:
     download_end = end + timedelta(days=1)
     try:
         async with session_factory() as session:
+            active_release = await current_probability_pipeline_release_epoch(session)
+            if active_release is not None:
+                raise RuntimeError(
+                    "legacy IEM bootstrap is disabled after release activation; "
+                    "use stratus-recover-observations for bounded prospective recovery"
+                )
             stations = (
                 await session.execute(select(Station).where(Station.active.is_(True)))
             ).scalars().all()

@@ -105,6 +105,115 @@ async def test_paper_settlement_writes_a_bankroll_row(
     assert position.pnl_usd == Decimal("20.0000")
 
 
+async def test_two_events_with_same_settlement_time_append_cumulative_bankroll(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    async with db_sessions.begin() as session:
+        station = Station(
+            icao="KLGA",
+            name="LaGuardia",
+            city="New York City",
+            lat=Decimal("40.77"),
+            lon=Decimal("-73.87"),
+            tz="America/New_York",
+        )
+        session.add(station)
+        await session.flush()
+        market_ids: list[int] = []
+        for index in range(2):
+            market = Market(
+                polymarket_id=f"pm-same-cycle-{index}",
+                event_id=f"event-same-cycle-{index}",
+                station_id=station.id,
+                market_date=NOW.date(),
+                kind=WeatherKind.HIGH,
+                rules_raw=f"same-cycle rules {index}",
+                resolves_at=NOW - timedelta(hours=1),
+                status=MarketStatus.ACTIVE,
+                station_verified=True,
+            )
+            session.add(market)
+            await session.flush()
+            market_ids.append(market.id)
+            session.add(
+                Position(
+                    market_id=market.id,
+                    mode=ExecutionMode.PAPER,
+                    side=TradeSide.BUY_YES,
+                    avg_price=Decimal("0.500000"),
+                    size_shares=Decimal("40.000000"),
+                    size_usd=Decimal("20.0000"),
+                    status=PositionStatus.OPEN,
+                )
+            )
+
+    # settle_markets isolates events in separate transactions but intentionally
+    # uses one cycle timestamp. Both events must settle and compound bankroll.
+    for market_id in market_ids:
+        async with db_sessions.begin() as session:
+            await settle_resolved_markets(
+                session,
+                resolutions={market_id: True},
+                closing_times={market_id: NOW},
+                settled_at=NOW,
+                initial_bankroll_usd=Decimal("1080"),
+            )
+
+    async with db_sessions() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(BankrollLog)
+                    .where(BankrollLog.mode == ExecutionMode.PAPER)
+                    .order_by(BankrollLog.ts)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 2
+    assert rows[0].ts == NOW
+    assert rows[1].ts == NOW + timedelta(microseconds=1)
+    assert [row.balance_usd for row in rows] == [
+        Decimal("1100.0000"),
+        Decimal("1120.0000"),
+    ]
+
+
+async def test_zero_paper_bankroll_is_not_reset_to_initial_balance(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    market_id = await _market_with_position(
+        db_sessions, mode=ExecutionMode.PAPER, side=TradeSide.BUY_YES
+    )
+    async with db_sessions.begin() as session:
+        session.add(
+            BankrollLog(
+                ts=NOW - timedelta(seconds=1),
+                mode=ExecutionMode.PAPER,
+                balance_usd=Decimal("0"),
+                event="zero balance fixture",
+            )
+        )
+    async with db_sessions.begin() as session:
+        await settle_resolved_markets(
+            session,
+            resolutions={market_id: True},
+            closing_times={market_id: NOW},
+            settled_at=NOW,
+            initial_bankroll_usd=Decimal("1080"),
+        )
+    async with db_sessions() as session:
+        latest = await session.scalar(
+            select(BankrollLog)
+            .where(BankrollLog.mode == ExecutionMode.PAPER)
+            .order_by(BankrollLog.ts.desc())
+            .limit(1)
+        )
+    assert latest is not None
+    assert latest.balance_usd == Decimal("20.0000")
+
+
 async def test_settlement_uses_latest_pre_cutoff_price_for_clv(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
@@ -148,6 +257,27 @@ async def test_settlement_uses_latest_pre_cutoff_price_for_clv(
     # BUY_NO side-adjusts the YES midpoint: 1 - 0.30 - 0.50 entry.
     # The later post-cutoff price must not be used.
     assert position.clv == Decimal("0.200000")
+
+
+async def test_delayed_settlement_separates_market_close_from_realization_time(
+    db_sessions: SessionFactory, migrated_database_url: str
+) -> None:
+    market_id = await _market_with_position(
+        db_sessions, mode=ExecutionMode.PAPER, side=TradeSide.BUY_YES
+    )
+    market_closed_at = NOW - timedelta(hours=18)
+    async with db_sessions.begin() as session:
+        await settle_resolved_markets(
+            session,
+            resolutions={market_id: True},
+            closing_times={market_id: market_closed_at},
+            settled_at=NOW,
+            initial_bankroll_usd=Decimal("1080"),
+        )
+    async with db_sessions() as session:
+        position = (await session.execute(select(Position))).scalar_one()
+    assert position.market_closed_at == market_closed_at
+    assert position.closed_at == NOW
 
 
 async def test_live_settlement_records_pnl_and_a_redemption_reminder(

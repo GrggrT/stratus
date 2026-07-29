@@ -8,7 +8,12 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.config import Settings, get_settings
-from stratus.db.models import ExecutionMode, OperatorCommand
+from stratus.db.models import (
+    ExecutionMode,
+    OperatorCommand,
+    TradingVenue,
+    VenueMode,
+)
 from stratus.db.session import session_factory_scope
 from stratus.jobs.backfill_fees import backfill_fees
 from stratus.jobs.discover_markets import discover_markets
@@ -21,20 +26,98 @@ from stratus.repositories.runtime_control import (
     set_kill_switch,
     set_mode,
 )
+from stratus.repositories.venue_runtime_control import (
+    get_venue_runtime_control,
+    request_venue_live_confirmation,
+    set_venue_enabled,
+    set_venue_kill_switch,
+    set_venue_mode,
+)
 from stratus.services.live_execution import live_executor_configured
-from stratus.services.operator_commands import validate_command
+from stratus.services.operator_commands import command_venue, validate_command
 from stratus.services.telegram_reports import calculate_live_gate
 
 logger = logging.getLogger(__name__)
 
-MaintenanceJob = Callable[
-    [Settings, async_sessionmaker[AsyncSession]], Awaitable[object]
-]
+MaintenanceJob = Callable[[Settings, async_sessionmaker[AsyncSession]], Awaitable[object]]
 _MAINTENANCE_JOBS: dict[str, MaintenanceJob] = {
     "discover-markets": discover_markets,
     "backfill-fees": backfill_fees,
     "prune-signals": prune_signals,
 }
+
+
+async def _stop_venues(session: AsyncSession, venue: str) -> tuple[str, str]:
+    expired = 0
+    if venue in {"polymarket", "all"}:
+        expired = await set_kill_switch(session, True)
+        await set_venue_kill_switch(session, TradingVenue.POLYMARKET, True)
+    if venue in {"binance_spot", "all"}:
+        await set_venue_kill_switch(session, TradingVenue.BINANCE_SPOT, True)
+    return (
+        "succeeded",
+        f"Kill switch ON for {venue}; expired Polymarket signals: {expired}.",
+    )
+
+
+async def _resume_venues(session: AsyncSession, venue: str) -> tuple[str, str]:
+    include_polymarket = venue in {"polymarket", "all"}
+    include_binance = venue in {"binance_spot", "all"}
+
+    if include_polymarket:
+        legacy = await get_runtime_control(session)
+        polymarket = await get_venue_runtime_control(session, TradingVenue.POLYMARKET)
+        halted = legacy.halted_reason or polymarket.halted_reason
+        if halted is not None:
+            return "rejected", f"Polymarket is halted: {halted}"
+        if not polymarket.enabled:
+            return "rejected", "Polymarket venue is disabled."
+
+    binance = None
+    if include_binance:
+        binance = await get_venue_runtime_control(session, TradingVenue.BINANCE_SPOT)
+        if binance.halted_reason is not None:
+            return "rejected", f"Binance Spot is halted: {binance.halted_reason}"
+        if venue == "binance_spot" and (not binance.enabled or binance.mode is VenueMode.DISABLED):
+            return "rejected", "Binance Spot is disabled; set a non-live mode first."
+
+    if include_polymarket:
+        await set_kill_switch(session, False)
+        await set_venue_kill_switch(session, TradingVenue.POLYMARKET, False)
+    if include_binance and binance is not None and binance.enabled:
+        await set_venue_kill_switch(session, TradingVenue.BINANCE_SPOT, False)
+    return "succeeded", f"Kill switch off for eligible venues in {venue}."
+
+
+async def _execute_binance_set_mode(
+    session: AsyncSession, mode: str, settings: Settings
+) -> tuple[str, str]:
+    target = VenueMode(mode)
+    if target is VenueMode.LIVE:
+        return (
+            "rejected",
+            "Binance Spot live mode is locked until execution, reconciliation, "
+            "risk validation, and canary gates are implemented.",
+        )
+    if target is VenueMode.TESTNET:
+        return (
+            "rejected",
+            "Binance Spot testnet mode is locked until the B4 execution state "
+            "machine and reconciliation are implemented.",
+        )
+    if target is VenueMode.SHADOW and not settings.binance_enabled:
+        return "rejected", "Binance integration is disabled by configuration."
+
+    if target is VenueMode.DISABLED:
+        await set_venue_mode(session, TradingVenue.BINANCE_SPOT, target)
+        return "succeeded", "Binance Spot disabled; kill switch remains on."
+
+    await set_venue_enabled(session, TradingVenue.BINANCE_SPOT, True)
+    await set_venue_mode(session, TradingVenue.BINANCE_SPOT, target)
+    return (
+        "succeeded",
+        f"Binance Spot mode set to {target.value}; explicit resume is still required.",
+    )
 
 
 async def _execute(
@@ -51,22 +134,18 @@ async def _execute(
         return "rejected", error
 
     if command.command == "stop":
-        expired = await set_kill_switch(session, True)
-        return "succeeded", f"Kill switch ON; expired pending signals: {expired}."
+        return await _stop_venues(session, command_venue(command.command, command.payload))
     if command.command == "resume":
-        try:
-            await set_kill_switch(session, False)
-        except RuntimeError as exc:
-            return "rejected", str(exc)
-        return "succeeded", "Kill switch off."
+        return await _resume_venues(session, command_venue(command.command, command.payload))
     if command.command == "verify_market":
-        unblocked, message = await verify_market_station(
-            session, int(command.payload["market_id"])
-        )
+        unblocked, message = await verify_market_station(session, int(command.payload["market_id"]))
         return ("succeeded" if unblocked else "rejected"), message
     if command.command == "set_mode":
         return await _execute_set_mode(
-            session, str(command.payload["mode"]), settings
+            session,
+            command_venue(command.command, command.payload),
+            str(command.payload["mode"]),
+            settings,
         )
     # run_job: the job manages its own transactions on the shared factory.
     job = _MAINTENANCE_JOBS[str(command.payload["job"])]
@@ -75,7 +154,7 @@ async def _execute(
 
 
 async def _execute_set_mode(
-    session: AsyncSession, mode: str, settings: Settings
+    session: AsyncSession, venue: str, mode: str, settings: Settings
 ) -> tuple[str, str]:
     """Switch the execution mode with the same gates as Telegram /mode.
 
@@ -83,8 +162,12 @@ async def _execute_set_mode(
     trading wallet is configured, the quantitative paper gate has passed, and
     the request is repeated within the 5-minute confirmation window.
     """
+    if venue == "binance_spot":
+        return await _execute_binance_set_mode(session, mode, settings)
     if mode == "paper":
         await set_mode(session, ExecutionMode.PAPER)
+        await set_venue_enabled(session, TradingVenue.POLYMARKET, True)
+        await set_venue_mode(session, TradingVenue.POLYMARKET, VenueMode.PAPER)
         return "succeeded", "Mode set to paper."
     if not settings.live_legal_approved:
         return "rejected", "Live mode blocked: legal classification is not approved."
@@ -92,12 +175,17 @@ async def _execute_set_mode(
         return "rejected", "Live mode blocked: tax treatment is not approved."
     if not live_executor_configured(settings.polygon_private_key):
         return "rejected", "Live mode blocked: no trading wallet is configured."
-    gate = await calculate_live_gate(session, settings.initial_bankroll_usd)
+    gate = await calculate_live_gate(
+        session,
+        settings.initial_bankroll_usd,
+        min_stations=settings.live_gate_min_stations,
+        station_samples=settings.live_gate_station_samples,
+        station_brier=settings.live_gate_station_brier,
+        independent_samples_min=settings.live_gate_independent_samples,
+    )
     if not gate.passed:
         failing = "; ".join(
-            f"{check.name} ({check.detail})"
-            for check in gate.checks
-            if not check.passed
+            f"{check.name} ({check.detail})" for check in gate.checks if not check.passed
         )
         return (
             "rejected",
@@ -108,12 +196,14 @@ async def _execute_set_mode(
     now = datetime.now(UTC)
     if control.live_confirmation_until is None or control.live_confirmation_until < now:
         deadline = await request_live_confirmation(session)
+        await request_venue_live_confirmation(session, TradingVenue.POLYMARKET)
         return (
             "succeeded",
-            "Gate passed. Repeat set_mode live before "
-            f"{deadline:%H:%M:%S} UTC to confirm.",
+            f"Gate passed. Repeat set_mode live before {deadline:%H:%M:%S} UTC to confirm.",
         )
     await set_mode(session, ExecutionMode.LIVE)
+    await set_venue_enabled(session, TradingVenue.POLYMARKET, True)
+    await set_venue_mode(session, TradingVenue.POLYMARKET, VenueMode.LIVE)
     return "succeeded", "LIVE mode enabled. Use stop to halt immediately."
 
 
@@ -137,9 +227,7 @@ async def process_operator_commands(
                         break
                     command = commands[0]
                     claimed_id = command.id
-                    status, detail = await _execute(
-                        session, command, settings, sessions
-                    )
+                    status, detail = await _execute(session, command, settings, sessions)
                     mark_command(
                         command,
                         status=status,
@@ -159,9 +247,7 @@ async def process_operator_commands(
                     raise
                 logger.exception("operator command crashed: id=%d", claimed_id)
                 async with sessions.begin() as session:
-                    crashed = await session.get(
-                        OperatorCommand, claimed_id, with_for_update=True
-                    )
+                    crashed = await session.get(OperatorCommand, claimed_id, with_for_update=True)
                     if crashed is not None and crashed.status == "pending":
                         mark_command(
                             crashed,

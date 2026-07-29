@@ -19,13 +19,22 @@ def build_forecast_upsert(values: Sequence[ForecastValue]) -> Insert:
             "kind": value.kind,
             "temp_c": value.temp_c,
             "fetched_at": value.fetched_at,
+            "run_id": value.run_id,
+            "ingest_id": value.ingest_id,
+            "available_at": value.available_at or value.fetched_at,
         }
         for value in values
     ]
     statement = insert(Forecast).values(rows)
     return statement.on_conflict_do_update(
         constraint="uq_forecasts_identity",
-        set_={"temp_c": statement.excluded.temp_c, "fetched_at": statement.excluded.fetched_at},
+        set_={
+            "temp_c": statement.excluded.temp_c,
+            "fetched_at": statement.excluded.fetched_at,
+            "run_id": statement.excluded.run_id,
+            "ingest_id": statement.excluded.ingest_id,
+            "available_at": statement.excluded.available_at,
+        },
     )
 
 

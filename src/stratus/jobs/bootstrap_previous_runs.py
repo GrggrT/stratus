@@ -11,7 +11,10 @@ from stratus.collectors.open_meteo import MODEL_API_IDS, StationTarget
 from stratus.collectors.open_meteo_previous_runs import OpenMeteoPreviousRunsClient
 from stratus.config import Settings, get_settings
 from stratus.db.models import DailyActual, Station
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import create_engine, create_session_factory, verify_runtime_engine
+from stratus.repositories.evidence_continuity import (
+    current_probability_pipeline_release_epoch,
+)
 from stratus.repositories.historical_forecasts import upsert_historical_forecasts
 
 logger = logging.getLogger(__name__)
@@ -20,10 +23,17 @@ logger = logging.getLogger(__name__)
 async def bootstrap_previous_runs(settings: Settings | None = None) -> int:
     settings = settings or get_settings()
     engine = create_engine(settings)
+    await verify_runtime_engine(engine)
     session_factory = create_session_factory(engine)
     fetched_at = datetime.now(UTC)
     try:
         async with session_factory() as session:
+            active_release = await current_probability_pipeline_release_epoch(session)
+            if active_release is not None:
+                raise RuntimeError(
+                    "legacy previous-runs bootstrap is blocked after a probability "
+                    "release exists; historical training evidence is immutable"
+                )
             stations = (
                 await session.execute(select(Station).where(Station.active.is_(True)))
             ).scalars().all()
@@ -121,4 +131,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

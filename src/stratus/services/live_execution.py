@@ -135,10 +135,13 @@ def live_executor_configured(private_key: str | None) -> bool:
 def placed_order_status(clob_status: str) -> str:
     """Map a CLOB placement status to our order lifecycle.
 
-    A fully matched order is terminal ("filled"); anything else rests on the
-    book ("open") where the kill switch can still cancel it.
+    A successful placement acknowledgement does not contain the authoritative
+    cumulative fill quantity, VWAP, or fee evidence.  Keep every acknowledged
+    order pollable until the reconciliation path has persisted those values;
+    that path alone may move it to a terminal filled/partially-filled state.
     """
-    return "filled" if clob_status.lower() == "matched" else "open"
+    del clob_status
+    return "open"
 
 
 @dataclass(frozen=True, slots=True)

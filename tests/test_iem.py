@@ -1,7 +1,19 @@
-from datetime import UTC, date, datetime
+import hashlib
+from collections.abc import AsyncIterator
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
-from stratus.collectors.iem import parse_iem_csv, year_chunks
+import httpx
+import pytest
+
+from stratus.collectors.iem import (
+    IemClient,
+    IemError,
+    IemStation,
+    parse_iem_csv,
+    parse_iem_csv_rows,
+    year_chunks,
+)
 
 
 def test_year_chunks_are_resumable_calendar_ranges() -> None:
@@ -32,3 +44,199 @@ LGA,2026-07-05 00:00,20.00,KLGA 050000Z 26010KT 10SM 20/10 A3000
     assert values[0].temp_c == Decimal("28.00")
     assert "COR" in values[0].raw_metar
 
+
+def test_parse_iem_csv_rejects_ambiguous_distinct_corrections() -> None:
+    content = """station,valid,tmpc,metar
+LGA,2026-07-04 00:51,28.00,KLGA 040051Z COR 27011KT 10SM 28/19 A2992
+LGA,2026-07-04 00:51,29.00,KLGA 040051Z COR 27011KT 10SM 29/19 A2992
+"""
+    with pytest.raises(IemError, match="multiple distinct corrected reports"):
+        parse_iem_csv(
+            content,
+            station_id=1,
+            start=date(2026, 7, 4),
+            end=date(2026, 7, 5),
+        )
+
+
+def test_parse_iem_csv_rejects_an_unexpected_source_station() -> None:
+    content = """station,valid,tmpc,metar
+JFK,2026-07-04 00:51,28.00,KJFK 040051Z 27011KT 10SM 28/19 A2992
+"""
+    with pytest.raises(IemError, match="unexpected station"):
+        parse_iem_csv(
+            content,
+            station_id=1,
+            start=date(2026, 7, 4),
+            end=date(2026, 7, 5),
+            source_station_id="LGA",
+        )
+
+
+async def test_fetch_with_evidence_preserves_exact_response_and_canonical_request() -> None:
+    body = (
+        b"# exact bytes\nstation,valid,tmpc,metar\n"
+        b"LGA,2026-07-04 00:51,28.00,KLGA 040051Z 27011KT 10SM 28/19 A2992\n"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params.get_list("data") == ["tmpc", "metar"]
+        assert request.url.params.get_list("report_type") == ["3", "4"]
+        return httpx.Response(
+            200,
+            content=body,
+            headers={
+                "Content-Type": "text/csv; charset=utf-8",
+                "ETag": '"archive-v1"',
+                "Set-Cookie": "must-not-enter-evidence=secret",
+            },
+        )
+
+    ticks = iter(
+        (
+            datetime(2026, 7, 6, 8, 0, tzinfo=UTC),
+            datetime(2026, 7, 6, 8, 0, 1, tzinfo=UTC),
+        )
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = IemClient(
+            asos_url="https://mesonet.example/cgi-bin/request/asos.py",
+            http_client=http_client,
+            clock=lambda: next(ticks),
+        )
+        result = await client.fetch_with_evidence(
+            IemStation(
+                station_id=1,
+                icao="KLGA",
+                network="NY_ASOS",
+                source_station_id="LGA",
+            ),
+            start=date(2026, 7, 4),
+            end=date(2026, 7, 5),
+        )
+
+    assert result.response_body == body
+    assert result.response_bytes == len(body)
+    assert result.response_sha256 == hashlib.sha256(body).hexdigest()
+    assert result.response_status_code == 200
+    assert result.response_headers == (
+        ("content-length", str(len(body))),
+        ("content-type", "text/csv; charset=utf-8"),
+        ("etag", '"archive-v1"'),
+    )
+    assert result.request_started_at == datetime(2026, 7, 6, 8, 0, tzinfo=UTC)
+    assert result.response_received_at - result.request_started_at == timedelta(seconds=1)
+    assert len(result.request_manifest_sha256) == 64
+    assert result.request_manifest.to_payload()["params"][-2:] == [
+        {"name": "report_type", "value": "3"},
+        {"name": "report_type", "value": "4"},
+    ]
+    assert tuple(row.observation for row in result.parsed_rows) == result.observations
+    assert result.parsed_rows[0].source_row == body.splitlines(keepends=True)[2]
+    assert result.observations[0].temp_c == Decimal("28.00")
+
+
+async def test_legacy_fetch_still_returns_a_mutable_list() -> None:
+    body = b"station,valid,tmpc,metar\nLGA,2026-07-04 00:51,28,LGA report\n"
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, content=body))
+    async with httpx.AsyncClient(transport=transport) as http_client:
+        client = IemClient(
+            asos_url="https://mesonet.example/asos.py",
+            http_client=http_client,
+        )
+        values = await client.fetch(
+            IemStation(1, "KLGA", "NY_ASOS", "LGA"),
+            start=date(2026, 7, 4),
+            end=date(2026, 7, 5),
+        )
+    assert isinstance(values, list)
+    assert len(values) == 1
+
+
+async def test_fetch_streaming_stops_when_response_exceeds_byte_cap() -> None:
+    class CountingStream(httpx.AsyncByteStream):
+        def __init__(self) -> None:
+            self.chunks_yielded = 0
+            self.closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for chunk in (b"1234", b"5678", b"must-not-be-read"):
+                self.chunks_yielded += 1
+                yield chunk
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stream = CountingStream()
+    requests = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, stream=stream)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = IemClient(
+            asos_url="https://mesonet.example/asos.py",
+            http_client=http_client,
+            max_response_bytes=5,
+        )
+        with pytest.raises(IemError, match="response exceeds configured recovery byte cap"):
+            await client.fetch_with_evidence(
+                IemStation(1, "KLGA", "NY_ASOS", "LGA"),
+                start=date(2026, 7, 4),
+                end=date(2026, 7, 5),
+            )
+
+    assert requests == 1
+    assert stream.chunks_yielded == 2
+    assert stream.closed is True
+
+
+async def test_request_budget_rejects_second_fetch_before_http() -> None:
+    body = b"station,valid,tmpc,metar\nLGA,2026-07-04 00:51,28,LGA report\n"
+    requests = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, content=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = IemClient(
+            asos_url="https://mesonet.example/asos.py",
+            http_client=http_client,
+            request_budget=1,
+        )
+        station = IemStation(1, "KLGA", "NY_ASOS", "LGA")
+        first = await client.fetch_with_evidence(
+            station,
+            start=date(2026, 7, 4),
+            end=date(2026, 7, 5),
+        )
+        with pytest.raises(IemError, match="per-run HTTP request budget is exhausted"):
+            await client.fetch_with_evidence(
+                station,
+                start=date(2026, 7, 4),
+                end=date(2026, 7, 5),
+            )
+
+    assert len(first.observations) == 1
+    assert requests == 1
+
+
+def test_exact_parsed_row_preserves_crlf_and_quoted_commas() -> None:
+    body = (
+        b"station,valid,tmpc,metar\r\n"
+        b'LGA,2026-07-04 00:51,28.00,"KLGA 040051Z TEST, COR"\r\n'
+    )
+    rows = parse_iem_csv_rows(
+        body,
+        station_id=1,
+        start=date(2026, 7, 4),
+        end=date(2026, 7, 5),
+        source_station_id="LGA",
+    )
+    assert len(rows) == 1
+    assert rows[0].source_row == body.splitlines(keepends=True)[1]
+    assert rows[0].observation.raw_metar == "KLGA 040051Z TEST, COR"

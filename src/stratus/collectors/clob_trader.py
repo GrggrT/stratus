@@ -21,6 +21,14 @@ class ClobTradeError(RuntimeError):
     pass
 
 
+class ClobVenueRejected(ClobTradeError):
+    """The venue explicitly proved that it did not accept the order."""
+
+
+class ClobPlacementOutcomeUnknown(ClobTradeError):
+    """The placement response cannot prove whether an order was accepted."""
+
+
 @dataclass(frozen=True, slots=True)
 class PlacedOrder:
     order_id: str
@@ -30,13 +38,21 @@ class PlacedOrder:
 def parse_place_response(payload: object) -> PlacedOrder:
     """Fail closed: only an explicit success with an order id counts."""
     if not isinstance(payload, dict):
-        raise ClobTradeError("CLOB returned an invalid order response")
-    if payload.get("success") is not True or payload.get("errorMsg"):
-        raise ClobTradeError(f"order rejected: {payload.get('errorMsg') or payload}")
+        raise ClobPlacementOutcomeUnknown("CLOB returned an invalid order response")
+    success = payload.get("success")
+    error_message = payload.get("errorMsg")
     order_id = payload.get("orderID")
-    if not isinstance(order_id, str) or not order_id:
-        raise ClobTradeError("CLOB response is missing orderID")
+    usable_order_id = isinstance(order_id, str) and bool(order_id.strip())
+    if success is False and not usable_order_id:
+        raise ClobVenueRejected(f"order rejected: {error_message or payload}")
+    if success is not True or error_message:
+        raise ClobPlacementOutcomeUnknown(
+            "CLOB response does not contain an unambiguous placement result"
+        )
+    if not usable_order_id:
+        raise ClobPlacementOutcomeUnknown("CLOB response is missing orderID")
     status = payload.get("status")
+    assert isinstance(order_id, str)
     return PlacedOrder(order_id=order_id, status=status if isinstance(status, str) else "unknown")
 
 

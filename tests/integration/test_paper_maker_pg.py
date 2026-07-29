@@ -20,6 +20,7 @@ from stratus.db.models import (
     SignalConfidence,
     SignalStatus,
     Station,
+    StationStage,
     TradeSide,
     WeatherKind,
 )
@@ -46,24 +47,40 @@ NOW = datetime(2026, 7, 12, 12, tzinfo=UTC)
 
 async def _seed_signal(session: AsyncSession, *, suffix: str) -> Signal:
     station = Station(
-        icao="KLGA", name="LaGuardia", city="New York City",
-        lat=Decimal("40.77"), lon=Decimal("-73.87"), tz="America/New_York",
+        icao="KLGA",
+        name="LaGuardia",
+        city="New York City",
+        lat=Decimal("40.77"),
+        lon=Decimal("-73.87"),
+        tz="America/New_York",
+        stage=StationStage.PAPER,
     )
     session.add(station)
     await session.flush()
     market = Market(
-        polymarket_id=f"pm-maker-{suffix}", event_id="ev-1", station_id=station.id,
-        market_date=NOW.date(), kind=WeatherKind.HIGH, rules_raw="rules",
-        resolves_at=NOW + timedelta(hours=6), status=MarketStatus.ACTIVE,
+        polymarket_id=f"pm-maker-{suffix}",
+        event_id="ev-1",
+        station_id=station.id,
+        market_date=NOW.date(),
+        kind=WeatherKind.HIGH,
+        rules_raw="rules",
+        resolves_at=NOW + timedelta(hours=6),
+        status=MarketStatus.ACTIVE,
         station_verified=True,
     )
     session.add(market)
     await session.flush()
     signal = Signal(
-        market_id=market.id, ts=NOW, side=TradeSide.BUY_YES,
-        model_prob=Decimal("0.65"), market_price=Decimal("0.58"),
-        edge=Decimal("0.07"), kelly_frac=Decimal("0.02"), size_usd=Decimal("22"),
-        confidence=SignalConfidence.B, status=SignalStatus.PENDING,
+        market_id=market.id,
+        ts=NOW,
+        side=TradeSide.BUY_YES,
+        model_prob=Decimal("0.65"),
+        market_price=Decimal("0.58"),
+        edge=Decimal("0.07"),
+        kelly_frac=Decimal("0.02"),
+        size_usd=Decimal("22"),
+        confidence=SignalConfidence.B,
+        status=SignalStatus.PENDING,
     )
     session.add(signal)
     await session.flush()
@@ -121,7 +138,7 @@ async def test_maker_roundtrip_posts_fills_and_aggregates_position(
                     filled_usd=Decimal("22"),
                     fee_usd=Decimal("0"),
                     total_cost_usd=Decimal("22"),
-                    filled_at=NOW,
+                    filled_at=datetime.now(UTC),
                 )
             ],
         )
@@ -136,9 +153,7 @@ async def test_maker_roundtrip_posts_fills_and_aggregates_position(
         assert signal_row is not None
         assert signal_row.status is SignalStatus.EXECUTED
         position = (
-            await session.execute(
-                select(Position).where(Position.market_id == market_id)
-            )
+            await session.execute(select(Position).where(Position.market_id == market_id))
         ).scalar_one()
         assert position.status is PositionStatus.OPEN
         assert position.avg_price == Decimal("0.55")
@@ -165,9 +180,7 @@ async def test_maker_ttl_expiry_marks_order_unfilled(
         )
 
     async with db_sessions.begin() as session:
-        expired = await expire_pending_signals(
-            session, [signal_id], reason="unfilled_maker"
-        )
+        expired = await expire_pending_signals(session, [signal_id], reason="unfilled_maker")
         expired_orders = await expire_resting_paper_orders(session, [signal_id])
         assert expired == 1
         assert expired_orders == 1
@@ -178,9 +191,7 @@ async def test_maker_ttl_expiry_marks_order_unfilled(
         assert signal_row.status is SignalStatus.EXPIRED
         assert signal_row.skip_reason == "unfilled_maker"
         order = (
-            await session.execute(
-                select(Order).where(Order.signal_id == signal_id)
-            )
+            await session.execute(select(Order).where(Order.signal_id == signal_id))
         ).scalar_one()
         assert order.status == PAPER_STATUS_UNFILLED
         assert order.status != PAPER_STATUS_RESTING

@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from hashlib import sha256
 
 import httpx
 import pytest
@@ -95,3 +96,46 @@ async def test_client_uses_ensemble_model_id(monkeypatch: pytest.MonkeyPatch) ->
             )
     assert len(values) == 2
 
+
+async def test_fetch_bundle_includes_exact_ensemble_response_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        ENSEMBLE_MODELS,
+        "test_ens",
+        EnsembleModel(api_id="upstream_test", member_prefix="test", member_count=1),
+    )
+    raw_body = (
+        b'{"hourly":{"time":["2026-07-05T00:00","2026-07-05T12:00"],'
+        b'"temperature_2m":[10,20]}}'
+    )
+    requested_url = ""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requested_url
+        requested_url = str(request.url)
+        return httpx.Response(200, content=raw_body, headers={"ETag": "ensemble-1"})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    station = StationTarget(id=1, icao="EGLC", lat=51.505, lon=0.055, tz="Europe/London")
+    async with http_client:
+        async with OpenMeteoEnsembleClient(
+            base_url="https://example.test/v1/ensemble",
+            forecast_days=10,
+            concurrency=1,
+            http_client=http_client,
+        ) as client:
+            bundle = await client.fetch_bundle(
+                station, "test_ens", run_time=RUN_TIME, fetched_at=FETCHED_AT
+            )
+
+    assert len(bundle.forecasts) == 2
+    assert bundle.trajectories == ()
+    assert len(bundle.evidence) == 1
+    evidence = bundle.evidence[0]
+    assert evidence.source_url == requested_url
+    assert evidence.response_body == raw_body
+    assert evidence.response_sha256 == sha256(raw_body).hexdigest()
+    assert evidence.response_bytes == len(raw_body)
+    assert evidence.http_date is None
+    assert evidence.etag == "ensemble-1"

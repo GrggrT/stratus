@@ -1,0 +1,102 @@
+{
+  "name": "binance-ma-cross-24m-v1",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "interval": "5m",
+  "dataset_start": "2024-07-01T00:00:00+00:00",
+  "dataset_end": "2026-07-01T00:00:00+00:00",
+  "windows_days": {
+    "minimum_train": 365,
+    "validation": 30,
+    "test": 30,
+    "step": 30,
+    "final_holdout": 90
+  },
+  "execution": {
+    "initial_quote_per_symbol": "10000",
+    "order_notional": "250",
+    "maker_fee_bps": "10",
+    "taker_fee_bps": "10",
+    "entry_slippage_bps": "5",
+    "exit_slippage_bps": "5",
+    "latency_ms": 500,
+    "order_ttl_seconds": 20,
+    "maker_participation_rate": "0.05",
+    "liquidate_at_end": true
+  },
+  "selection": {
+    "bootstrap_samples": 2000,
+    "minimum_oos_cycles": 300,
+    "minimum_symbol_cycles": 100,
+    "maximum_drawdown": "0.10",
+    "minimum_positive_neighbors": 2,
+    "maximum_symbol_profit_contribution": "0.70"
+  },
+  "candidates": [
+    {
+      "strategy_name": "moving_average_cross",
+      "fast_period": 6,
+      "slow_period": 24,
+      "order_style": "taker",
+      "maker_offset_bps": "1"
+    },
+    {
+      "strategy_name": "moving_average_cross",
+      "fast_period": 9,
+      "slow_period": 24,
+      "order_style": "taker",
+      "maker_offset_bps": "1"
+    },
+    {
+      "strategy_name": "moving_average_cross",
+      "fast_period": 12,
+      "slow_period": 24,
+      "order_style": "taker",
+      "maker_offset_bps": "1"
+    },
+    {
+      "strategy_name": "moving_average_cross",
+      "fast_period": 6,
+      "slow_period": 36,
+      "order_style": "taker",
+      "maker_offset_bps": "1"
+    },
+    {
+      "strategy_name": "moving_average_cross",
+      "fast_period": 9,
+      "slow_period": 36,
+      "order_style": "taker",
+      "maker_offset_bps": "1"
+    },
+    {
+      "strategy_name": "moving_average_cross",
+      "fast_period": 12,
+      "slow_period": 36,
+      "order_style": "taker",
+      "maker_offset_bps": "1"
+    },
+    {
+      "strategy_name": "moving_average_cross",
+      "fast_period": 6,
+      "slow_period": 48,
+      "order_style": "taker",
+      "maker_offset_bps": "1"
+    },
+    {
+      "strategy_name": "moving_average_cross",
+      "fast_period": 9,
+      "slow_period": 48,
+      "order_style": "taker",
+      "maker_offset_bps": "1"
+    },
+    {
+      "strategy_name": "moving_average_cross",
+      "fast_period": 12,
+      "slow_period": 48,
+      "order_style": "taker",
+      "maker_offset_bps": "1"
+    }
+  ]
+}

@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
 
-from stratus.collectors.open_meteo import ForecastValue, StationTarget
+from stratus.collectors.open_meteo import (
+    ForecastBundle,
+    ForecastValue,
+    SourceResponseEvidence,
+    StationTarget,
+    _response_evidence,
+)
 from stratus.db.models import WeatherKind
 
 
@@ -137,28 +143,50 @@ class NwsForecastClient:
             await self._client.aclose()
 
     async def fetch(self, station: StationTarget, *, fetched_at: datetime) -> list[ForecastValue]:
-        point = await self._get_json(f"{self.base_url}/points/{station.lat},{station.lon}")
+        bundle = await self.fetch_bundle(station, fetched_at=fetched_at)
+        return list(bundle.forecasts)
+
+    async def fetch_bundle(
+        self, station: StationTarget, *, fetched_at: datetime
+    ) -> ForecastBundle:
+        point, points_evidence = await self._get_json(
+            f"{self.base_url}/points/{station.lat},{station.lon}"
+        )
         properties = point.get("properties")
         hourly_url = properties.get("forecastHourly") if isinstance(properties, dict) else None
         if not isinstance(hourly_url, str) or not hourly_url.startswith("https://"):
             raise NwsForecastError("NWS point response has no valid forecastHourly link")
-        forecast = await self._get_json(hourly_url)
-        return parse_nws_hourly_forecast(
-            forecast, station=station, fetched_at=fetched_at
+        forecast, forecast_evidence = await self._get_json(hourly_url)
+        return ForecastBundle(
+            forecasts=tuple(
+                parse_nws_hourly_forecast(
+                    forecast, station=station, fetched_at=fetched_at
+                )
+            ),
+            trajectories=(),
+            evidence=(points_evidence, forecast_evidence),
         )
 
-    async def _get_json(self, url: str) -> dict[str, Any]:
+    async def _get_json(
+        self, url: str
+    ) -> tuple[dict[str, Any], SourceResponseEvidence]:
         if self._client is None:
             raise RuntimeError("NwsForecastClient must be used as an async context manager")
         last_error = None
         for attempt in range(3):
             try:
+                request_started_at = datetime.now(UTC)
                 response = await self._client.get(url)
+                response_received_at = datetime.now(UTC)
                 response.raise_for_status()
                 payload = response.json()
                 if not isinstance(payload, dict):
                     raise NwsForecastError("NWS returned non-object JSON")
-                return payload
+                return payload, _response_evidence(
+                    response,
+                    request_started_at=request_started_at,
+                    response_received_at=response_received_at,
+                )
             except (httpx.HTTPError, ValueError, NwsForecastError) as exc:
                 last_error = exc
                 if attempt < 2:

@@ -28,7 +28,7 @@ def taker_fee(
     )
 
 
-def _executable_ask_levels(
+def executable_ask_levels(
     book: dict[str, Any], *, max_price: Decimal
 ) -> list[tuple[Decimal, Decimal]]:
     if not Decimal(0) < max_price < Decimal(1):
@@ -60,7 +60,7 @@ def usable_ask_depth_usd(book: dict[str, Any], *, max_price: Decimal) -> Decimal
     generation-side proxy derived from the YES snapshot.
     """
     return sum(
-        (price * shares for price, shares in _executable_ask_levels(book, max_price=max_price)),
+        (price * shares for price, shares in executable_ask_levels(book, max_price=max_price)),
         start=Decimal(0),
     )
 
@@ -74,7 +74,7 @@ def walk_ask_book(
 ) -> PaperFill | None:
     if target_usd <= 0:
         raise PaperExecutionError("target_usd must be positive")
-    levels = _executable_ask_levels(book, max_price=max_price)
+    levels = executable_ask_levels(book, max_price=max_price)
 
     remaining = target_usd
     filled_usd = Decimal(0)

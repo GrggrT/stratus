@@ -2,7 +2,9 @@ from decimal import Decimal
 
 import pytest
 
+from stratus.db.models import ResolutionReconciliationClassification
 from stratus.services.reconciliation import (
+    assess_resolution,
     boundary_margin,
     bucket_contains,
     clear_mismatches,
@@ -49,3 +51,75 @@ def test_find_resolution_mismatches_flags_disagreements_only() -> None:
 
     clear = clear_mismatches(mismatches)
     assert [item.market_id for item in clear] == [3]
+
+
+def test_assessment_prioritizes_exact_source_conflict() -> None:
+    result = assess_resolution(
+        resolved_yes=True,
+        low_c=Decimal("20"),
+        high_c=Decimal("21"),
+        metar_temp_c=Decimal("20.5"),
+        exact_temp_c=Decimal("19.9"),
+    )
+
+    assert (
+        result.classification
+        is ResolutionReconciliationClassification.EXACT_SOURCE_MISMATCH
+    )
+    assert result.metar_implied_yes is True
+    assert result.exact_implied_yes is False
+    assert result.exact_truth_gap_c == Decimal("0.6")
+
+
+def test_assessment_retains_exact_truth_gap_inside_same_bucket() -> None:
+    result = assess_resolution(
+        resolved_yes=True,
+        low_c=Decimal("20"),
+        high_c=Decimal("22"),
+        metar_temp_c=Decimal("20.4"),
+        exact_temp_c=Decimal("20.8"),
+    )
+
+    assert (
+        result.classification
+        is ResolutionReconciliationClassification.EXACT_TRUTH_GAP
+    )
+    assert result.exact_truth_gap_c == Decimal("0.4")
+
+
+def test_assessment_separates_boundary_and_clear_metar_mismatch() -> None:
+    boundary = assess_resolution(
+        resolved_yes=True,
+        low_c=Decimal("20"),
+        high_c=Decimal("21"),
+        metar_temp_c=Decimal("19.9"),
+        exact_temp_c=None,
+    )
+    clear = assess_resolution(
+        resolved_yes=True,
+        low_c=Decimal("20"),
+        high_c=Decimal("21"),
+        metar_temp_c=Decimal("19.0"),
+        exact_temp_c=None,
+    )
+
+    assert (
+        boundary.classification
+        is ResolutionReconciliationClassification.BOUNDARY_SENSITIVE
+    )
+    assert clear.classification is ResolutionReconciliationClassification.CLEAR_MISMATCH
+
+
+def test_assessment_is_explicit_when_training_truth_is_missing() -> None:
+    result = assess_resolution(
+        resolved_yes=True,
+        low_c=Decimal("20"),
+        high_c=Decimal("21"),
+        metar_temp_c=None,
+        exact_temp_c=Decimal("20.5"),
+    )
+
+    assert (
+        result.classification
+        is ResolutionReconciliationClassification.TRUTH_UNAVAILABLE
+    )

@@ -99,6 +99,19 @@
             <NavigationViewItem Content="Jobs" Tag="Jobs">
                 <NavigationViewItem.Icon><FontIcon Glyph="&#xE9F5;" /></NavigationViewItem.Icon>
             </NavigationViewItem>
+            <NavigationViewItem
+                x:Name="AlertsNavigationItem"
+                AutomationProperties.Name="Alerts"
+                Content="Alerts"
+                Tag="Alerts">
+                <NavigationViewItem.Icon><FontIcon Glyph="&#xE7F4;" /></NavigationViewItem.Icon>
+                <NavigationViewItem.InfoBadge>
+                    <InfoBadge
+                        x:Name="AlertsInfoBadge"
+                        Value="0"
+                        Visibility="Collapsed" />
+                </NavigationViewItem.InfoBadge>
+            </NavigationViewItem>
             <NavigationViewItem Content="Live" Tag="Live">
                 <NavigationViewItem.Icon><FontIcon Glyph="&#xE945;" /></NavigationViewItem.Icon>
             </NavigationViewItem>
@@ -107,7 +120,10 @@
             </NavigationViewItem>
         </NavigationView.MenuItems>
 
-        <Grid x:Name="ContentRoot" SizeChanged="ContentRoot_SizeChanged">
+        <Grid
+            x:Name="ContentRoot"
+            HorizontalAlignment="Left"
+            SizeChanged="ContentRoot_SizeChanged">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
@@ -272,6 +288,29 @@
                         </ComboBox>
                     </AppBarElementContainer>
                     <AppBarElementContainer
+                        x:Name="AlertsFilterContainer"
+                        VerticalContentAlignment="Center"
+                        Visibility="Collapsed">
+                        <ComboBox
+                            x:Name="AlertsFilterBox"
+                            AutomationProperties.Name="Alert inbox filter"
+                            MinWidth="170"
+                            SelectedIndex="0"
+                            SelectionChanged="AlertsFilterBox_SelectionChanged">
+                            <ComboBoxItem Content="Unacknowledged" />
+                            <ComboBoxItem Content="All alerts" />
+                        </ComboBox>
+                    </AppBarElementContainer>
+                    <AppBarButton
+                        x:Name="AlertsAckThroughButton"
+                        AutomationProperties.HelpText="Acknowledge every local alert through the newest unacknowledged id shown in the current view."
+                        Click="AlertsAckThroughButton_Click"
+                        IsEnabled="False"
+                        Label="Ack visible through newest"
+                        Visibility="Collapsed">
+                        <AppBarButton.Icon><FontIcon Glyph="&#xE73E;" /></AppBarButton.Icon>
+                    </AppBarButton>
+                    <AppBarElementContainer
                         x:Name="CollectionSearchContainer"
                         VerticalContentAlignment="Center"
                         Visibility="Collapsed">
@@ -323,22 +362,69 @@
                 x:Name="DashboardView"
                 Grid.Row="2"
                 HorizontalScrollBarVisibility="Disabled"
-                HorizontalScrollMode="Disabled"
-                SizeChanged="DashboardView_SizeChanged">
+                HorizontalScrollMode="Disabled">
                 <StackPanel
                     x:Name="DashboardContent"
                     MaxWidth="1500"
                     Padding="32,0,32,40"
                     HorizontalAlignment="Left"
                     Spacing="16">
-                    <Grid ColumnSpacing="12" RowSpacing="12">
+                    <Grid
+                        x:Name="CockpitSummaryGrid"
+                        ColumnSpacing="12"
+                        RowSpacing="12">
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CockpitSummaryLayoutStates">
+                                <VisualState x:Name="CockpitSummaryWide">
+                                    <VisualState.StateTriggers>
+                                        <AdaptiveTrigger MinWindowWidth="1600" />
+                                    </VisualState.StateTriggers>
+                                    <VisualState.Setters>
+                                        <Setter Target="CockpitSummaryColumn2.Width" Value="*" />
+                                        <Setter Target="CockpitSummaryColumn3.Width" Value="*" />
+                                        <Setter Target="CockpitSummaryColumn4.Width" Value="*" />
+                                        <Setter Target="CockpitSummaryUnrealizedCard.(Grid.Row)" Value="0" />
+                                        <Setter Target="CockpitSummaryUnrealizedCard.(Grid.Column)" Value="2" />
+                                        <Setter Target="CockpitSummaryExposureCard.(Grid.Row)" Value="0" />
+                                        <Setter Target="CockpitSummaryExposureCard.(Grid.Column)" Value="3" />
+                                        <Setter Target="CockpitSummaryGateCard.(Grid.Row)" Value="0" />
+                                        <Setter Target="CockpitSummaryGateCard.(Grid.Column)" Value="4" />
+                                        <Setter Target="CockpitSummaryGateCard.(Grid.ColumnSpan)" Value="1" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="CockpitSummaryMedium">
+                                    <VisualState.StateTriggers>
+                                        <AdaptiveTrigger MinWindowWidth="1200" />
+                                    </VisualState.StateTriggers>
+                                    <VisualState.Setters>
+                                        <Setter Target="CockpitSummaryColumn2.Width" Value="*" />
+                                        <Setter Target="CockpitSummaryUnrealizedCard.(Grid.Row)" Value="0" />
+                                        <Setter Target="CockpitSummaryUnrealizedCard.(Grid.Column)" Value="2" />
+                                        <Setter Target="CockpitSummaryExposureCard.(Grid.Row)" Value="1" />
+                                        <Setter Target="CockpitSummaryExposureCard.(Grid.Column)" Value="0" />
+                                        <Setter Target="CockpitSummaryGateCard.(Grid.Row)" Value="1" />
+                                        <Setter Target="CockpitSummaryGateCard.(Grid.Column)" Value="1" />
+                                        <Setter Target="CockpitSummaryGateCard.(Grid.ColumnSpan)" Value="2" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="CockpitSummaryCompact">
+                                    <VisualState.StateTriggers>
+                                        <AdaptiveTrigger MinWindowWidth="0" />
+                                    </VisualState.StateTriggers>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition x:Name="CockpitSummaryColumn0" Width="*" />
+                            <ColumnDefinition x:Name="CockpitSummaryColumn1" Width="*" />
+                            <ColumnDefinition x:Name="CockpitSummaryColumn2" Width="0" />
+                            <ColumnDefinition x:Name="CockpitSummaryColumn3" Width="0" />
+                            <ColumnDefinition x:Name="CockpitSummaryColumn4" Width="0" />
                         </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
 
                         <Border Style="{StaticResource CockpitCardStyle}">
                             <StackPanel Spacing="8">
@@ -362,7 +448,10 @@
                                     TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
-                        <Border Grid.Column="2" Style="{StaticResource CockpitCardStyle}">
+                        <Border
+                            x:Name="CockpitSummaryUnrealizedCard"
+                            Grid.Row="1"
+                            Style="{StaticResource CockpitCardStyle}">
                             <StackPanel Spacing="8">
                                 <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Unrealized P&amp;L" />
                                 <TextBlock x:Name="CockpitUnrealizedText" FontSize="22" FontWeight="SemiBold" Text="—" />
@@ -371,9 +460,32 @@
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                     Text="No open mark-to-market yet"
                                     TextWrapping="Wrap" />
+                                <TextBlock
+                                    x:Name="CockpitLiquidationText"
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Liquidation P&amp;L —"
+                                    TextWrapping="Wrap" />
+                                <TextBlock
+                                    x:Name="CockpitMarkMovesText"
+                                    FontFamily="Consolas"
+                                    FontSize="11"
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                    Text="Δ1m — · Δ5m — · Δ60m —"
+                                    TextWrapping="Wrap" />
+                                <TextBlock
+                                    x:Name="CockpitMarkFreshnessText"
+                                    FontSize="11"
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                    Text="Last mark —"
+                                    TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
-                        <Border Grid.Column="3" Style="{StaticResource CockpitCardStyle}">
+                        <Border
+                            x:Name="CockpitSummaryExposureCard"
+                            Grid.Row="1"
+                            Grid.Column="1"
+                            Style="{StaticResource CockpitCardStyle}">
                             <StackPanel Spacing="8">
                                 <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Open exposure" />
                                 <TextBlock x:Name="CockpitExposureText" FontSize="22" FontWeight="SemiBold" Text="—" />
@@ -384,9 +496,16 @@
                                     TextWrapping="Wrap" />
                             </StackPanel>
                         </Border>
-                        <Border Grid.Column="4" Style="{StaticResource CockpitCardStyle}">
+                        <Border
+                            x:Name="CockpitSummaryGateCard"
+                            Grid.Row="2"
+                            Grid.ColumnSpan="2"
+                            Style="{StaticResource CockpitCardStyle}">
                             <StackPanel Spacing="8">
-                                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Validation gate" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Prospective validation gate"
+                                    ToolTipService.ToolTip="Only immutable dual-token CLOB evidence collected after the protocol cutover can pass this gate." />
                                 <TextBlock x:Name="GateStatusText" FontSize="22" FontWeight="SemiBold" Text="Not evaluated" />
                                 <TextBlock
                                     x:Name="GateDetailText"
@@ -399,17 +518,30 @@
 
                     <Border Style="{StaticResource CockpitCardStyle}">
                         <StackPanel Spacing="14">
-                            <Grid>
-                                <StackPanel Spacing="2">
+                            <Grid ColumnSpacing="16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Spacing="2">
                                     <TextBlock FontSize="18" FontWeight="SemiBold" Text="Edge validation" />
                                     <TextBlock
                                         x:Name="EdgeGateSubtitle"
                                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                         Text="Is the paper edge real, or luck? Live mode stays blocked until every check passes."
                                         TextWrapping="Wrap" />
+                                    <TextBlock
+                                        x:Name="EdgeProtocolText"
+                                        AutomationProperties.HelpText="The live gate restarts from zero and excludes legacy synthetic YES-price evidence."
+                                        FontSize="12"
+                                        Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                        Text="Prospective dual-token · new evidence cohort"
+                                        TextWrapping="Wrap"
+                                        ToolTipService.ToolTip="clob-dual-v1 uses independently captured YES and NO books. Legacy trades remain visible in portfolio history but do not count toward this gate." />
                                 </StackPanel>
                                 <Border
                                     x:Name="EdgeGateBadge"
+                                    Grid.Column="1"
                                     Padding="12,5"
                                     HorizontalAlignment="Right"
                                     VerticalAlignment="Top"
@@ -428,7 +560,10 @@
                                     <TextBlock x:Name="EdgeLuckText" FontSize="20" FontWeight="SemiBold" Text="—" />
                                 </StackPanel>
                                 <StackPanel Spacing="2">
-                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Brier model vs market" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Prospective Brier vs market"
+                                        ToolTipService.ToolTip="Computed only from resolved clob-dual-v1 trades on the current model cohort." />
                                     <TextBlock x:Name="EdgeBrierText" FontSize="20" FontWeight="SemiBold" Text="—" />
                                 </StackPanel>
                                 <StackPanel Spacing="2">
@@ -465,6 +600,1554 @@
                         </StackPanel>
                     </Border>
 
+                    <Border
+                        Style="{StaticResource CockpitCardStyle}"
+                        AutomationProperties.Name="Prospective evidence clock">
+                        <StackPanel Spacing="16">
+                            <Grid ColumnSpacing="16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="3">
+                                    <TextBlock
+                                        FontSize="18"
+                                        FontWeight="SemiBold"
+                                        Text="Prospective evidence clock" />
+                                    <TextBlock
+                                        x:Name="EvidenceClockSubtitle"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="One frozen probability cohort, followed from materialization through independent resolved outcomes."
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Border
+                                    x:Name="EvidenceClockBadge"
+                                    Grid.Column="1"
+                                    Padding="12,5"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Top"
+                                    Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                    CornerRadius="10">
+                                    <TextBlock
+                                        x:Name="EvidenceClockBadgeText"
+                                        AutomationProperties.LiveSetting="Polite"
+                                        Foreground="#FF111827"
+                                        FontWeight="SemiBold"
+                                        Text="LOADING" />
+                                </Border>
+                            </Grid>
+
+                            <Border
+                                Padding="14,12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <Grid ColumnSpacing="22" RowSpacing="8">
+                                    <VisualStateManager.VisualStateGroups>
+                                        <VisualStateGroup x:Name="EvidenceClockIdentityStates">
+                                            <VisualState x:Name="EvidenceClockIdentityCompact" />
+                                            <VisualState x:Name="EvidenceClockIdentityWide">
+                                                <VisualState.StateTriggers>
+                                                    <AdaptiveTrigger MinWindowWidth="1050" />
+                                                </VisualState.StateTriggers>
+                                                <VisualState.Setters>
+                                                    <Setter Target="EvidenceClockIdentityColumn1.Width" Value="*" />
+                                                    <Setter Target="EvidenceClockCandidatePanel.(Grid.Row)" Value="0" />
+                                                    <Setter Target="EvidenceClockCandidatePanel.(Grid.Column)" Value="1" />
+                                                </VisualState.Setters>
+                                            </VisualState>
+                                        </VisualStateGroup>
+                                    </VisualStateManager.VisualStateGroups>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition x:Name="EvidenceClockIdentityColumn1" Width="0" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <StackPanel Spacing="3">
+                                        <TextBlock
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="Frozen active cohort" />
+                                        <TextBlock
+                                            x:Name="EvidenceClockActiveCohortText"
+                                            AutomationProperties.Name="Frozen active evidence cohort"
+                                            FontFamily="Consolas"
+                                            FontSize="12"
+                                            FontWeight="SemiBold"
+                                            Text="Loading..."
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <StackPanel
+                                        x:Name="EvidenceClockCandidatePanel"
+                                        Grid.Row="1"
+                                        Spacing="3">
+                                        <TextBlock
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="Running candidate" />
+                                        <TextBlock
+                                            x:Name="EvidenceClockCandidateCohortText"
+                                            AutomationProperties.Name="Running candidate evidence cohort"
+                                            FontFamily="Consolas"
+                                            FontSize="12"
+                                            Text="Loading..."
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <TextBlock
+                                        x:Name="EvidenceClockEpochText"
+                                        Grid.Row="2"
+                                        Grid.ColumnSpan="2"
+                                        FontSize="11"
+                                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                        Text="Activation epoch loading..."
+                                        TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+
+                            <Border
+                                Padding="14,12"
+                                Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                CornerRadius="8">
+                                <StackPanel Spacing="4">
+                                    <TextBlock
+                                        x:Name="EvidenceClockBottleneckTitleText"
+                                        AutomationProperties.LiveSetting="Polite"
+                                        FontSize="15"
+                                        FontWeight="SemiBold"
+                                        Text="Locating the current bottleneck" />
+                                    <TextBlock
+                                        x:Name="EvidenceClockBottleneckDetailText"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Evidence flow is loading."
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+
+                            <Grid x:Name="EvidenceClockMetricGrid" ColumnSpacing="28" RowSpacing="12">
+                                <VisualStateManager.VisualStateGroups>
+                                    <VisualStateGroup x:Name="EvidenceClockMetricStates">
+                                        <VisualState x:Name="EvidenceClockMetricCompact" />
+                                        <VisualState x:Name="EvidenceClockMetricWide">
+                                            <VisualState.StateTriggers>
+                                                <AdaptiveTrigger MinWindowWidth="1050" />
+                                            </VisualState.StateTriggers>
+                                            <VisualState.Setters>
+                                                <Setter Target="EvidenceClockMetricColumn1.Width" Value="*" />
+                                                <Setter Target="EvidenceClockMetricColumn2.Width" Value="*" />
+                                                <Setter Target="EvidenceClockMetricColumn3.Width" Value="*" />
+                                                <Setter Target="EvidenceClockVelocityMetric.(Grid.Row)" Value="0" />
+                                                <Setter Target="EvidenceClockVelocityMetric.(Grid.Column)" Value="1" />
+                                                <Setter Target="EvidenceClockStationMetric.(Grid.Row)" Value="0" />
+                                                <Setter Target="EvidenceClockStationMetric.(Grid.Column)" Value="2" />
+                                                <Setter Target="EvidenceClockExposureMetric.(Grid.Row)" Value="0" />
+                                                <Setter Target="EvidenceClockExposureMetric.(Grid.Column)" Value="3" />
+                                            </VisualState.Setters>
+                                        </VisualState>
+                                    </VisualStateGroup>
+                                </VisualStateManager.VisualStateGroups>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition x:Name="EvidenceClockMetricColumn1" Width="0" />
+                                    <ColumnDefinition x:Name="EvidenceClockMetricColumn2" Width="0" />
+                                    <ColumnDefinition x:Name="EvidenceClockMetricColumn3" Width="0" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <StackPanel Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Complete collection days" />
+                                    <TextBlock x:Name="EvidenceClockDaysText" FontSize="20" FontWeight="SemiBold" Text="-" />
+                                    <TextBlock
+                                        x:Name="EvidenceClockDaysDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Baseline window is loading"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel x:Name="EvidenceClockVelocityMetric" Grid.Row="1" Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Outcome velocity / ETA" />
+                                    <TextBlock
+                                        x:Name="EvidenceClockVelocityText"
+                                        FontSize="16"
+                                        FontWeight="SemiBold"
+                                        Text="Collecting baseline"
+                                        TextWrapping="Wrap" />
+                                    <TextBlock
+                                        x:Name="EvidenceClockVelocityDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="collecting baseline · ETA after 7 complete days"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel x:Name="EvidenceClockStationMetric" Grid.Row="2" Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Station lanes" />
+                                    <TextBlock x:Name="EvidenceClockStationText" FontSize="20" FontWeight="SemiBold" Text="-" />
+                                    <TextBlock
+                                        x:Name="EvidenceClockStationDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Paper and shadow station counts"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel x:Name="EvidenceClockExposureMetric" Grid.Row="3" Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Open paper exposure" />
+                                    <TextBlock x:Name="EvidenceClockExposureText" FontSize="20" FontWeight="SemiBold" Text="-" />
+                                    <TextBlock
+                                        x:Name="EvidenceClockExposureDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Open positions and bankroll"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Grid>
+
+                            <StackPanel Spacing="8">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock FontSize="15" FontWeight="SemiBold" Text="Evidence funnel" />
+                                    <TextBlock
+                                        x:Name="EvidenceClockSignalText"
+                                        Grid.Column="1"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Signals loading" />
+                                </Grid>
+                                <TextBlock
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Probabilities → intents → fills → enrollments → outcomes"
+                                    TextWrapping="Wrap" />
+                                <ItemsControl
+                                    x:Name="EvidenceClockFunnelItems"
+                                    AutomationProperties.Name="Prospective evidence funnel">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <ItemsWrapGrid Orientation="Horizontal" />
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="models:EvidenceFunnelItem">
+                                            <Border
+                                                Width="220"
+                                                MinHeight="104"
+                                                Margin="0,0,10,10"
+                                                Padding="12"
+                                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="8">
+                                                <Grid ColumnSpacing="10">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="4" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border Background="{x:Bind Accent, Converter={StaticResource AccentToBrush}}" CornerRadius="2" />
+                                                    <StackPanel Grid.Column="1" Spacing="3">
+                                                        <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{x:Bind Stage}" />
+                                                        <TextBlock FontSize="22" FontWeight="SemiBold" Text="{x:Bind Value}" />
+                                                        <TextBlock
+                                                            FontSize="11"
+                                                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                            Text="{x:Bind Detail}"
+                                                            TextWrapping="Wrap" />
+                                                    </StackPanel>
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <TextBlock
+                                    x:Name="EvidenceClockSkipReasonsText"
+                                    AutomationProperties.Name="Top prospective signal skip reasons"
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Top skip reasons are loading."
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+
+                            <StackPanel Spacing="8">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock FontSize="15" FontWeight="SemiBold" Text="Continuity decisions" />
+                                    <TextBlock
+                                        x:Name="EvidenceClockLaneSummaryText"
+                                        Grid.Column="1"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Loading lanes" />
+                                </Grid>
+                                <ItemsControl
+                                    x:Name="EvidenceClockLaneItems"
+                                    AutomationProperties.Name="Active release continuity lane decisions">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="models:MonitoringListItem">
+                                            <Grid Margin="0,0,0,10" ColumnSpacing="12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="4" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <Border Background="{x:Bind Accent, Converter={StaticResource AccentToBrush}}" CornerRadius="2" />
+                                                <StackPanel Grid.Column="1" Spacing="3">
+                                                    <TextBlock FontFamily="Consolas" FontSize="12" FontWeight="SemiBold" Text="{x:Bind Title}" TextWrapping="Wrap" />
+                                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{x:Bind Subtitle}" TextWrapping="Wrap" />
+                                                    <TextBlock FontSize="12" Text="{x:Bind Detail}" TextWrapping="Wrap" />
+                                                    <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" Text="{x:Bind Meta}" TextWrapping="Wrap" />
+                                                </StackPanel>
+                                                <Border
+                                                    Grid.Column="2"
+                                                    Padding="9,4"
+                                                    VerticalAlignment="Top"
+                                                    Background="{x:Bind Accent, Converter={StaticResource AccentToBrush}}"
+                                                    CornerRadius="8">
+                                                    <TextBlock
+                                                        FontSize="11"
+                                                        FontWeight="SemiBold"
+                                                        Foreground="#FF111827"
+                                                        Text="{x:Bind Status}" />
+                                                </Border>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+
+                            <TextBlock
+                                x:Name="EvidenceClockIntegrityText"
+                                AutomationProperties.HelpText="Evidence epoch, cohort continuity, and read-only audit metadata"
+                                FontSize="11"
+                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                Text="Evidence continuity metadata loading..."
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource CockpitCardStyle}">
+                        <StackPanel Spacing="16">
+                            <Grid ColumnSpacing="16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="3">
+                                    <TextBlock
+                                        FontSize="18"
+                                        FontWeight="SemiBold"
+                                        Text="Prospective validation ledger" />
+                                    <TextBlock
+                                        x:Name="ValidationLedgerSubtitle"
+                                        AutomationProperties.HelpText="This immutable zero-backfill diagnostic is separate from the live trading gate."
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Immutable zero-backfill evidence collected after the registration boundary. Diagnostic only; it does not unlock live mode."
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Border
+                                    x:Name="ValidationLedgerBadge"
+                                    Grid.Column="1"
+                                    Padding="12,5"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Top"
+                                    Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                    CornerRadius="10">
+                                    <TextBlock
+                                        x:Name="ValidationLedgerBadgeText"
+                                        AutomationProperties.LiveSetting="Polite"
+                                        FontWeight="SemiBold"
+                                        Text="LOADING" />
+                                </Border>
+                            </Grid>
+
+                            <StackPanel Spacing="3">
+                                <TextBlock
+                                    x:Name="ValidationLedgerCohortText"
+                                    AutomationProperties.Name="Selected immutable pipeline cohort"
+                                    FontFamily="Consolas"
+                                    FontSize="12"
+                                    Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                    Text="Cohort loading..."
+                                    TextWrapping="Wrap" />
+                                <TextBlock
+                                    x:Name="ValidationLedgerBoundaryText"
+                                    FontSize="11"
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                    Text="Registration boundary and definition loading..."
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+
+                            <Grid x:Name="ValidationLedgerMetricGrid" ColumnSpacing="28" RowSpacing="14">
+                                <VisualStateManager.VisualStateGroups>
+                                    <VisualStateGroup x:Name="ValidationLedgerLayoutStates">
+                                        <VisualState x:Name="ValidationLedgerCompact" />
+                                        <VisualState x:Name="ValidationLedgerWide">
+                                            <VisualState.StateTriggers>
+                                                <AdaptiveTrigger MinWindowWidth="1050" />
+                                            </VisualState.StateTriggers>
+                                            <VisualState.Setters>
+                                                <Setter Target="ValidationLedgerMetricColumn1.Width" Value="*" />
+                                                <Setter Target="ValidationLedgerMetricColumn2.Width" Value="*" />
+                                                <Setter Target="ValidationClosedMetric.(Grid.Row)" Value="0" />
+                                                <Setter Target="ValidationClosedMetric.(Grid.Column)" Value="1" />
+                                                <Setter Target="ValidationPnlMetric.(Grid.Row)" Value="0" />
+                                                <Setter Target="ValidationPnlMetric.(Grid.Column)" Value="2" />
+                                                <Setter Target="ValidationDrawdownMetric.(Grid.Row)" Value="1" />
+                                                <Setter Target="ValidationDrawdownMetric.(Grid.Column)" Value="0" />
+                                                <Setter Target="ValidationRobustMetric.(Grid.Row)" Value="1" />
+                                                <Setter Target="ValidationRobustMetric.(Grid.Column)" Value="1" />
+                                                <Setter Target="ValidationConcentrationMetric.(Grid.Row)" Value="1" />
+                                                <Setter Target="ValidationConcentrationMetric.(Grid.Column)" Value="2" />
+                                            </VisualState.Setters>
+                                        </VisualState>
+                                    </VisualStateGroup>
+                                </VisualStateManager.VisualStateGroups>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition x:Name="ValidationLedgerMetricColumn1" Width="0" />
+                                    <ColumnDefinition x:Name="ValidationLedgerMetricColumn2" Width="0" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+
+                                <StackPanel Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Enrollment" />
+                                    <TextBlock
+                                        x:Name="ValidationEnrollmentText"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        Text="-" />
+                                    <TextBlock
+                                        x:Name="ValidationEnrollmentDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Waiting for post-boundary fills"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel x:Name="ValidationClosedMetric" Grid.Row="1" Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Resolved evidence" />
+                                    <TextBlock
+                                        x:Name="ValidationClosedText"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        Text="-" />
+                                    <TextBlock
+                                        x:Name="ValidationClosedDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Closed orders and independent blocks"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel x:Name="ValidationPnlMetric" Grid.Row="2" Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Prospective P&amp;L / ROI" />
+                                    <TextBlock
+                                        x:Name="ValidationPnlText"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        Text="-" />
+                                    <TextBlock
+                                        x:Name="ValidationPnlDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No resolved prospective orders"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel x:Name="ValidationDrawdownMetric" Grid.Row="3" Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Maximum drawdown" />
+                                    <TextBlock
+                                        x:Name="ValidationDrawdownText"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        Text="-" />
+                                    <TextBlock
+                                        x:Name="ValidationDrawdownDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Dollar and bankroll fraction"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel x:Name="ValidationRobustMetric" Grid.Row="4" Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Excluding largest order" />
+                                    <TextBlock
+                                        x:Name="ValidationRobustText"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        Text="-" />
+                                    <TextBlock
+                                        x:Name="ValidationRobustDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Needs at least two closed orders"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel x:Name="ValidationConcentrationMetric" Grid.Row="5" Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Largest |P&amp;L| share" />
+                                    <TextBlock
+                                        x:Name="ValidationConcentrationText"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        Text="-" />
+                                    <TextBlock
+                                        x:Name="ValidationConcentrationDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Outcome concentration unavailable"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Grid>
+
+                            <Border
+                                Padding="16,14"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <StackPanel Spacing="10">
+                                    <Grid ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Spacing="2">
+                                            <TextBlock
+                                                x:Name="ValidationLedgerChartTitle"
+                                                FontSize="16"
+                                                FontWeight="SemiBold"
+                                                Text="Immutable cohort trajectory" />
+                                            <TextBlock
+                                                x:Name="ValidationLedgerChartSubtitle"
+                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                Text="Waiting for the first post-boundary fill and resolution"
+                                                TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <TextBlock
+                                            x:Name="ValidationLedgerLegendText"
+                                            Grid.Column="1"
+                                            VerticalAlignment="Top"
+                                            FontSize="11"
+                                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                            Text="Cumulative P&amp;L" />
+                                    </Grid>
+                                    <Grid MinHeight="200">
+                                        <Canvas
+                                            x:Name="ValidationLedgerCanvas"
+                                            Height="200"
+                                            AutomationProperties.HelpText="Hover the immutable prospective validation trajectory to inspect each independent station-day-kind block."
+                                            AutomationProperties.Name="Prospective validation cumulative profit and loss trajectory"
+                                            Background="Transparent"
+                                            PointerEntered="ValidationLedgerCanvas_PointerMoved"
+                                            PointerExited="ValidationLedgerCanvas_PointerExited"
+                                            PointerMoved="ValidationLedgerCanvas_PointerMoved"
+                                            SizeChanged="ValidationLedgerCanvas_SizeChanged" />
+                                        <TextBlock
+                                            x:Name="ValidationLedgerEmptyText"
+                                            Margin="20"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center"
+                                            AutomationProperties.LiveSetting="Polite"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            IsHitTestVisible="False"
+                                            MaxWidth="560"
+                                            Text="Waiting for the first post-boundary fill and resolution. Pre-boundary history is intentionally excluded."
+                                            TextAlignment="Center"
+                                            TextWrapping="Wrap" />
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+                            <TextBlock
+                                FontSize="11"
+                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                Text="This ledger measures one immutable prospective cohort. It is evidence, not permission to trade live; the validation gate above remains authoritative."
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource CockpitCardStyle}">
+                        <StackPanel Spacing="16">
+                            <Grid ColumnSpacing="16">
+                                <StackPanel Spacing="2">
+                                    <TextBlock FontSize="18" FontWeight="SemiBold" Text="Execution quality" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Where predicted edge is consumed between decision, fill, fees, and post-fill market movement."
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Border
+                                    x:Name="ExecutionQualityBadge"
+                                    Padding="12,5"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Top"
+                                    Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                    CornerRadius="10">
+                                    <TextBlock x:Name="ExecutionQualityBadgeText" FontWeight="SemiBold" Text="COLLECTING" />
+                                </Border>
+                            </Grid>
+
+                            <Grid x:Name="ExecutionQualitySummaryGrid" ColumnSpacing="28" RowSpacing="12">
+                                <VisualStateManager.VisualStateGroups>
+                                    <VisualStateGroup x:Name="ExecutionQualitySummaryStates">
+                                        <VisualState x:Name="ExecutionQualitySummaryCompact" />
+                                        <VisualState x:Name="ExecutionQualitySummaryWide">
+                                            <VisualState.StateTriggers>
+                                                <AdaptiveTrigger MinWindowWidth="1050" />
+                                            </VisualState.StateTriggers>
+                                            <VisualState.Setters>
+                                                <Setter Target="ExecutionQualityColumn2.Width" Value="*" />
+                                                <Setter Target="ExecutionQualityColumn3.Width" Value="*" />
+                                                <Setter Target="ExecutionQualityEligibleMetric.(Grid.Row)" Value="0" />
+                                                <Setter Target="ExecutionQualityEligibleMetric.(Grid.Column)" Value="2" />
+                                                <Setter Target="ExecutionQualityNetMetric.(Grid.Row)" Value="0" />
+                                                <Setter Target="ExecutionQualityNetMetric.(Grid.Column)" Value="3" />
+                                            </VisualState.Setters>
+                                        </VisualState>
+                                    </VisualStateGroup>
+                                </VisualStateManager.VisualStateGroups>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition x:Name="ExecutionQualityColumn2" Width="0" />
+                                    <ColumnDefinition x:Name="ExecutionQualityColumn3" Width="0" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <StackPanel Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Execution attempts" />
+                                    <TextBlock x:Name="ExecutionQualityAttemptsText" FontSize="20" FontWeight="SemiBold" Text="—" />
+                                    <TextBlock
+                                        x:Name="ExecutionQualityAttemptsDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Waiting for the first post-boundary intent"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Maker fill rate" />
+                                    <TextBlock x:Name="ExecutionQualityMakerText" FontSize="20" FontWeight="SemiBold" Text="Not measured" />
+                                    <ProgressBar
+                                        x:Name="ExecutionQualityMakerProgress"
+                                        Height="5"
+                                        AutomationProperties.Name="Maker fill rate"
+                                        Maximum="1"
+                                        Value="0" />
+                                    <TextBlock
+                                        x:Name="ExecutionQualityMakerDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No maker attempts yet"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel
+                                    x:Name="ExecutionQualityEligibleMetric"
+                                    Grid.Row="1"
+                                    Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Eligible sealed orders" />
+                                    <TextBlock x:Name="ExecutionQualityEligibleText" FontSize="20" FontWeight="SemiBold" Text="Not measured" />
+                                    <TextBlock
+                                        x:Name="ExecutionQualityEligibleDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No sealed execution evidence yet"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel
+                                    x:Name="ExecutionQualityNetMetric"
+                                    Grid.Row="1"
+                                    Grid.Column="1"
+                                    Spacing="3">
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Realized net edge / share"
+                                        ToolTipService.ToolTip="Model edge after latency, spread, slippage, maker improvement, and exact fees." />
+                                    <TextBlock x:Name="ExecutionQualityNetText" FontSize="20" FontWeight="SemiBold" Text="Not measured" />
+                                    <TextBlock
+                                        x:Name="ExecutionQualityNetDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Requires an eligible sealed fill"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Grid>
+
+                            <Border
+                                Padding="16,14"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <StackPanel Spacing="10">
+                                    <StackPanel Spacing="2">
+                                        <TextBlock FontSize="15" FontWeight="SemiBold" Text="Execution edge waterfall" />
+                                        <TextBlock
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="Gross model edge − latency − spread − slippage + maker improvement − fees = realized net edge."
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <ScrollViewer
+                                        HorizontalScrollBarVisibility="Auto"
+                                        HorizontalScrollMode="Enabled"
+                                        VerticalScrollBarVisibility="Disabled"
+                                        VerticalScrollMode="Disabled">
+                                        <Grid Width="870" ColumnSpacing="14">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Spacing="3">
+                                                <TextBlock Height="32" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Gross edge" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="ExecutionQualityGrossText" FontSize="14" FontWeight="SemiBold" Text="Not measured" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1" Spacing="3">
+                                                <TextBlock Height="32" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Latency movement" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="ExecutionQualityLatencyText" FontSize="14" FontWeight="SemiBold" Text="Not measured" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2" Spacing="3">
+                                                <TextBlock Height="32" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Taker spread" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="ExecutionQualitySpreadText" FontSize="14" FontWeight="SemiBold" Text="Not measured" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="3" Spacing="3">
+                                                <TextBlock Height="32" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Taker slippage" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="ExecutionQualitySlippageText" FontSize="14" FontWeight="SemiBold" Text="Not measured" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="4" Spacing="3">
+                                                <TextBlock Height="32" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Maker improvement" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="ExecutionQualityMakerImprovementText" FontSize="14" FontWeight="SemiBold" Text="Not measured" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="5" Spacing="3">
+                                                <TextBlock Height="32" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Fee drag" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="ExecutionQualityFeeText" FontSize="14" FontWeight="SemiBold" Text="Not measured" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="6" Spacing="3">
+                                                <TextBlock Height="32" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Net edge" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="ExecutionQualityWaterfallNetText" FontSize="14" FontWeight="SemiBold" Text="Not measured" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </ScrollViewer>
+                                </StackPanel>
+                            </Border>
+
+                            <Grid ColumnSpacing="24" RowSpacing="10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="4">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Expected slippage" />
+                                    <ProgressBar x:Name="ExecutionQualitySlippageCoverageProgress" Height="5" Maximum="1" Value="0" />
+                                    <TextBlock x:Name="ExecutionQualitySlippageCoverageText" FontSize="12" Text="Not measured" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Spacing="4">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Exact fee" />
+                                    <ProgressBar x:Name="ExecutionQualityFeeCoverageProgress" Height="5" Maximum="1" Value="0" />
+                                    <TextBlock x:Name="ExecutionQualityFeeCoverageText" FontSize="12" Text="Not measured" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2" Spacing="4">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="5 min markout" />
+                                    <ProgressBar x:Name="ExecutionQuality5mCoverageProgress" Height="5" Maximum="1" Value="0" />
+                                    <TextBlock x:Name="ExecutionQuality5mCoverageText" FontSize="12" Text="Not measured" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="3" Spacing="4">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="30 min markout" />
+                                    <ProgressBar x:Name="ExecutionQuality30mCoverageProgress" Height="5" Maximum="1" Value="0" />
+                                    <TextBlock x:Name="ExecutionQuality30mCoverageText" FontSize="12" Text="Not measured" TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Grid>
+                            <TextBlock
+                                x:Name="ExecutionQualityMarkoutText"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Adverse selection: 5 min not measured · 30 min not measured"
+                                TextWrapping="Wrap" />
+                            <TextBlock
+                                x:Name="ExecutionQualityIntegrityText"
+                                AutomationProperties.HelpText="Execution evidence protocol, role mix, and ineligibility reasons"
+                                FontFamily="Consolas"
+                                FontSize="11"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Prospective execution evidence ledger loading…"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border
+                        Style="{StaticResource CockpitCardStyle}"
+                        AutomationProperties.Name="Official resolution truth">
+                        <StackPanel Spacing="14">
+                            <Grid ColumnSpacing="16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="2">
+                                    <TextBlock FontSize="18" FontWeight="SemiBold" Text="Official resolution truth" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Licensed source artifacts and exact values used for settlement-aligned evaluation."
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Border
+                                    x:Name="OfficialResolutionBadge"
+                                    Grid.Column="1"
+                                    Padding="12,5"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Top"
+                                    AutomationProperties.Name="Official resolution source status"
+                                    Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                    CornerRadius="10">
+                                    <TextBlock
+                                        x:Name="OfficialResolutionBadgeText"
+                                        AutomationProperties.HelpText="Whether external authorization, artifact integrity, and official evidence collection are ready"
+                                        AutomationProperties.LiveSetting="Polite"
+                                        FontWeight="SemiBold"
+                                        Text="LOADING" />
+                                </Border>
+                            </Grid>
+
+                            <Grid x:Name="OfficialResolutionMetricsGrid" ColumnSpacing="28" RowSpacing="14">
+                                <VisualStateManager.VisualStateGroups>
+                                    <VisualStateGroup x:Name="OfficialResolutionMetricsStates">
+                                        <VisualState x:Name="OfficialResolutionMetricsCompact" />
+                                        <VisualState x:Name="OfficialResolutionMetricsWide">
+                                            <VisualState.StateTriggers>
+                                                <AdaptiveTrigger MinWindowWidth="1050" />
+                                            </VisualState.StateTriggers>
+                                            <VisualState.Setters>
+                                                <Setter Target="OfficialResolutionMetricColumn2.Width" Value="*" />
+                                                <Setter Target="OfficialResolutionMetricColumn3.Width" Value="*" />
+                                                <Setter Target="OfficialResolutionExactMetric.(Grid.Row)" Value="0" />
+                                                <Setter Target="OfficialResolutionExactMetric.(Grid.Column)" Value="2" />
+                                                <Setter Target="OfficialResolutionFreshnessMetric.(Grid.Row)" Value="0" />
+                                                <Setter Target="OfficialResolutionFreshnessMetric.(Grid.Column)" Value="3" />
+                                            </VisualState.Setters>
+                                        </VisualState>
+                                    </VisualStateGroup>
+                                </VisualStateManager.VisualStateGroups>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition x:Name="OfficialResolutionMetricColumn2" Width="0" />
+                                    <ColumnDefinition x:Name="OfficialResolutionMetricColumn3" Width="0" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+
+                                <StackPanel
+                                    Spacing="3"
+                                    AutomationProperties.Name="Licensed official resolution contracts">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Licensed contracts" />
+                                    <TextBlock
+                                        x:Name="OfficialResolutionLicensedText"
+                                        AutomationProperties.LiveSetting="Polite"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        Text="—" />
+                                    <TextBlock
+                                        x:Name="OfficialResolutionLicensedDetailText"
+                                        AutomationProperties.HelpText="Active, blocked, and expired official resolution source authorizations"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Authorization inventory unavailable"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+
+                                <StackPanel
+                                    Grid.Column="1"
+                                    Spacing="3"
+                                    AutomationProperties.Name="Immutable official source artifacts">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Raw source artifacts" />
+                                    <TextBlock
+                                        x:Name="OfficialResolutionArtifactsText"
+                                        AutomationProperties.LiveSetting="Polite"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        Text="—" />
+                                    <TextBlock
+                                        x:Name="OfficialResolutionArtifactsDetailText"
+                                        AutomationProperties.HelpText="Count and byte size of immutable official source responses"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No response ledger loaded"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+
+                                <StackPanel
+                                    x:Name="OfficialResolutionExactMetric"
+                                    Grid.Row="1"
+                                    Spacing="4"
+                                    AutomationProperties.Name="Official exact truth coverage">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Exact truth coverage" />
+                                    <TextBlock
+                                        x:Name="OfficialResolutionExactText"
+                                        AutomationProperties.LiveSetting="Polite"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        Text="—" />
+                                    <ProgressBar
+                                        x:Name="OfficialResolutionCoverageProgress"
+                                        Height="5"
+                                        AutomationProperties.Name="Official exact truth coverage progress"
+                                        Maximum="1"
+                                        Value="0" />
+                                    <TextBlock
+                                        x:Name="OfficialResolutionExactDetailText"
+                                        AutomationProperties.HelpText="Exact official values and settlement-actual projections"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Exact values and projections unavailable"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+
+                                <StackPanel
+                                    x:Name="OfficialResolutionFreshnessMetric"
+                                    Grid.Row="1"
+                                    Grid.Column="1"
+                                    Spacing="3"
+                                    AutomationProperties.Name="Latest official truth evidence">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Latest exact truth" />
+                                    <TextBlock
+                                        x:Name="OfficialResolutionLatestText"
+                                        AutomationProperties.LiveSetting="Polite"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        Text="—" />
+                                    <TextBlock
+                                        x:Name="OfficialResolutionLatestDetailText"
+                                        AutomationProperties.HelpText="Freshness of the latest raw response and exact official value"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No official evidence observed"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Grid>
+
+                            <InfoBar
+                                IsClosable="False"
+                                IsOpen="True"
+                                Message="METAR is not official truth. It remains a consistency diagnostic and cannot satisfy this evidence boundary."
+                                Severity="Informational"
+                                Title="Settlement boundary"
+                                AutomationProperties.Name="METAR is not official truth" />
+
+                            <TextBlock
+                                x:Name="OfficialResolutionIntegrityText"
+                                AutomationProperties.HelpText="Official truth definition hash, license, response, and extraction protocol versions"
+                                FontFamily="Consolas"
+                                FontSize="11"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Official resolution evidence protocol loading…"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource CockpitCardStyle}">
+                        <StackPanel Spacing="14">
+                            <Grid ColumnSpacing="16">
+                                <StackPanel Spacing="2">
+                                    <TextBlock FontSize="18" FontWeight="SemiBold" Text="Resolution &amp; evidence operations" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="METAR consistency, official exact-source coverage, settlement polling, and immutable-ledger capacity."
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Border
+                                    x:Name="EvidenceOpsBadge"
+                                    Padding="12,5"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Top"
+                                    Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                    CornerRadius="10">
+                                    <TextBlock
+                                        x:Name="EvidenceOpsBadgeText"
+                                        AutomationProperties.HelpText="Overall evidence operations status"
+                                        AutomationProperties.LiveSetting="Polite"
+                                        FontWeight="SemiBold"
+                                        Text="LOADING" />
+                                </Border>
+                            </Grid>
+                            <Grid x:Name="EvidenceOpsGrid" ColumnSpacing="28" RowSpacing="14">
+                                <VisualStateManager.VisualStateGroups>
+                                    <VisualStateGroup x:Name="EvidenceOpsLayoutStates">
+                                        <VisualState x:Name="EvidenceOpsCompact" />
+                                        <VisualState x:Name="EvidenceOpsWide">
+                                            <VisualState.StateTriggers>
+                                                <AdaptiveTrigger MinWindowWidth="1000" />
+                                            </VisualState.StateTriggers>
+                                            <VisualState.Setters>
+                                                <Setter Target="EvidenceOpsColumn1.Width" Value="*" />
+                                                <Setter Target="EvidenceOpsColumn2.Width" Value="*" />
+                                                <Setter Target="EvidenceSettlementMetric.(Grid.Row)" Value="0" />
+                                                <Setter Target="EvidenceSettlementMetric.(Grid.Column)" Value="1" />
+                                                <Setter Target="EvidenceStorageMetric.(Grid.Row)" Value="0" />
+                                                <Setter Target="EvidenceStorageMetric.(Grid.Column)" Value="2" />
+                                            </VisualState.Setters>
+                                        </VisualState>
+                                    </VisualStateGroup>
+                                </VisualStateManager.VisualStateGroups>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition x:Name="EvidenceOpsColumn1" Width="0" />
+                                    <ColumnDefinition x:Name="EvidenceOpsColumn2" Width="0" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <StackPanel Spacing="4">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Resolution QA" />
+                                    <TextBlock
+                                        x:Name="EvidenceResolutionText"
+                                        AutomationProperties.HelpText="Resolved markets consistent with METAR-derived truth"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        Text="—" />
+                                    <TextBlock
+                                        x:Name="EvidenceResolutionExactText"
+                                        AutomationProperties.HelpText="Official exact-source coverage counts only exact values with an attested source hash. It is distinct from raw exact values and METAR consistency, and must be complete before this card can be healthy."
+                                        FontSize="14"
+                                        FontWeight="SemiBold"
+                                        Text="Official exact truth —"
+                                        TextWrapping="Wrap" />
+                                    <TextBlock
+                                        x:Name="EvidenceResolutionDetailText"
+                                        AutomationProperties.HelpText="Resolution classification details"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Waiting for reconciliation"
+                                        TextWrapping="Wrap" />
+                                    <TextBlock
+                                        x:Name="EvidenceResolutionFreshnessText"
+                                        AutomationProperties.HelpText="Resolution reconciliation freshness, stale-record count, and service-level threshold"
+                                        FontFamily="Consolas"
+                                        FontSize="11"
+                                        Text="Freshness pending"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel x:Name="EvidenceSettlementMetric" Grid.Row="1" Spacing="4">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Settlement lifecycle" />
+                                    <TextBlock
+                                        x:Name="EvidenceSettlementText"
+                                        AutomationProperties.HelpText="Open settlement cases"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        Text="—" />
+                                    <TextBlock
+                                        x:Name="EvidenceSettlementDetailText"
+                                        AutomationProperties.HelpText="Settlement classification details"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Waiting for settlement cases"
+                                        TextWrapping="Wrap" />
+                                    <TextBlock
+                                        x:Name="EvidenceSettlementFreshnessText"
+                                        AutomationProperties.HelpText="Settlement polling freshness, stale open cases, and service-level threshold"
+                                        FontFamily="Consolas"
+                                        FontSize="11"
+                                        Text="Polling freshness pending"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel x:Name="EvidenceStorageMetric" Grid.Row="2" Spacing="4">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Immutable CLOB ledger" />
+                                    <TextBlock x:Name="EvidenceStorageText" FontSize="20" FontWeight="SemiBold" Text="—" />
+                                    <ProgressBar
+                                        x:Name="EvidenceStorageProgress"
+                                        Height="6"
+                                        AutomationProperties.Name="Immutable evidence capacity used"
+                                        Maximum="1"
+                                        Value="0" />
+                                    <TextBlock
+                                        x:Name="EvidenceStorageDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Waiting for capacity measurement"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Grid>
+                            <TextBlock
+                                x:Name="EvidenceOpsHintText"
+                                FontFamily="Consolas"
+                                FontSize="11"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Evidence policy loading…"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource CockpitCardStyle}">
+                        <StackPanel Spacing="14">
+                            <Grid ColumnSpacing="16">
+                                <StackPanel Spacing="2">
+                                    <TextBlock FontSize="18" FontWeight="SemiBold" Text="Forecast source evidence" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Exact provider responses, parsed manifests, model runs, availability, and input lineage."
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Border
+                                    x:Name="ForecastProvenanceBadge"
+                                    Padding="12,5"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Top"
+                                    Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                    CornerRadius="10">
+                                    <TextBlock x:Name="ForecastProvenanceBadgeText" FontWeight="SemiBold" Text="COLLECTING" />
+                                </Border>
+                            </Grid>
+                            <Grid ColumnSpacing="28" RowSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Immutable ingests" />
+                                    <TextBlock x:Name="ForecastProvenanceIngestText" FontSize="20" FontWeight="SemiBold" Text="—" />
+                                    <TextBlock
+                                        x:Name="ForecastProvenanceIngestDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Waiting for source responses"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Materialized inputs" />
+                                    <TextBlock x:Name="ForecastProvenanceRowsText" FontSize="20" FontWeight="SemiBold" Text="—" />
+                                    <TextBlock
+                                        x:Name="ForecastProvenanceRowsDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Forecast and trajectory rows"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2" Spacing="3">
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Active probability lineage"
+                                        ToolTipService.ToolTip="Every current probability must bind exact immutable forecast source evidence." />
+                                    <TextBlock x:Name="ForecastProvenanceProbabilityText" FontSize="20" FontWeight="SemiBold" Text="—" />
+                                    <ProgressBar
+                                        x:Name="ForecastProvenanceCoverageProgress"
+                                        Height="5"
+                                        AutomationProperties.Name="Active probability forecast evidence coverage"
+                                        Maximum="1"
+                                        Value="0" />
+                                    <TextBlock
+                                        x:Name="ForecastProvenanceProbabilityDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Prospective coverage pending"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="3" Spacing="3">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Collection latency p95" />
+                                    <TextBlock x:Name="ForecastProvenanceLatencyText" FontSize="20" FontWeight="SemiBold" Text="—" />
+                                    <TextBlock
+                                        x:Name="ForecastProvenanceLatencyDetailText"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="HTTP and database first-seen"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Grid>
+                            <TextBlock
+                                x:Name="ForecastProvenanceIntegrityText"
+                                AutomationProperties.HelpText="Forecast source integrity and upstream initialization coverage"
+                                FontFamily="Consolas"
+                                FontSize="11"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Prospective zero-backfill evidence ledger loading…"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource CockpitCardStyle}">
+                        <StackPanel Spacing="14">
+                            <Grid>
+                                <StackPanel Spacing="2">
+                                    <TextBlock FontSize="18" FontWeight="SemiBold" Text="Accuracy laboratory" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Resolution-native truth, point-in-time scoring, model bake-off, stacking, and drift control."
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Border
+                                    x:Name="AccuracyBadge"
+                                    Padding="12,5"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Top"
+                                    Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                    CornerRadius="10">
+                                    <TextBlock x:Name="AccuracyBadgeText" FontWeight="SemiBold" Text="—" />
+                                </Border>
+                            </Grid>
+                            <Grid ColumnSpacing="28">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="2">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Settlement truth" />
+                                    <TextBlock x:Name="AccuracyTruthText" FontSize="20" FontWeight="SemiBold" Text="—" />
+                                    <TextBlock x:Name="AccuracyTruthDetail" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Spacing="2">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Independent samples" />
+                                    <TextBlock x:Name="AccuracyEvaluationText" FontSize="20" FontWeight="SemiBold" Text="—" />
+                                    <TextBlock x:Name="AccuracyEvaluationDetail" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2" Spacing="2">
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Prospective model vs market Brier"
+                                        ToolTipService.ToolTip="This comparison excludes legacy synthetic market-price evidence." />
+                                    <TextBlock x:Name="AccuracyBrierText" FontSize="20" FontWeight="SemiBold" Text="—" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="3" Spacing="2">
+                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Qualified model slices" />
+                                    <TextBlock x:Name="AccuracySkillText" FontSize="20" FontWeight="SemiBold" Text="—" />
+                                    <TextBlock x:Name="AccuracySkillDetail" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Grid>
+                            <Border
+                                Padding="16,14"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8">
+                                <Grid x:Name="PromotionSectionGrid" RowSpacing="12">
+                                    <VisualStateManager.VisualStateGroups>
+                                        <VisualStateGroup x:Name="PromotionLayoutStates">
+                                            <VisualState x:Name="PromotionCompact" />
+                                            <VisualState x:Name="PromotionWide">
+                                                <VisualState.StateTriggers>
+                                                    <AdaptiveTrigger MinWindowWidth="1050" />
+                                                </VisualState.StateTriggers>
+                                                <VisualState.Setters>
+                                                    <Setter Target="PromotionMetricColumn2.Width" Value="*" />
+                                                    <Setter Target="PromotionMetricColumn3.Width" Value="*" />
+                                                    <Setter Target="PromotionDecisionMetric.(Grid.Row)" Value="0" />
+                                                    <Setter Target="PromotionDecisionMetric.(Grid.Column)" Value="2" />
+                                                    <Setter Target="PromotionActivatedMetric.(Grid.Row)" Value="0" />
+                                                    <Setter Target="PromotionActivatedMetric.(Grid.Column)" Value="3" />
+                                                </VisualState.Setters>
+                                            </VisualState>
+                                        </VisualStateGroup>
+                                    </VisualStateManager.VisualStateGroups>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <Grid ColumnSpacing="16">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Spacing="2">
+                                            <TextBlock FontSize="16" FontWeight="SemiBold" Text="Confirmatory promotion protocol" />
+                                            <TextBlock
+                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                Text="Pre-registered family test governing which accuracy challengers may change production probabilities."
+                                                TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <Border
+                                            x:Name="PromotionBadge"
+                                            Grid.Column="1"
+                                            Padding="10,4"
+                                            VerticalAlignment="Top"
+                                            Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                            CornerRadius="8">
+                                            <TextBlock x:Name="PromotionBadgeText" FontSize="11" FontWeight="SemiBold" Text="COLLECTING" />
+                                        </Border>
+                                    </Grid>
+                                    <Grid Grid.Row="1" ColumnSpacing="16">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock
+                                            x:Name="PromotionProtocolText"
+                                            FontFamily="Consolas"
+                                            FontSize="12"
+                                            Text="Epoch — · test —"
+                                            TextWrapping="Wrap" />
+                                        <TextBlock
+                                            x:Name="PromotionManifestText"
+                                            Grid.Column="1"
+                                            FontFamily="Consolas"
+                                            FontSize="11"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="manifest —"
+                                            TextWrapping="Wrap" />
+                                    </Grid>
+                                    <Grid Grid.Row="2" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <ProgressBar
+                                            x:Name="PromotionProgressBar"
+                                            Height="6"
+                                            VerticalAlignment="Center"
+                                            AutomationProperties.Name="Most advanced confirmatory trial progress"
+                                            Maximum="1"
+                                            Value="0" />
+                                        <TextBlock
+                                            x:Name="PromotionProgressText"
+                                            Grid.Column="1"
+                                            VerticalAlignment="Center"
+                                            FontSize="12"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="0/60 blocks" />
+                                    </Grid>
+                                    <Grid x:Name="PromotionMetricsGrid" Grid.Row="3" ColumnSpacing="20" RowSpacing="10">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition x:Name="PromotionMetricColumn2" Width="0" />
+                                            <ColumnDefinition x:Name="PromotionMetricColumn3" Width="0" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <StackPanel Spacing="1">
+                                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Registered family" />
+                                            <TextBlock x:Name="PromotionRegisteredText" FontSize="20" FontWeight="SemiBold" Text="0 / 0" />
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="1" Spacing="1">
+                                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Collecting" />
+                                            <TextBlock x:Name="PromotionCollectingText" FontSize="20" FontWeight="SemiBold" Text="0" />
+                                        </StackPanel>
+                                        <StackPanel x:Name="PromotionDecisionMetric" Grid.Row="1" Spacing="1">
+                                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Passed / failed" />
+                                            <TextBlock x:Name="PromotionDecisionText" FontSize="20" FontWeight="SemiBold" Text="0 / 0" />
+                                        </StackPanel>
+                                        <StackPanel x:Name="PromotionActivatedMetric" Grid.Row="1" Grid.Column="1" Spacing="1">
+                                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Immutable activations" />
+                                            <TextBlock x:Name="PromotionActivatedText" FontSize="20" FontWeight="SemiBold" Text="0" />
+                                        </StackPanel>
+                                    </Grid>
+                                    <TextBlock
+                                        Grid.Row="4"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Rolling qualified slices are diagnostic only. APPLIED is shown only after an immutable promotion activation has been recorded."
+                                        TextWrapping="Wrap" />
+                                    <StackPanel Grid.Row="5" Spacing="4">
+                                        <TextBlock x:Name="PromotionTrialsHeadingText" FontSize="13" FontWeight="SemiBold" Text="Priority trials" />
+                                        <ItemsControl x:Name="PromotionTrialItems">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate x:DataType="models:MonitoringListItem">
+                                                    <Grid Padding="0,7" ColumnSpacing="12">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <StackPanel Spacing="2">
+                                                            <TextBlock FontSize="13" FontWeight="SemiBold" Text="{x:Bind Title}" TextWrapping="Wrap" />
+                                                            <TextBlock FontSize="12" Text="{x:Bind Subtitle}" TextWrapping="Wrap" />
+                                                            <TextBlock
+                                                                FontFamily="Consolas"
+                                                                FontSize="11"
+                                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                                Text="{x:Bind Detail}"
+                                                                TextWrapping="Wrap" />
+                                                        </StackPanel>
+                                                        <Border
+                                                            Grid.Column="1"
+                                                            Padding="8,2"
+                                                            VerticalAlignment="Top"
+                                                            Background="{x:Bind Accent, Converter={StaticResource AccentToBrush}}"
+                                                            CornerRadius="7">
+                                                            <TextBlock FontSize="10" FontWeight="SemiBold" Text="{x:Bind Status}" />
+                                                        </Border>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <Border
+                                Padding="12,9"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                CornerRadius="8">
+                                <TextBlock
+                                    x:Name="AccuracySettlementCalibrationText"
+                                    FontFamily="Consolas"
+                                    FontSize="12"
+                                    Text="Settlement calibration · waiting for evidence"
+                                    TextWrapping="Wrap" />
+                            </Border>
+                            <Border
+                                Padding="12,9"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                CornerRadius="8">
+                                <TextBlock
+                                    x:Name="AccuracyCensoredText"
+                                    FontFamily="Consolas"
+                                    FontSize="12"
+                                    Text="Interval-censored source correction · waiting for winning buckets"
+                                    TextWrapping="Wrap" />
+                            </Border>
+                            <Border
+                                Padding="12,9"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                CornerRadius="8">
+                                <StackPanel Spacing="5">
+                                    <TextBlock
+                                        x:Name="AccuracyWeightedEnsembleText"
+                                        FontFamily="Consolas"
+                                        FontSize="12"
+                                        Text="Historical weighted ensemble · waiting for walk-forward evidence"
+                                        TextWrapping="Wrap" />
+                                    <TextBlock
+                                        x:Name="AccuracyWeightedSettlementText"
+                                        FontFamily="Consolas"
+                                        FontSize="12"
+                                        Text="Settlement-aligned backtest · collecting point-in-time resolved events"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+                            <Border
+                                Padding="12,9"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                CornerRadius="8">
+                                <TextBlock
+                                    x:Name="AccuracyNowcastText"
+                                    FontFamily="Consolas"
+                                    FontSize="12"
+                                    Text="Remaining-day nowcast · waiting for observations"
+                                    TextWrapping="Wrap" />
+                            </Border>
+                            <Border
+                                Padding="12,9"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                CornerRadius="8">
+                                <TextBlock
+                                    x:Name="AccuracyHierarchicalText"
+                                    FontFamily="Consolas"
+                                    FontSize="12"
+                                    Text="Hierarchical calibration · waiting for peer evidence"
+                                    TextWrapping="Wrap" />
+                            </Border>
+                            <Border
+                                Padding="12,9"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                CornerRadius="8">
+                                <TextBlock
+                                    x:Name="AccuracyRegimeText"
+                                    FontFamily="Consolas"
+                                    FontSize="12"
+                                    Text="Version-aware correction · waiting for regime evidence"
+                                    TextWrapping="Wrap" />
+                            </Border>
+                            <Border
+                                Padding="12,9"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                CornerRadius="8">
+                                <TextBlock
+                                    x:Name="AccuracyStackText"
+                                    FontFamily="Consolas"
+                                    FontSize="12"
+                                    Text="Regularized stack · waiting for prospective evidence"
+                                    TextWrapping="Wrap" />
+                            </Border>
+                            <Border
+                                Padding="12,9"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                CornerRadius="8">
+                                <TextBlock
+                                    x:Name="AccuracyNonlinearText"
+                                    FontFamily="Consolas"
+                                    FontSize="12"
+                                    Text="Nonlinear challengers · waiting for prospective evidence"
+                                    TextWrapping="Wrap" />
+                            </Border>
+                            <Border
+                                Padding="12,9"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                CornerRadius="8">
+                                <TextBlock
+                                    x:Name="AccuracyConformalText"
+                                    FontFamily="Consolas"
+                                    FontSize="12"
+                                    Text="Conformal uncertainty · waiting for residuals"
+                                    TextWrapping="Wrap" />
+                            </Border>
+                            <Border
+                                Padding="12,9"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                CornerRadius="8">
+                                <TextBlock
+                                    x:Name="AccuracyTrajectoryText"
+                                    FontFamily="Consolas"
+                                    FontSize="12"
+                                    Text="Hourly trajectory challenger · waiting for collection"
+                                    TextWrapping="Wrap" />
+                            </Border>
+                            <Border
+                                Padding="14,12"
+                                Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                CornerRadius="8">
+                                <StackPanel Spacing="8">
+                                    <TextBlock FontSize="16" FontWeight="SemiBold" Text="Trade-selection challengers" />
+                                    <TextBlock
+                                        x:Name="SelectionPolicySummaryText"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Waiting for current-model resolved trades"
+                                        TextWrapping="Wrap" />
+                                    <ItemsControl
+                                        x:Name="SelectionPolicyItems"
+                                        ItemTemplate="{StaticResource CommandPaletteActionTemplate}" />
+                                </StackPanel>
+                            </Border>
+                            <Grid ColumnSpacing="20">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="2*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="8">
+                                    <TextBlock FontSize="16" FontWeight="SemiBold" Text="Model registry" />
+                                    <ItemsControl x:Name="AccuracyModelItems" ItemTemplate="{StaticResource CommandPaletteActionTemplate}" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Spacing="8">
+                                    <TextBlock FontSize="16" FontWeight="SemiBold" Text="Structural drift" />
+                                    <ItemsControl x:Name="AccuracyDriftItems" ItemTemplate="{StaticResource CommandPaletteActionTemplate}" />
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
                     <Border Style="{StaticResource CockpitCardStyle}">
                         <Grid RowSpacing="14">
                             <Grid.RowDefinitions>
@@ -480,6 +2163,14 @@
                                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                         Text="Worst Brier and CLV slices explain whether the problem is model quality or execution quality."
                                         TextWrapping="Wrap" />
+                                    <TextBlock
+                                        x:Name="RootCauseScopeText"
+                                        AutomationProperties.HelpText="Brier and CLV diagnostics use only the new prospective dual-token sample."
+                                        FontSize="12"
+                                        Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                        Text="Prospective dual-token · legacy rows excluded"
+                                        TextWrapping="Wrap"
+                                        ToolTipService.ToolTip="The earlier historical cohort remains available for audit, but is not mixed into these diagnostics or the live gate." />
                                 </StackPanel>
                                 <Border
                                     x:Name="RootCauseBadge"
@@ -782,6 +2473,7 @@
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
 
                         <Border Style="{StaticResource CockpitCardStyle}">
@@ -1051,6 +2743,337 @@
                     </Grid>
                 </StackPanel>
             </ScrollViewer>
+
+            <Grid
+                x:Name="AlertsView"
+                Grid.Row="2"
+                MaxWidth="1500"
+                HorizontalAlignment="Left"
+                Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <InfoBar
+                    x:Name="AlertsInfoBar"
+                    Margin="32,0,32,12"
+                    IsClosable="True"
+                    IsOpen="False"
+                    Message="Alert inbox status"
+                    Severity="Informational"
+                    Title="Alerts" />
+
+                <Grid
+                    x:Name="AlertsSummaryGrid"
+                    Grid.Row="1"
+                    Margin="32,0,32,16"
+                    ColumnSpacing="12"
+                    RowSpacing="12">
+                    <VisualStateManager.VisualStateGroups>
+                        <VisualStateGroup x:Name="AlertsSummaryLayoutStates">
+                            <VisualState x:Name="AlertsSummaryCompact" />
+                            <VisualState x:Name="AlertsSummaryWide">
+                                <VisualState.StateTriggers>
+                                    <AdaptiveTrigger MinWindowWidth="1180" />
+                                </VisualState.StateTriggers>
+                                <VisualState.Setters>
+                                    <Setter Target="AlertsSummaryColumn1.Width" Value="*" />
+                                    <Setter Target="AlertsSummaryColumn2.Width" Value="*" />
+                                    <Setter Target="AlertsChannelCard.(Grid.Row)" Value="0" />
+                                    <Setter Target="AlertsChannelCard.(Grid.Column)" Value="1" />
+                                    <Setter Target="AlertsDeliveryCard.(Grid.Row)" Value="0" />
+                                    <Setter Target="AlertsDeliveryCard.(Grid.Column)" Value="2" />
+                                </VisualState.Setters>
+                            </VisualState>
+                        </VisualStateGroup>
+                    </VisualStateManager.VisualStateGroups>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition x:Name="AlertsSummaryColumn1" Width="0" />
+                        <ColumnDefinition x:Name="AlertsSummaryColumn2" Width="0" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Border Style="{StaticResource CockpitCardStyle}">
+                        <StackPanel Spacing="7">
+                            <TextBlock
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Local inbox" />
+                            <TextBlock
+                                x:Name="AlertsUnacknowledgedText"
+                                AutomationProperties.LiveSetting="Polite"
+                                FontSize="22"
+                                FontWeight="SemiBold"
+                                Text="Loading..." />
+                            <TextBlock
+                                x:Name="AlertsLocalDetailText"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Fetching durable local alert records"
+                                TextWrapping="Wrap" />
+                            <TextBlock
+                                x:Name="AlertsLocalFreshnessText"
+                                FontSize="11"
+                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                Text="Snapshot unavailable"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border
+                        x:Name="AlertsChannelCard"
+                        Grid.Row="1"
+                        Style="{StaticResource CockpitCardStyle}">
+                        <StackPanel Spacing="7">
+                            <Grid ColumnSpacing="10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock
+                                    VerticalAlignment="Center"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="Optional Telegram delivery" />
+                                <Border
+                                    x:Name="AlertsChannelBadge"
+                                    Grid.Column="1"
+                                    Padding="8,2"
+                                    Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                    CornerRadius="8">
+                                    <TextBlock
+                                        x:Name="AlertsChannelBadgeText"
+                                        FontSize="11"
+                                        Text="Checking" />
+                                </Border>
+                            </Grid>
+                            <TextBlock
+                                x:Name="AlertsChannelStatusText"
+                                FontSize="20"
+                                FontWeight="SemiBold"
+                                Text="Loading..." />
+                            <TextBlock
+                                x:Name="AlertsChannelDetailText"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Telegram is optional; the local inbox works independently"
+                                TextWrapping="Wrap" />
+                            <TextBlock
+                                x:Name="AlertsHeartbeatText"
+                                FontSize="11"
+                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                Text="Activation and heartbeat unavailable"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border
+                        x:Name="AlertsDeliveryCard"
+                        Grid.Row="2"
+                        Style="{StaticResource CockpitCardStyle}">
+                        <StackPanel Spacing="7">
+                            <Grid ColumnSpacing="10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock
+                                    VerticalAlignment="Center"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="External delivery queue" />
+                                <Border
+                                    x:Name="AlertsBacklogBadge"
+                                    Grid.Column="1"
+                                    Padding="8,2"
+                                    Background="{ThemeResource ControlAltFillColorSecondaryBrush}"
+                                    CornerRadius="8">
+                                    <TextBlock
+                                        x:Name="AlertsBacklogBadgeText"
+                                        FontSize="11"
+                                        Text="Checking" />
+                                </Border>
+                            </Grid>
+                            <TextBlock
+                                x:Name="AlertsBacklogText"
+                                FontSize="20"
+                                FontWeight="SemiBold"
+                                Text="Loading..." />
+                            <TextBlock
+                                x:Name="AlertsBacklogDetailText"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="Pending and dead-letter delivery state"
+                                TextWrapping="Wrap" />
+                            <TextBlock
+                                x:Name="AlertsDeliveryErrorText"
+                                FontSize="11"
+                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                Text="No delivery error reported"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+
+                <Grid Grid.Row="2">
+                    <ListView
+                        x:Name="AlertsList"
+                        Padding="32,0,32,32"
+                        AutomationProperties.Name="Local alert inbox"
+                        SelectionMode="None"
+                        ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                        ScrollViewer.HorizontalScrollMode="Disabled">
+                        <ListView.Header>
+                            <Grid Margin="2,0,2,10" ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="2">
+                                    <TextBlock FontSize="18" FontWeight="SemiBold" Text="Durable local inbox" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="Acknowledgement is local. It never changes Telegram send or retry state."
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <TextBlock
+                                    x:Name="AlertsListHeaderText"
+                                    Grid.Column="1"
+                                    VerticalAlignment="Top"
+                                    FontSize="12"
+                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                    Text="0 shown" />
+                            </Grid>
+                        </ListView.Header>
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="Padding" Value="0" />
+                                <Setter Property="Margin" Value="0,0,0,8" />
+                                <Setter Property="MinHeight" Value="0" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="models:AlertInboxListItem">
+                                <Border
+                                    Padding="16,13"
+                                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="9">
+                                    <Grid ColumnSpacing="14" RowSpacing="6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <StackPanel Spacing="2">
+                                            <TextBlock
+                                                FontSize="15"
+                                                FontWeight="SemiBold"
+                                                Text="{x:Bind Title}"
+                                                TextWrapping="Wrap" />
+                                            <TextBlock
+                                                FontFamily="Consolas"
+                                                FontSize="11"
+                                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                Text="{x:Bind EventKey}"
+                                                TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <Button
+                                            Grid.Column="1"
+                                            MinWidth="112"
+                                            VerticalAlignment="Top"
+                                            AutomationProperties.HelpText="{x:Bind EventKey}"
+                                            Click="AlertAckButton_Click"
+                                            Content="{x:Bind AcknowledgeLabel}"
+                                            IsEnabled="{x:Bind CanAcknowledge}"
+                                            Tag="{x:Bind Id}" />
+                                        <TextBlock
+                                            Grid.Row="1"
+                                            Grid.ColumnSpan="2"
+                                            FontFamily="Consolas"
+                                            FontSize="12"
+                                            Text="{x:Bind Payload}"
+                                            TextWrapping="Wrap" />
+                                        <TextBlock
+                                            Grid.Row="2"
+                                            Grid.ColumnSpan="2"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="{x:Bind LocalState}"
+                                            TextWrapping="Wrap" />
+                                        <Grid Grid.Row="3" Grid.ColumnSpan="2" ColumnSpacing="10">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <Border
+                                                Padding="8,2"
+                                                VerticalAlignment="Top"
+                                                Background="{x:Bind Accent, Converter={StaticResource AccentToBrush}}"
+                                                CornerRadius="8">
+                                                <TextBlock FontSize="11" Text="{x:Bind Status}" />
+                                            </Border>
+                                            <TextBlock
+                                                Grid.Column="1"
+                                                VerticalAlignment="Center"
+                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                Text="{x:Bind ExternalState}"
+                                                TextWrapping="Wrap" />
+                                        </Grid>
+                                        <StackPanel Grid.Row="4" Grid.ColumnSpan="2" Spacing="2">
+                                            <TextBlock
+                                                FontSize="11"
+                                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                Text="{x:Bind Created}"
+                                                TextWrapping="Wrap" />
+                                            <TextBlock
+                                                FontSize="11"
+                                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                Text="{x:Bind DeliveryDetail}"
+                                                TextWrapping="Wrap" />
+                                            <TextBlock
+                                                FontSize="11"
+                                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                Text="{x:Bind ErrorDetail}"
+                                                TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+
+                    <StackPanel
+                        x:Name="AlertsEmptyState"
+                        MaxWidth="560"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        IsHitTestVisible="False"
+                        Spacing="10">
+                        <FontIcon FontSize="38" Glyph="&#xE73E;" />
+                        <TextBlock
+                            x:Name="AlertsEmptyText"
+                            FontSize="18"
+                            Text="No unacknowledged local alerts"
+                            TextAlignment="Center"
+                            TextWrapping="Wrap" />
+                        <TextBlock
+                            x:Name="AlertsEmptyDetailText"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Text="The inbox is clear. Telegram activation is optional."
+                            TextAlignment="Center"
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+                </Grid>
+            </Grid>
 
             <!-- Cap the content column and align it left with the header so
                  single-row cards don't stretch into sparse full-width strips
@@ -1453,7 +3476,7 @@
                                 <TextBlock FontSize="18" FontWeight="SemiBold" Text="Calibration lab" />
                                 <TextBlock
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="Reliability evidence, sample maturity, bias, and Brier risk"
+                                    Text="Forecast calibration and independent station-selection trust evidence"
                                     TextWrapping="Wrap" />
                             </StackPanel>
                             <TextBlock
@@ -1464,7 +3487,13 @@
                                 Text="No calibration data"
                                 TextWrapping="Wrap" />
                         </Grid>
-                        <Grid Grid.Row="1" ColumnSpacing="12">
+                        <TabView
+                            Grid.Row="1"
+                            Height="400"
+                            IsAddTabButtonVisible="False"
+                            TabWidthMode="Equal">
+                            <TabViewItem Header="Forecast calibration">
+                                <Grid ColumnSpacing="12">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="1.45*" />
                                 <ColumnDefinition Width="*" />
@@ -1478,25 +3507,33 @@
                                 <Grid RowSpacing="8">
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="220" />
+                                        <RowDefinition Height="260" />
                                         <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
                                     <StackPanel>
-                                        <TextBlock FontWeight="SemiBold" Text="Reliability matrix" />
+                                        <TextBlock FontWeight="SemiBold" Text="Forecast calibration matrix" />
                                         <TextBlock
                                             Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                            Text="Cells aggregate station × horizon evidence; green means enough sample and acceptable Brier."
+                                            Text="The page filter scopes these station-by-horizon cells; green means enough forecast sample and acceptable Brier."
                                             TextWrapping="Wrap" />
                                     </StackPanel>
-                                    <Canvas
-                                        x:Name="CalibrationMatrixCanvas"
+                                    <ScrollViewer
                                         Grid.Row="1"
-                                        SizeChanged="CalibrationMatrixCanvas_SizeChanged" />
+                                        HorizontalScrollBarVisibility="Disabled"
+                                        HorizontalScrollMode="Disabled"
+                                        VerticalScrollBarVisibility="Auto"
+                                        VerticalScrollMode="Auto">
+                                        <Canvas
+                                            x:Name="CalibrationMatrixCanvas"
+                                            MinHeight="220"
+                                            HorizontalAlignment="Stretch"
+                                            SizeChanged="CalibrationMatrixCanvas_SizeChanged" />
+                                    </ScrollViewer>
                                     <TextBlock
                                         x:Name="CalibrationMatrixSummaryText"
                                         Grid.Row="2"
                                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                        Text="No reliability matrix loaded"
+                                        Text="No forecast calibration matrix loaded"
                                         TextWrapping="Wrap" />
                                 </Grid>
                             </Border>
@@ -1538,7 +3575,7 @@
                                     BorderThickness="1"
                                     CornerRadius="8">
                                     <StackPanel Spacing="8">
-                                        <TextBlock FontWeight="SemiBold" Text="Readiness and outliers" />
+                                        <TextBlock FontWeight="SemiBold" Text="Forecast readiness and outliers" />
                                         <TextBlock
                                             x:Name="CalibrationReadinessText"
                                             FontSize="15"
@@ -1552,7 +3589,140 @@
                                     </StackPanel>
                                 </Border>
                             </Grid>
-                        </Grid>
+                                </Grid>
+                            </TabViewItem>
+                            <TabViewItem Header="Station trust">
+                        <Border
+                            Padding="12"
+                            Background="{ThemeResource LayerFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="8">
+                            <Grid RowSpacing="8">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="205" />
+                                </Grid.RowDefinitions>
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Spacing="2">
+                                        <TextBlock FontWeight="SemiBold" Text="Station trust" />
+                                        <TextBlock
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Text="Global station-selection evidence; the calibration filter above does not change this table."
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <TextBlock
+                                        x:Name="StationTrustSummaryText"
+                                        Grid.Column="1"
+                                        VerticalAlignment="Top"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="No station trust snapshot"
+                                        TextWrapping="Wrap" />
+                                </Grid>
+                                <InfoBar
+                                    Grid.Row="1"
+                                    IsClosable="False"
+                                    IsOpen="True"
+                                    Message="Boundary-sensitive rows and unavailable official truth are excluded from the Wilson denominator and are non-punitive. A verified conflict or stale current-day observation can still block selection."
+                                    Severity="Informational"
+                                    Title="How trust is scored" />
+                                <Grid Grid.Row="2" Padding="8,4" ColumnSpacing="16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="140" />
+                                        <ColumnDefinition Width="190" />
+                                        <ColumnDefinition Width="230" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="225" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock FontSize="11" FontWeight="SemiBold" Text="STATION" />
+                                    <TextBlock Grid.Column="1" FontSize="11" FontWeight="SemiBold" Text="WILSON TRUST" />
+                                    <TextBlock Grid.Column="2" FontSize="11" FontWeight="SemiBold" Text="EVIDENCE" />
+                                    <TextBlock Grid.Column="3" FontSize="11" FontWeight="SemiBold" Text="SELECTION BLOCKS" />
+                                    <TextBlock Grid.Column="4" FontSize="11" FontWeight="SemiBold" Text="FRESHNESS / PROVENANCE" />
+                                </Grid>
+                                <ListView
+                                    x:Name="StationTrustList"
+                                    Grid.Row="3"
+                                    AutomationProperties.Name="Station trust evidence"
+                                    SelectionMode="None"
+                                    ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                    ScrollViewer.HorizontalScrollMode="Disabled">
+                                    <ListView.ItemContainerStyle>
+                                        <Style TargetType="ListViewItem">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                            <Setter Property="Padding" Value="0" />
+                                            <Setter Property="MinHeight" Value="0" />
+                                        </Style>
+                                    </ListView.ItemContainerStyle>
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate x:DataType="models:StationTrustListItem">
+                                            <Border
+                                                Padding="8,10"
+                                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                BorderThickness="0,1,0,0">
+                                                <Grid ColumnSpacing="16">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="140" />
+                                                        <ColumnDefinition Width="190" />
+                                                        <ColumnDefinition Width="230" />
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="225" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Spacing="2">
+                                                        <TextBlock FontWeight="SemiBold" Text="{x:Bind Station}" TextWrapping="Wrap" />
+                                                        <TextBlock
+                                                            FontSize="11"
+                                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                            Text="{x:Bind Lifecycle}"
+                                                            TextWrapping="Wrap" />
+                                                    </StackPanel>
+                                                    <StackPanel Grid.Column="1" Spacing="4">
+                                                        <TextBlock Text="{x:Bind Trust}" TextWrapping="Wrap" />
+                                                        <Border
+                                                            Padding="8,2"
+                                                            HorizontalAlignment="Left"
+                                                            Background="{x:Bind Accent, Converter={StaticResource AccentToBrush}}"
+                                                            CornerRadius="8">
+                                                            <TextBlock FontSize="10" Text="{x:Bind Status}" />
+                                                        </Border>
+                                                    </StackPanel>
+                                                    <TextBlock
+                                                        Grid.Column="2"
+                                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                        Text="{x:Bind Evidence}"
+                                                        TextWrapping="Wrap" />
+                                                    <TextBlock
+                                                        Grid.Column="3"
+                                                        Text="{x:Bind Selection}"
+                                                        TextWrapping="Wrap" />
+                                                    <StackPanel Grid.Column="4" Spacing="3">
+                                                        <TextBlock
+                                                            FontSize="11"
+                                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                            Text="{x:Bind Freshness}"
+                                                            TextWrapping="Wrap" />
+                                                        <TextBlock
+                                                            FontFamily="Consolas"
+                                                            FontSize="10"
+                                                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                            Text="{x:Bind Provenance}"
+                                                            TextWrapping="Wrap" />
+                                                    </StackPanel>
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+                            </Grid>
+                        </Border>
+                            </TabViewItem>
+                        </TabView>
                     </Grid>
                 </Border>
                 <Border

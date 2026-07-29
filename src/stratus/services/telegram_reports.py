@@ -18,20 +18,33 @@ from stratus.db.models import (
     HealthAudit,
     JobRun,
     Market,
+    MarketStatus,
     ModelProb,
     Position,
     PositionStatus,
     Station,
+    StationStage,
 )
-from stratus.repositories.analytics import resolved_trade_outcomes
+from stratus.repositories.analytics import (
+    probability_pipeline_version,
+)
+from stratus.repositories.evidence_continuity import (
+    current_probability_pipeline_release_epoch,
+)
 from stratus.repositories.job_runs import collector_uptime
 from stratus.repositories.runtime_control import get_runtime_control
+from stratus.repositories.validation_ledger import load_prospective_validation_dataset
+from stratus.services.forecast_provenance import model_input_provenance_is_complete
 from stratus.services.live_analytics import (
     EquityPoint,
     PositionStat,
     brier_comparison,
     cumulative_equity,
+    prospective_clv_outcomes,
+    prospective_position_stats,
+    prospective_trade_outcomes,
     summarize_live_performance,
+    summarize_prospective_validation,
 )
 
 
@@ -57,7 +70,12 @@ class LiveGate:
     clv_samples: int
     average_clv: float | None
     roi: float
+    independent_samples: int = 0
     checks: tuple[GateCheck, ...] = ()
+    pipeline_version: str | None = None
+    pipeline_resolved_trades: int = 0
+    pipeline_brier_model: float | None = None
+    pipeline_brier_market: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,27 +165,50 @@ async def _daily_model_errors(
 
 
 async def _resolved_probability_rows(
-    session: AsyncSession, now: datetime | None = None,
+    session: AsyncSession,
+    now: datetime | None = None,
+    station_stages: tuple[StationStage, ...] | None = None,
+    pipeline_version: str | None = None,
+    market_anchor_protocol: str | None = None,
+    require_attested_outcome: bool = False,
 ) -> list[tuple[str, bool, float]]:
     cutoff = (now or datetime.now(UTC)) - timedelta(days=30)
-    rows = (
-        await session.execute(
-            select(Market, Station, ModelProb)
-            .join(Station, Market.station_id == Station.id)
-            .join(ModelProb, ModelProb.market_id == Market.id)
-            .where(
-                Market.resolved_outcome.is_not(None),
-                Market.resolves_at >= cutoff,
-                ModelProb.ts <= Market.resolves_at,
-            )
-            .distinct(Market.id)
-            .order_by(Market.id, ModelProb.ts.desc())
+    statement = (
+        select(Market, Station, ModelProb)
+        .join(Station, Market.station_id == Station.id)
+        .join(ModelProb, ModelProb.market_id == Market.id)
+        .where(
+            Market.resolved_outcome.is_not(None),
+            Market.resolves_at >= cutoff,
+            ModelProb.ts <= Market.resolves_at,
         )
-    ).all()
+        .distinct(Market.id)
+        .order_by(Market.id, ModelProb.ts.desc())
+    )
+    if station_stages is not None:
+        statement = statement.where(
+            Station.active.is_(True),
+            Station.stage.in_(station_stages),
+        )
+    if market_anchor_protocol is not None:
+        statement = statement.where(
+            ModelProb.market_anchor_protocol == market_anchor_protocol
+        )
+    if require_attested_outcome:
+        statement = statement.where(Market.resolution_event_id.is_not(None))
+    rows = (await session.execute(statement)).all()
     return [
         (station.icao, bool(market.resolved_outcome), float(probability.prob))
         for market, station, probability in rows
+        if pipeline_version is None
+        or probability_pipeline_version(probability.components) == pipeline_version
     ]
+
+
+async def _current_pipeline_version(session: AsyncSession) -> str | None:
+    """Cohort of the probability architecture approved for active evidence."""
+    epoch = await current_probability_pipeline_release_epoch(session)
+    return epoch.cohort if epoch is not None else None
 
 
 def reliability_bins(
@@ -265,9 +306,7 @@ async def _live_equity_points(session: AsyncSession) -> list[EquityPoint]:
             )
         )
     ).all()
-    return cumulative_equity(
-        [(ts, float(pnl or 0)) for ts, pnl in rows if ts is not None]
-    )
+    return cumulative_equity([(ts, float(pnl or 0)) for ts, pnl in rows if ts is not None])
 
 
 def render_equity_chart(points: list[EquityPoint]) -> bytes | None:
@@ -311,9 +350,7 @@ def render_equity_chart(points: list[EquityPoint]) -> bytes | None:
         outline="white",
         width=2,
     )
-    draw.rectangle(
-        (left, top, left + plot_width, top + plot_height), outline="#333333", width=2
-    )
+    draw.rectangle((left, top, left + plot_width, top + plot_height), outline="#333333", width=2)
     draw.text((left, 22), "Live realised equity", fill="#111111", font=font)
     draw.text(
         (left + plot_width - 150, 24),
@@ -335,67 +372,125 @@ def _check(name: str, passed: bool, detail: str) -> GateCheck:
     return GateCheck(name=name, passed=passed, detail=detail)
 
 
+def qualified_station_scores(
+    scores: tuple[StationScore, ...],
+    *,
+    sample_minimum: int,
+    brier_maximum: float,
+) -> tuple[StationScore, ...]:
+    """Return qualified stations without penalising a larger research pool."""
+    return tuple(
+        score for score in scores if score.count >= sample_minimum and score.brier < brier_maximum
+    )
+
+
 async def calculate_live_gate(
-    session: AsyncSession, initial_bankroll_usd: float
+    session: AsyncSession,
+    initial_bankroll_usd: float,
+    *,
+    min_stations: int = 3,
+    station_samples: int = 100,
+    station_brier: float = 0.18,
+    independent_samples_min: int = 100,
 ) -> LiveGate:
     """Formal "edge is proven" gate (docs/EDGE_VALIDATION_PLAN.md P4).
 
     Every check must pass before live mode is reachable. The decision rides
     on skill_pnl and statistical significance, never on raw ROI, which one
     lucky tail trade can carry."""
-    resolved = await _resolved_probability_rows(session)
+    current_pipeline = await _current_pipeline_version(session)
+    dataset = await load_prospective_validation_dataset(
+        session,
+        mode=ExecutionMode.PAPER,
+        pipeline_cohort=current_pipeline or "__no_current_pipeline__",
+    )
+    formal_trades = dataset.trades
+    positions = prospective_position_stats(formal_trades)
+    trades = prospective_trade_outcomes(formal_trades)
+    clv_outcomes = prospective_clv_outcomes(formal_trades)
+    trajectory = summarize_prospective_validation(
+        formal_trades,
+        initial_bankroll_usd=initial_bankroll_usd,
+    )
     by_station: dict[str, list[float]] = defaultdict(list)
-    for icao, outcome, probability in resolved:
-        by_station[icao].append((probability - float(outcome)) ** 2)
+    for trade in trades:
+        if trade.station_icao is not None:
+            by_station[trade.station_icao].append(
+                (trade.model_prob - float(trade.won)) ** 2
+            )
     station_scores = tuple(
         StationScore(icao, len(errors), sum(errors) / len(errors))
         for icao, errors in sorted(by_station.items())
     )
-    positions = (
-        await session.execute(
-            select(Position).where(
-                Position.mode == ExecutionMode.PAPER,
-                Position.status == PositionStatus.CLOSED,
-            )
-        )
-    ).scalars().all()
-    perf = summarize_live_performance(
-        [
-            PositionStat(
-                closed=True,
-                pnl_usd=float(p.pnl_usd) if p.pnl_usd is not None else None,
-                clv=float(p.clv) if p.clv is not None else None,
-                cost_usd=float(p.size_usd),
-                fee_usd=float(p.fee_usd) if p.fee_usd is not None else None,
-                size_shares=float(p.size_shares),
-                avg_price=float(p.avg_price),
-            )
-            for p in positions
-        ]
-    )
-    trades = await resolved_trade_outcomes(session, ExecutionMode.PAPER)
+    independent_samples = trajectory.independent_blocks
+    perf = summarize_live_performance(positions)
     briers = brier_comparison(trades)
-    clvs = [float(p.clv) for p in positions if p.clv is not None]
+    clvs = [outcome.clv for outcome in clv_outcomes]
     average_clv = sum(clvs) / len(clvs) if clvs else None
-    pnl = sum(float(p.pnl_usd or 0) for p in positions)
+    pnl = sum(trade.pnl_usd for trade in formal_trades)
     roi = pnl / initial_bankroll_usd
 
-    stations_ok = len(station_scores) == 3 and all(
-        score.count >= 100 and score.brier < 0.18 for score in station_scores
+    active_probability_components = (
+        await session.execute(
+            select(ModelProb.components)
+            .join(Market, ModelProb.market_id == Market.id)
+            .join(Station, Market.station_id == Station.id)
+            .where(
+                Market.status == MarketStatus.ACTIVE,
+                Market.station_verified.is_(True),
+                Station.active.is_(True),
+                Station.stage.in_((StationStage.PAPER, StationStage.APPROVED)),
+            )
+            .distinct(ModelProb.market_id)
+            .order_by(ModelProb.market_id, ModelProb.ts.desc())
+        )
+    ).scalars().all()
+    complete_forecast_provenance = sum(
+        model_input_provenance_is_complete(components)
+        and probability_pipeline_version(components) == current_pipeline
+        for components in active_probability_components
     )
+
+    qualified_stations = qualified_station_scores(
+        station_scores,
+        sample_minimum=station_samples,
+        brier_maximum=station_brier,
+    )
+    stations_ok = len(qualified_stations) >= min_stations
     checks = (
         _check(
             "stations_calibrated",
             stations_ok,
-            "; ".join(
-                f"{s.icao} n={s.count} brier={s.brier:.3f}" for s in station_scores
-            )
-            or "no resolved probability samples",
+            (
+                f"{len(qualified_stations)}/{min_stations} qualified from "
+                f"{len(station_scores)} paper station(s); "
+                + "; ".join(
+                    f"{s.icao} n={s.count}/{station_samples} "
+                    f"brier={s.brier:.3f}/{station_brier:.3f}"
+                    for s in station_scores
+                )
+                if station_scores
+                else "no resolved probability samples on paper stations"
+            ),
         ),
         _check(
             "resolved_positions_200",
-            len(positions) >= 200,
-            f"{len(positions)}/200 closed paper positions",
+            len(formal_trades) >= 200,
+            f"{len(formal_trades)}/200 closed prospective paper order fills",
+        ),
+        _check(
+            "independent_station_days_100",
+            independent_samples >= independent_samples_min,
+            (f"{independent_samples}/{independent_samples_min} distinct station-day-kind samples"),
+        ),
+        _check(
+            "pipeline_version_samples_100",
+            current_pipeline is not None and len(trades) >= 100,
+            (
+                f"{len(trades)}/100 lane-scoped resolved trades on {current_pipeline}"
+                if current_pipeline is not None
+                else "current probability pipeline version unavailable"
+            ),
         ),
         _check("clv_samples_100", len(clvs) >= 100, f"{len(clvs)}/100 CLV samples"),
         _check(
@@ -406,11 +501,7 @@ async def calculate_live_gate(
         _check(
             "clv_beat_rate_52",
             perf.clv_beat_rate is not None and perf.clv_beat_rate >= 0.52,
-            (
-                f"beat rate {perf.clv_beat_rate:.1%}"
-                if perf.clv_beat_rate is not None
-                else "no CLV"
-            ),
+            (f"beat rate {perf.clv_beat_rate:.1%}" if perf.clv_beat_rate is not None else "no CLV"),
         ),
         _check(
             "roi_ci_excludes_zero",
@@ -425,10 +516,8 @@ async def calculate_live_gate(
             "skill_pnl_significant",
             perf.skill_pnl_ci_low is not None and perf.skill_pnl_ci_low > 0,
             (
-                f"skill ${perf.skill_pnl_usd:+.2f}, CI low "
-                f"${perf.skill_pnl_ci_low:+.2f}"
-                if perf.skill_pnl_usd is not None
-                and perf.skill_pnl_ci_low is not None
+                f"skill ${perf.skill_pnl_usd:+.2f}, CI low ${perf.skill_pnl_ci_low:+.2f}"
+                if perf.skill_pnl_usd is not None and perf.skill_pnl_ci_low is not None
                 else "decomposition unavailable"
             ),
         ),
@@ -437,20 +526,39 @@ async def calculate_live_gate(
             briers is not None and briers[0] < briers[1],
             (
                 f"model {briers[0]:.4f} vs market {briers[1]:.4f} "
-                f"(n={len(trades)})"
+                f"(n={len(trades)}, {current_pipeline})"
                 if briers is not None
-                else "no resolved trades"
+                else (
+                    f"no resolved trades on {current_pipeline}"
+                    if current_pipeline is not None
+                    else "current probability pipeline version unavailable"
+                )
+            ),
+        ),
+        _check(
+            "forecast_input_provenance",
+            bool(active_probability_components)
+            and complete_forecast_provenance == len(active_probability_components),
+            (
+                f"{complete_forecast_provenance}/"
+                f"{len(active_probability_components)} latest active-market "
+                "probabilities bind immutable forecast source evidence"
             ),
         ),
     )
     return LiveGate(
         passed=all(check.passed for check in checks),
         station_scores=station_scores,
-        resolved_positions=len(positions),
+        resolved_positions=len(formal_trades),
         clv_samples=len(clvs),
         average_clv=average_clv,
         roi=roi,
+        independent_samples=independent_samples,
         checks=checks,
+        pipeline_version=current_pipeline,
+        pipeline_resolved_trades=len(trades),
+        pipeline_brier_model=briers[0] if briers is not None else None,
+        pipeline_brier_market=briers[1] if briers is not None else None,
     )
 
 
@@ -490,13 +598,12 @@ async def status_report(session: AsyncSession, initial_bankroll_usd: float) -> s
         lines.append(f"{icao} {market_date}: ${value:.2f} exposure")
     cutoff = now - timedelta(hours=24)
     job_runs = (
-        await session.execute(select(JobRun).where(JobRun.finished_at >= cutoff))
-    ).scalars().all()
+        (await session.execute(select(JobRun).where(JobRun.finished_at >= cutoff))).scalars().all()
+    )
     if job_runs:
         successful = sum(run.status == "success" for run in job_runs)
         lines.append(
-            f"Scheduler 24h: {successful / len(job_runs):.1%} "
-            f"({successful}/{len(job_runs)})"
+            f"Scheduler 24h: {successful / len(job_runs):.1%} ({successful}/{len(job_runs)})"
         )
         failures = [run for run in job_runs if run.status != "success"]
         if failures:
@@ -521,15 +628,21 @@ async def status_report(session: AsyncSession, initial_bankroll_usd: float) -> s
         select(HealthAudit).order_by(HealthAudit.ts.desc()).limit(1)
     )
     if latest_audit is not None:
-        lines.append(
-            f"Data quality: {latest_audit.status} ({len(latest_audit.issues)} issue(s))"
-        )
+        lines.append(f"Data quality: {latest_audit.status} ({len(latest_audit.issues)} issue(s))")
     return "\n".join(lines)
 
 
 async def calibration_report(session: AsyncSession, initial_bankroll_usd: float) -> str:
     gate = await calculate_live_gate(session, initial_bankroll_usd)
-    resolved = await _resolved_probability_rows(session)
+    dataset = await load_prospective_validation_dataset(
+        session,
+        mode=ExecutionMode.PAPER,
+        pipeline_cohort=gate.pipeline_version or "__no_current_pipeline__",
+    )
+    resolved = [
+        (trade.station_icao or "unknown", trade.won, trade.model_prob)
+        for trade in prospective_trade_outcomes(dataset.trades)
+    ]
     bins: dict[int, list[tuple[float, float]]] = defaultdict(list)
     for _, outcome, probability in resolved:
         bins[min(9, int(probability * 10))].append((probability, float(outcome)))
@@ -546,7 +659,7 @@ async def calibration_report(session: AsyncSession, initial_bankroll_usd: float)
         )
     clv = "n/a" if gate.average_clv is None else f"{gate.average_clv:+.3f}"
     lines.append(
-        f"Paper positions: {gate.resolved_positions}; CLV samples: {gate.clv_samples}; "
+        f"Prospective order fills: {gate.resolved_positions}; CLV samples: {gate.clv_samples}; "
         f"CLV {clv}; ROI {gate.roi:+.2%}"
     )
     return "\n".join(lines)
@@ -601,9 +714,7 @@ async def live_report(session: AsyncSession) -> str:
     return "\n".join(lines)
 
 
-async def edge_report_text(
-    session: AsyncSession, initial_bankroll_usd: float
-) -> str:
+async def edge_report_text(session: AsyncSession, initial_bankroll_usd: float) -> str:
     """Weekly anti-luck digest: the live-gate checklist with its numbers.
     Shows exactly what is already proven and what is still missing."""
     gate = await calculate_live_gate(session, initial_bankroll_usd)
@@ -626,15 +737,19 @@ async def daily_report(session: AsyncSession, now: datetime | None = None) -> st
     )
     end_local = start_local + timedelta(days=1)
     positions = (
-        await session.execute(
-            select(Position).where(
-                Position.mode == ExecutionMode.PAPER,
-                Position.status == PositionStatus.CLOSED,
-                Position.closed_at >= start_local.astimezone(UTC),
-                Position.closed_at < end_local.astimezone(UTC),
+        (
+            await session.execute(
+                select(Position).where(
+                    Position.mode == ExecutionMode.PAPER,
+                    Position.status == PositionStatus.CLOSED,
+                    Position.closed_at >= start_local.astimezone(UTC),
+                    Position.closed_at < end_local.astimezone(UTC),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     pnl = sum(float(position.pnl_usd or 0) for position in positions)
     clvs = [float(position.clv) for position in positions if position.clv is not None]
     average_clv = sum(clvs) / len(clvs) if clvs else None

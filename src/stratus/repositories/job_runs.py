@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
@@ -7,7 +8,12 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stratus.db.models import JobRun
-from stratus.services.uptime import CollectorUptime, JobOutcome, calculate_collector_uptime
+from stratus.services.uptime import (
+    CollectorUptime,
+    JobOutcome,
+    MaintenanceWindow,
+    calculate_collector_uptime,
+)
 
 
 async def record_job_run(
@@ -43,6 +49,7 @@ async def collector_uptime(
     *,
     now: datetime,
     window: timedelta = timedelta(hours=48),
+    maintenance_windows: Iterable[MaintenanceWindow] = (),
 ) -> CollectorUptime:
     monitoring_started = await session.scalar(select(func.min(JobRun.scheduled_at)))
     rows = (
@@ -57,4 +64,5 @@ async def collector_uptime(
         now=now,
         monitoring_started=monitoring_started,
         window=window,
+        maintenance_windows=maintenance_windows,
     )

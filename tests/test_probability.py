@@ -33,7 +33,7 @@ def test_gaussian_buckets_partition_distribution() -> None:
     assert total == pytest.approx(1.0)
 
 
-def test_ensemble_fraction_uses_bias_corrected_members() -> None:
+def test_ensemble_kernel_dressing_uses_bias_corrected_members() -> None:
     calibration = CalibrationParams(
         bias_c=1,
         sigma_c=1,
@@ -50,7 +50,12 @@ def test_ensemble_fraction_uses_bias_corrected_members() -> None:
         bucket=Bucket(10.5, 11.5),
         weight=0.3,
     )
-    assert component.probability == pytest.approx(1 / 3)
+    expected = sum(
+        gaussian_bucket_probability(value, 1, Bucket(10.5, 11.5))
+        for value in (10, 11, 12)
+    ) / 3
+    assert component.probability == pytest.approx(expected)
+    assert component.sample_n == 3
 
 
 def test_deterministic_emos_correction() -> None:

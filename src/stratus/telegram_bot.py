@@ -12,7 +12,7 @@ from aiogram.types import BotCommand, BufferedInputFile, Message
 
 from stratus.config import Settings, get_settings
 from stratus.db.models import ExecutionMode
-from stratus.db.session import create_engine, create_session_factory
+from stratus.db.session import create_engine, create_session_factory, verify_runtime_engine
 from stratus.repositories.markets import verify_market_station
 from stratus.repositories.runtime_control import (
     get_runtime_control,
@@ -21,12 +21,14 @@ from stratus.repositories.runtime_control import (
     set_mode,
 )
 from stratus.repositories.telegram import (
+    activate_notification_channel,
+    claim_deliveries,
     enqueue_notification,
     enqueue_recent_notifications,
     has_delivery,
     mark_delivery_failed,
     mark_delivery_sent,
-    pending_deliveries,
+    record_notification_heartbeat,
 )
 from stratus.services.live_execution import live_executor_configured
 from stratus.services.telegram_reports import (
@@ -167,19 +169,20 @@ def build_router(settings: Settings, session_factory: object) -> Router:
                 response = "Mode set to paper."
             else:
                 if not settings.live_legal_approved:
-                    response = (
-                        "Live mode blocked: Austrian legal classification is not approved."
-                    )
+                    response = "Live mode blocked: Austrian legal classification is not approved."
                 elif not settings.live_tax_approved:
                     response = "Live mode blocked: Austrian tax treatment is not approved."
                 else:
                     gate = await calculate_live_gate(
-                        session, settings.initial_bankroll_usd
+                        session,
+                        settings.initial_bankroll_usd,
+                        min_stations=settings.live_gate_min_stations,
+                        station_samples=settings.live_gate_station_samples,
+                        station_brier=settings.live_gate_station_brier,
+                        independent_samples_min=settings.live_gate_independent_samples,
                     )
                     if not gate.passed:
-                        response = (
-                            "Live mode blocked: validation gate has not passed. Use /calib."
-                        )
+                        response = "Live mode blocked: validation gate has not passed. Use /calib."
                     else:
                         control = await get_runtime_control(session)
                         now = datetime.now(UTC)
@@ -209,15 +212,20 @@ def build_router(settings: Settings, session_factory: object) -> Router:
     return router
 
 
-async def notification_loop(
-    bot: Bot, settings: Settings, session_factory: object
-) -> None:
+async def notification_loop(bot: Bot, settings: Settings, session_factory: object) -> None:
     destination = settings.telegram_chat_id or settings.telegram_admin_user_id
     if destination is None:
         raise RuntimeError("TELEGRAM_CHAT_ID or TELEGRAM_ADMIN_USER_ID is required")
+    # Starting the explicitly configured Telegram process is the activation
+    # action.  Commit its DB-clock watermark before any producer transaction so
+    # every pre-existing row remains local-only, including the legacy backlog.
+    async with session_factory.begin() as session:  # type: ignore[attr-defined]
+        await activate_notification_channel(session)
+        await record_notification_heartbeat(session)
     while True:
         try:
             async with session_factory.begin() as session:  # type: ignore[attr-defined]
+                await record_notification_heartbeat(session)
                 local_now = datetime.now(ZoneInfo("Europe/Berlin"))
                 if local_now.hour >= 8:
                     daily_key = f"daily:{local_now.date() - timedelta(days=1)}"
@@ -225,21 +233,46 @@ async def notification_loop(
                     if not await has_delivery(session, daily_key):
                         report = await daily_report(session)
                         await enqueue_notification(session, daily_key, report)
-                await enqueue_recent_notifications(
-                    session, datetime.now(UTC) - timedelta(hours=24)
+                await enqueue_recent_notifications(session, datetime.now(UTC) - timedelta(hours=24))
+            # The claim transaction commits the lease before network I/O.
+            async with session_factory.begin() as session:  # type: ignore[attr-defined]
+                deliveries = await claim_deliveries(
+                    session,
+                    limit=5,
+                    lease_seconds=120,
                 )
-            async with session_factory() as session:  # type: ignore[operator]
-                deliveries = await pending_deliveries(session)
             for delivery in deliveries:
                 try:
                     await bot.send_message(destination, delivery.payload)
                 except Exception as exc:
                     async with session_factory.begin() as session:  # type: ignore[attr-defined]
-                        await mark_delivery_failed(session, delivery.id, str(exc))
+                        recorded = await mark_delivery_failed(
+                            session,
+                            delivery.id,
+                            str(exc),
+                            delivery.lease_until,
+                        )
+                    if not recorded:
+                        logger.warning(
+                            "Telegram delivery %d failure arrived after its lease changed",
+                            delivery.id,
+                        )
                     logger.warning("Telegram delivery %d failed: %s", delivery.id, exc)
                 else:
                     async with session_factory.begin() as session:  # type: ignore[attr-defined]
-                        await mark_delivery_sent(session, delivery.id, datetime.now(UTC))
+                        recorded = await mark_delivery_sent(
+                            session,
+                            delivery.id,
+                            delivery.lease_until,
+                        )
+                    if not recorded:
+                        logger.warning(
+                            "Telegram delivery %d send confirmation arrived "
+                            "after its lease changed",
+                            delivery.id,
+                        )
+                # Keep burst delivery below Telegram's practical per-chat rate.
+                await asyncio.sleep(0.05)
         except Exception:
             logger.exception("Telegram notification loop failed")
         await asyncio.sleep(5)
@@ -252,6 +285,7 @@ async def run_bot(settings: Settings | None = None) -> None:
     if settings.telegram_admin_user_id is None:
         raise RuntimeError("TELEGRAM_ADMIN_USER_ID is required")
     engine = create_engine(settings)
+    await verify_runtime_engine(engine)
     session_factory = create_session_factory(engine)
     bot = Bot(token=settings.telegram_bot_token)
     dispatcher = Dispatcher()
@@ -269,9 +303,7 @@ async def run_bot(settings: Settings | None = None) -> None:
     )
     notifier = asyncio.create_task(notification_loop(bot, settings, session_factory))
     try:
-        await dispatcher.start_polling(
-            bot, allowed_updates=dispatcher.resolve_used_update_types()
-        )
+        await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
     finally:
         notifier.cancel()
         with contextlib.suppress(asyncio.CancelledError):

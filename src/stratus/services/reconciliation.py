@@ -4,6 +4,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
+from stratus.db.models import ResolutionReconciliationClassification
+
 # A mismatch this far from the nearest bucket boundary cannot be explained by
 # rounding differences between METAR readings and the official climate report;
 # it means the observation pipeline disagrees with the resolution source.
@@ -17,6 +19,15 @@ class ResolutionMismatch:
     margin_c: Decimal
     observed_yes: bool
     resolved_yes: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ResolutionAssessment:
+    classification: ResolutionReconciliationClassification
+    metar_implied_yes: bool | None
+    exact_implied_yes: bool | None
+    boundary_margin_c: Decimal | None
+    exact_truth_gap_c: Decimal | None
 
 
 def bucket_contains(
@@ -72,3 +83,74 @@ def clear_mismatches(
 ) -> list[ResolutionMismatch]:
     """Mismatches too far from a boundary to be rounding noise."""
     return [item for item in mismatches if item.margin_c >= threshold_c]
+
+
+def assess_resolution(
+    *,
+    resolved_yes: bool,
+    low_c: Decimal | None,
+    high_c: Decimal | None,
+    metar_temp_c: Decimal | None,
+    exact_temp_c: Decimal | None,
+    threshold_c: Decimal = CLEAR_MISMATCH_MARGIN_C,
+) -> ResolutionAssessment:
+    """Classify one attested outcome against the two available truth layers.
+
+    Exact licensed truth has precedence over METAR-derived truth.  A venue
+    outcome that contradicts the exact source is always its own fail-closed
+    class.  Otherwise an exact-vs-METAR temperature gap is retained even when
+    both temperatures happen to fall in the same bucket.
+    """
+
+    if low_c is None and high_c is None:
+        return ResolutionAssessment(
+            classification=ResolutionReconciliationClassification.TRUTH_UNAVAILABLE,
+            metar_implied_yes=None,
+            exact_implied_yes=None,
+            boundary_margin_c=None,
+            exact_truth_gap_c=None,
+        )
+
+    metar_implied = (
+        bucket_contains(metar_temp_c, low_c, high_c)
+        if metar_temp_c is not None
+        else None
+    )
+    exact_implied = (
+        bucket_contains(exact_temp_c, low_c, high_c)
+        if exact_temp_c is not None
+        else None
+    )
+    margin = (
+        boundary_margin(metar_temp_c, low_c, high_c)
+        if metar_temp_c is not None
+        else None
+    )
+    truth_gap = (
+        abs(exact_temp_c - metar_temp_c)
+        if exact_temp_c is not None and metar_temp_c is not None
+        else None
+    )
+
+    if exact_implied is not None and exact_implied != resolved_yes:
+        classification = ResolutionReconciliationClassification.EXACT_SOURCE_MISMATCH
+    elif metar_implied is None:
+        classification = ResolutionReconciliationClassification.TRUTH_UNAVAILABLE
+    elif truth_gap is not None and truth_gap >= threshold_c:
+        classification = ResolutionReconciliationClassification.EXACT_TRUTH_GAP
+    elif metar_implied != resolved_yes:
+        classification = (
+            ResolutionReconciliationClassification.CLEAR_MISMATCH
+            if margin is not None and margin >= threshold_c
+            else ResolutionReconciliationClassification.BOUNDARY_SENSITIVE
+        )
+    else:
+        classification = ResolutionReconciliationClassification.MATCH
+
+    return ResolutionAssessment(
+        classification=classification,
+        metar_implied_yes=metar_implied,
+        exact_implied_yes=exact_implied,
+        boundary_margin_c=margin,
+        exact_truth_gap_c=truth_gap,
+    )

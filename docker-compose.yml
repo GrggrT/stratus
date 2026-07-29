@@ -1,128 +1,914 @@
 services:
+  validate-owner-password:
+    image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set to a strong non-default owner password}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ "$${#POSTGRES_PASSWORD}" -lt 24 ]; then
+          echo "POSTGRES_PASSWORD must contain at least 24 characters" >&2
+          exit 1
+        fi
+        case "$$POSTGRES_PASSWORD" in
+          stratus|*[!A-Za-z0-9._~-]*)
+            echo "POSTGRES_PASSWORD must be non-default and URL-safe" >&2
+            exit 1
+            ;;
+        esac
+    restart: "no"
+
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
+    # Docker Desktop may restore containers before the WSL-backed volume is
+    # fully ready.  A transient startup exit must retry automatically instead
+    # of leaving API/worker alive with no durable runtime control database.
+    restart: unless-stopped
     environment:
       POSTGRES_DB: stratus
       POSTGRES_USER: stratus
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stratus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set to a strong non-default owner password}
     ports:
       # Loopback only: the database stores the kill switch and execution
       # mode, so it must never be reachable from outside the host.
       - "127.0.0.1:5432:5432"
+    # Authentication is release-controlled outside PGDATA so the boundary is
+    # also enforced for an existing durable volume.  A controlled PostgreSQL
+    # restart is required when this mounted file changes; startup consumers
+    # remain behind the healthcheck and runtime-role provisioner.
+    command:
+      - postgres
+      - -c
+      - hba_file=/etc/postgresql/stratus-pg_hba.conf
+      - -c
+      - password_encryption=scram-sha-256
     volumes:
       - stratus-postgres:/var/lib/postgresql/data
+      - ./ops/postgres/stratus-pg_hba.conf:/etc/postgresql/stratus-pg_hba.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U stratus -d stratus"]
       interval: 5s
       timeout: 3s
       retries: 10
+    depends_on:
+      validate-owner-password:
+        condition: service_completed_successfully
 
   migrate:
-    image: stratus:local
+    image: ${STRATUS_IMAGE:-stratus:local}
     command: ["alembic", "upgrade", "head"]
     environment: &stratus-environment
-      DATABASE_URL: postgresql+asyncpg://stratus:${POSTGRES_PASSWORD:-stratus}@postgres:5432/stratus
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://stratus:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set to a strong non-default owner password}@postgres:5432/stratus
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       OPERATOR_API_KEY: ${OPERATOR_API_KEY:-}
+      IEM_ASOS_URL: ${IEM_ASOS_URL:-https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py}
+      IEM_REQUEST_DELAY_SECONDS: ${IEM_REQUEST_DELAY_SECONDS:-12}
+      IEM_RECOVERY_TERMS_POLICY_HASH: ${IEM_RECOVERY_TERMS_POLICY_HASH:-bdd514125aeb91bbde8a4728063b8862010c821d05427572954b239085cc7535}
+      DAILY_ACTUAL_RECOVERY_ENABLED: ${DAILY_ACTUAL_RECOVERY_ENABLED:-true}
+      DAILY_ACTUAL_RECOVERY_LOOKBACK_DAYS: ${DAILY_ACTUAL_RECOVERY_LOOKBACK_DAYS:-3}
+      DAILY_ACTUAL_RECOVERY_MAX_REQUESTS_PER_RUN: ${DAILY_ACTUAL_RECOVERY_MAX_REQUESTS_PER_RUN:-20}
+      DAILY_ACTUAL_RECOVERY_RETRY_HOURS: ${DAILY_ACTUAL_RECOVERY_RETRY_HOURS:-20}
+      DAILY_ACTUAL_RECOVERY_LOCAL_HOUR: ${DAILY_ACTUAL_RECOVERY_LOCAL_HOUR:-4}
+      DAILY_ACTUAL_RECOVERY_MAX_RESPONSE_BYTES: ${DAILY_ACTUAL_RECOVERY_MAX_RESPONSE_BYTES:-5000000}
+      DAILY_ACTUAL_MIN_SAMPLES: ${DAILY_ACTUAL_MIN_SAMPLES:-20}
+      DAILY_ACTUAL_BOUNDARY_TOLERANCE_MINUTES: ${DAILY_ACTUAL_BOUNDARY_TOLERANCE_MINUTES:-90}
+      DAILY_ACTUAL_MAX_GAP_MINUTES: ${DAILY_ACTUAL_MAX_GAP_MINUTES:-120}
+      OFFICIAL_RESOLUTION_ARTIFACT_ROOT: ${OFFICIAL_RESOLUTION_ARTIFACT_ROOT:-}
+      OFFICIAL_RESOLUTION_ARTIFACT_MAX_BYTES: ${OFFICIAL_RESOLUTION_ARTIFACT_MAX_BYTES:-1000000}
+      MARKET_EXPOSURE_FRACTION: ${MARKET_EXPOSURE_FRACTION:-0.05}
+      STATION_DAY_EXPOSURE_FRACTION: ${STATION_DAY_EXPOSURE_FRACTION:-0.12}
+      STATION_RELIABILITY_WINDOW_DAYS: ${STATION_RELIABILITY_WINDOW_DAYS:-180}
+      STATION_RELIABILITY_MIN_SAMPLES: ${STATION_RELIABILITY_MIN_SAMPLES:-20}
+      STATION_RELIABILITY_MIN_LOWER_BOUND: ${STATION_RELIABILITY_MIN_LOWER_BOUND:-0.80}
+      STATION_RESOLUTION_COOLDOWN_HOURS: ${STATION_RESOLUTION_COOLDOWN_HOURS:-48}
+      STATION_OBSERVATION_STALE_MINUTES: ${STATION_OBSERVATION_STALE_MINUTES:-90}
+      STATION_RELIABILITY_SNAPSHOT_MAX_AGE_MINUTES: ${STATION_RELIABILITY_SNAPSHOT_MAX_AGE_MINUTES:-45}
+      EXPOSURE_HARD_STOP_MULTIPLIER: ${EXPOSURE_HARD_STOP_MULTIPLIER:-1.25}
+      BINANCE_ENABLED: ${BINANCE_ENABLED:-false}
+      BINANCE_MARKET_DATA_REST_URL: ${BINANCE_MARKET_DATA_REST_URL:-https://data-api.binance.vision}
+      BINANCE_WS_URL: ${BINANCE_WS_URL:-wss://stream.binance.com:9443}
+      BINANCE_SYMBOLS: ${BINANCE_SYMBOLS:-BTCUSDT,ETHUSDT}
+      BINANCE_QUOTE_ASSET: ${BINANCE_QUOTE_ASSET:-USDT}
+      BINANCE_KLINE_INTERVAL: ${BINANCE_KLINE_INTERVAL:-1m}
+      BINANCE_KLINE_LIMIT: ${BINANCE_KLINE_LIMIT:-3}
+      BINANCE_DEPTH_LIMIT: ${BINANCE_DEPTH_LIMIT:-20}
+      BINANCE_MARKET_DATA_STALE_MS: ${BINANCE_MARKET_DATA_STALE_MS:-2000}
+      BINANCE_MAX_CLOCK_DRIFT_MS: ${BINANCE_MAX_CLOCK_DRIFT_MS:-500}
+      SETTLEMENT_CALIBRATOR_MIN_BLOCKS: ${SETTLEMENT_CALIBRATOR_MIN_BLOCKS:-60}
+      SETTLEMENT_CALIBRATOR_L2: ${SETTLEMENT_CALIBRATOR_L2:-0.05}
+      SETTLEMENT_CALIBRATOR_ECE_TOLERANCE: ${SETTLEMENT_CALIBRATOR_ECE_TOLERANCE:-0.01}
+      PROBABILITY_PIPELINE_VERSION: ${PROBABILITY_PIPELINE_VERSION:-stratus-accuracy-v4-20260713}
+      SIGNAL_MAX_EDGE: ${SIGNAL_MAX_EDGE:-0.20}
+      # Production releases inject the built image id (without sha256:). It is
+      # recorded by the immutable evidence-continuity epoch activation.
+      RELEASE_IMAGE_DIGEST: ${STRATUS_RELEASE_IMAGE_DIGEST:-0000000000000000000000000000000000000000000000000000000000000000}
+      ACCURACY_STACK_MIN_SAMPLES: ${ACCURACY_STACK_MIN_SAMPLES:-30}
+      ACCURACY_STACK_MIN_BLOCKS: ${ACCURACY_STACK_MIN_BLOCKS:-60}
+      ACCURACY_STACK_L2: ${ACCURACY_STACK_L2:-0.05}
+      ACCURACY_STACK_LEARNING_RATE: ${ACCURACY_STACK_LEARNING_RATE:-0.2}
+      ACCURACY_TRAJECTORY_SAMPLES: ${ACCURACY_TRAJECTORY_SAMPLES:-512}
+      ACCURACY_TRAJECTORY_RHO: ${ACCURACY_TRAJECTORY_RHO:-0.85}
+      ACCURACY_TRAJECTORY_MIN_MODELS: ${ACCURACY_TRAJECTORY_MIN_MODELS:-2}
+      ACCURACY_TRAJECTORY_MIN_BLOCKS: ${ACCURACY_TRAJECTORY_MIN_BLOCKS:-60}
+      ACCURACY_NOWCAST_MIN_OBSERVED_HOURS: ${ACCURACY_NOWCAST_MIN_OBSERVED_HOURS:-3}
+      ACCURACY_NOWCAST_LOOKBACK_HOURS: ${ACCURACY_NOWCAST_LOOKBACK_HOURS:-6}
+      ACCURACY_NOWCAST_BIAS_HALF_LIFE_HOURS: ${ACCURACY_NOWCAST_BIAS_HALF_LIFE_HOURS:-6}
+      ACCURACY_NOWCAST_MAX_BIAS_C: ${ACCURACY_NOWCAST_MAX_BIAS_C:-4}
+      ACCURACY_NOWCAST_MIN_BLOCKS: ${ACCURACY_NOWCAST_MIN_BLOCKS:-60}
+      ACCURACY_CONFORMAL_COVERAGE: ${ACCURACY_CONFORMAL_COVERAGE:-0.90}
+      ACCURACY_CONFORMAL_MIN_SAMPLES: ${ACCURACY_CONFORMAL_MIN_SAMPLES:-120}
+      ACCURACY_CONFORMAL_MIN_BLOCKS: ${ACCURACY_CONFORMAL_MIN_BLOCKS:-60}
+      ACCURACY_CONFORMAL_MAX_SCALE: ${ACCURACY_CONFORMAL_MAX_SCALE:-2.5}
+      ACCURACY_HIERARCHICAL_PRIOR_SAMPLES: ${ACCURACY_HIERARCHICAL_PRIOR_SAMPLES:-60}
+      ACCURACY_HIERARCHICAL_MIN_PEER_STATIONS: ${ACCURACY_HIERARCHICAL_MIN_PEER_STATIONS:-3}
+      ACCURACY_HIERARCHICAL_MIN_BLOCKS: ${ACCURACY_HIERARCHICAL_MIN_BLOCKS:-60}
+      ACCURACY_REGIME_RECENT_DAYS: ${ACCURACY_REGIME_RECENT_DAYS:-30}
+      ACCURACY_REGIME_BASELINE_DAYS: ${ACCURACY_REGIME_BASELINE_DAYS:-90}
+      ACCURACY_REGIME_MIN_RECENT: ${ACCURACY_REGIME_MIN_RECENT:-20}
+      ACCURACY_REGIME_MIN_BASELINE: ${ACCURACY_REGIME_MIN_BASELINE:-40}
+      ACCURACY_REGIME_MIN_SHIFT_C: ${ACCURACY_REGIME_MIN_SHIFT_C:-0.25}
+      ACCURACY_REGIME_MAX_ADJUSTMENT_C: ${ACCURACY_REGIME_MAX_ADJUSTMENT_C:-2.0}
+      ACCURACY_REGIME_BOOTSTRAP_SAMPLES: ${ACCURACY_REGIME_BOOTSTRAP_SAMPLES:-512}
+      ACCURACY_REGIME_MIN_BLOCKS: ${ACCURACY_REGIME_MIN_BLOCKS:-60}
+      ACCURACY_NONLINEAR_MIN_BLOCKS: ${ACCURACY_NONLINEAR_MIN_BLOCKS:-60}
+      # Formal CLOB evidence is immutable. These limits stop collection before
+      # the local evidence ledger exhausts its provisioned storage budget.
+      CLOB_LEDGER_CAPACITY_BUDGET_BYTES: ${CLOB_LEDGER_CAPACITY_BUDGET_BYTES:-20000000000}
+      CLOB_LEDGER_CAPACITY_WARNING_FRACTION: ${CLOB_LEDGER_CAPACITY_WARNING_FRACTION:-0.75}
+      CLOB_LEDGER_CAPACITY_PROJECTION_DAYS: ${CLOB_LEDGER_CAPACITY_PROJECTION_DAYS:-30}
+      CLOB_LEDGER_CAPACITY_MIN_WINDOW_HOURS: ${CLOB_LEDGER_CAPACITY_MIN_WINDOW_HOURS:-20}
+      CLOB_LEDGER_CAPACITY_SAMPLE_TTL_MINUTES: ${CLOB_LEDGER_CAPACITY_SAMPLE_TTL_MINUTES:-90}
+      CLOB_LEDGER_CAPACITY_MIN_FREE_BYTES: ${CLOB_LEDGER_CAPACITY_MIN_FREE_BYTES:-5000000000}
+      CLOB_RESPONSE_MAX_BYTES: ${CLOB_RESPONSE_MAX_BYTES:-25000000}
+      CLOB_LEDGER_CAPACITY_WRITE_RESERVE_BYTES: ${CLOB_LEDGER_CAPACITY_WRITE_RESERVE_BYTES:-250000000}
+      # A maintenance exclusion is valid only when all three values are set;
+      # the application also enforces an aware, positive window of at most 2h.
+      HEALTH_MAINTENANCE_STARTS_AT: ${HEALTH_MAINTENANCE_STARTS_AT:-}
+      HEALTH_MAINTENANCE_ENDS_AT: ${HEALTH_MAINTENANCE_ENDS_AT:-}
+      HEALTH_MAINTENANCE_REASON: ${HEALTH_MAINTENANCE_REASON:-}
     depends_on:
       postgres:
         condition: service_healthy
     restart: "no"
 
-  worker:
-    image: stratus:local
-    build: .
-    command: ["stratus-run"]
-    environment: *stratus-environment
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-    restart: unless-stopped
-
-  api:
-    image: stratus:local
-    command: ["stratus-api"]
-    environment: *stratus-environment
-    ports:
-      - "127.0.0.1:${STRATUS_API_PORT:-8000}:8000"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-    restart: unless-stopped
-
-  backup:
-    image: postgres:16-alpine
+  provision-runtime-role:
+    image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
     environment:
       PGHOST: postgres
       PGPORT: 5432
       PGUSER: stratus
-      PGPASSWORD: ${POSTGRES_PASSWORD:-stratus}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set to a strong non-default owner password}
+      PGDATABASE: stratus
+    secrets:
+      - source: stratus-runtime-password
+        target: stratus_runtime_password
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        password_file=/run/secrets/stratus_runtime_password
+        if [ ! -r "$$password_file" ]; then
+          echo "STRATUS_RUNTIME_PASSWORD is required; refusing runtime role activation" >&2
+          exit 1
+        fi
+        runtime_password="$$(cat "$$password_file")"
+        if [ "$${#runtime_password}" -lt 24 ]; then
+          echo "STRATUS_RUNTIME_PASSWORD must contain at least 24 characters" >&2
+          exit 1
+        fi
+        case "$$runtime_password" in
+          *[!A-Za-z0-9._~-]*)
+            echo "STRATUS_RUNTIME_PASSWORD must use URL-safe unreserved characters" >&2
+            exit 1
+            ;;
+        esac
+        role_is_safe="$$(psql -XAtq --set=ON_ERROR_STOP=1 \
+          --command='SELECT public.assert_stratus_runtime_boundary(false)')"
+        if [ "$$role_is_safe" != "t" ]; then
+          echo "database-scoped STRATUS runtime role boundary is unsafe" >&2
+          exit 1
+        fi
+        app_role="$$(psql -XAtq --set=ON_ERROR_STOP=1 \
+          --command="SELECT 'stratus_app_' || md5(current_database())")"
+        if [ "$${#app_role}" -ne 44 ]; then
+          echo "database-scoped STRATUS application role is malformed" >&2
+          exit 1
+        fi
+        case "$$app_role" in
+          stratus_app_*) ;;
+          *)
+            echo "database-scoped STRATUS application role is malformed" >&2
+            exit 1
+            ;;
+        esac
+        case "$$app_role" in
+          *[!a-z0-9_]*)
+            echo "database-scoped STRATUS application role is malformed" >&2
+            exit 1
+            ;;
+        esac
+        printf '%s\n%s\n' "$$runtime_password" "$$runtime_password" \
+          | psql -Xq --set=ON_ERROR_STOP=1 \
+              --command="\password $$app_role"
+        psql -Xq --set=ON_ERROR_STOP=1 \
+          --command="ALTER ROLE \"$$app_role\" LOGIN"
+        boundary_is_safe="$$(PGPASSWORD="$$runtime_password" \
+          psql -XAtq --set=ON_ERROR_STOP=1 --username="$$app_role" \
+          --command='SELECT public.assert_stratus_runtime_boundary(true)')"
+        unset runtime_password
+        if [ "$$boundary_is_safe" != "t" ]; then
+          echo "stratus_app runtime boundary failed after activation" >&2
+          exit 1
+        fi
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  worker:
+    image: ${STRATUS_IMAGE:-stratus:local}
+    build: .
+    command: ["stratus-run"]
+    # Keep a single analytical job from exhausting Docker Desktop's WSL VM
+    # and taking PostgreSQL/API down with it. Normal bounded runtime stays
+    # comfortably below this ceiling; an unexpected regression fails the
+    # worker container instead of the whole host.
+    mem_limit: ${STRATUS_WORKER_MEMORY_LIMIT:-3g}
+    environment:
+      <<: *stratus-environment
+      MIGRATION_DATABASE_URL: ""
+      DATABASE_URL: ""
+      STRATUS_RUNTIME_DATABASE_URL: ""
+      STRATUS_RUNTIME_PASSWORD_FILE: /run/secrets/stratus_runtime_password
+      STRATUS_DATABASE_HOST: postgres
+      STRATUS_DATABASE_NAME: stratus
+      # Contract: both named volumes below use Docker's local driver, share its
+      # backing filesystem, and have no per-volume quota. The probe therefore
+      # reports PGDATA headroom without exposing raw database files. A custom
+      # volume driver/deployment must override this with an actual PGDATA-FS path.
+      CLOB_LEDGER_CAPACITY_PATH: ${CLOB_LEDGER_CAPACITY_PATH:-/capacity-probe}
+    entrypoint: ["/usr/local/bin/stratus-runtime-entrypoint"]
+    secrets:
+      - source: stratus-runtime-password
+        target: stratus_runtime_password
+    volumes:
+      - stratus-capacity-probe:/capacity-probe:ro
+    depends_on:
+      provision-runtime-role:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  binance-market-stream:
+    image: ${STRATUS_IMAGE:-stratus:local}
+    command: ["stratus-stream-binance-market-data"]
+    environment:
+      <<: *stratus-environment
+      MIGRATION_DATABASE_URL: ""
+      DATABASE_URL: ""
+      STRATUS_RUNTIME_DATABASE_URL: ""
+      STRATUS_RUNTIME_PASSWORD_FILE: /run/secrets/stratus_runtime_password
+      STRATUS_DATABASE_HOST: postgres
+      STRATUS_DATABASE_NAME: stratus
+    entrypoint: ["/usr/local/bin/stratus-runtime-entrypoint"]
+    secrets:
+      - source: stratus-runtime-password
+        target: stratus_runtime_password
+    depends_on:
+      provision-runtime-role:
+        condition: service_completed_successfully
+    restart: "on-failure:5"
+    profiles: ["binance"]
+
+  api:
+    image: ${STRATUS_IMAGE:-stratus:local}
+    command: ["stratus-api"]
+    environment:
+      <<: *stratus-environment
+      MIGRATION_DATABASE_URL: ""
+      DATABASE_URL: ""
+      STRATUS_RUNTIME_DATABASE_URL: ""
+      STRATUS_RUNTIME_PASSWORD_FILE: /run/secrets/stratus_runtime_password
+      STRATUS_DATABASE_HOST: postgres
+      STRATUS_DATABASE_NAME: stratus
+    entrypoint: ["/usr/local/bin/stratus-runtime-entrypoint"]
+    secrets:
+      - source: stratus-runtime-password
+        target: stratus_runtime_password
+    ports:
+      - "127.0.0.1:${STRATUS_API_PORT:-8000}:8000"
+    healthcheck:
+      # Container health is liveness. /readyz intentionally returns 503 while
+      # a risk/continuity kill switch is active and must not mislabel a healthy
+      # fail-closed API process as crashed.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      provision-runtime-role:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  backup:
+    image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: stratus
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set to a strong non-default owner password}
       PGDATABASE: stratus
     command:
       - /bin/sh
-      - -ec
+      - -c
       - |
-        mkdir -p /backups
+        # A published backup is an atomically-renamed directory containing the
+        # custom archive, its catalog, and a checksum manifest.  flock is on
+        # the shared backup filesystem, so independently started Compose
+        # projects cannot dump concurrently or collide on a filename.
+        set -u
+        for tool in flock timeout sha256sum pg_dump pg_restore psql awk grep stat tr hostname sync find sort rm mv date; do
+          command -v "$$tool" >/dev/null 2>&1 || {
+            echo "required backup tool is missing: $$tool" >&2
+            exit 1
+          }
+        done
+        mkdir -p /backups || exit 1
+        retry_seconds=300
+        max_retry_seconds=3600
+
+        create_backup() (
+          set -eu
+          partial_dir="$$1"
+          target_dir="$$2"
+          started_at="$$3"
+          trap 'exit 1' HUP INT TERM
+          trap 'rm -rf -- "$$partial_dir"' EXIT
+
+          schema_before="$$(psql -XAtq --set=ON_ERROR_STOP=1 \
+            --command='SELECT version_num FROM alembic_version')" || exit 1
+          test -n "$$schema_before" || exit 1
+          case "$$schema_before" in
+            *[!A-Za-z0-9_.-]*) exit 1 ;;
+          esac
+          mkdir "$$partial_dir" || exit 1
+          timeout -s TERM 21600 pg_dump \
+            --format=custom --compress=6 \
+            --file="$$partial_dir/stratus.dump" || exit 1
+          pg_restore --list "$$partial_dir/stratus.dump" \
+            >"$$partial_dir/catalog.list" || exit 1
+          test -s "$$partial_dir/catalog.list" || exit 1
+          schema_after="$$(psql -XAtq --set=ON_ERROR_STOP=1 \
+            --command='SELECT version_num FROM alembic_version')" || exit 1
+          test -n "$$schema_after" || exit 1
+          case "$$schema_after" in
+            *[!A-Za-z0-9_.-]*) exit 1 ;;
+          esac
+          test "$$schema_before" = "$$schema_after" || exit 1
+
+          archive_bytes="$$(stat -c '%s' "$$partial_dir/stratus.dump")" || exit 1
+          archive_sha256="$$(sha256sum "$$partial_dir/stratus.dump" | awk '{print $$1}')" || exit 1
+          catalog_entries="$$(grep -c '^[0-9]' "$$partial_dir/catalog.list" || :)"
+          catalog_sha256="$$(sha256sum "$$partial_dir/catalog.list" | awk '{print $$1}')" || exit 1
+          completed_at="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" || exit 1
+          test "$$archive_bytes" -gt 0 || exit 1
+          test "$$catalog_entries" -gt 0 || exit 1
+          case "$$archive_sha256$$catalog_sha256" in
+            *[!0-9a-f]*|'') exit 1 ;;
+          esac
+          test "$${#archive_sha256}" -eq 64 || exit 1
+          test "$${#catalog_sha256}" -eq 64 || exit 1
+
+          {
+            printf 'format=stratus-backup-manifest-v2\n'
+            printf 'archive=stratus.dump\n'
+            printf 'database=%s\n' "$$PGDATABASE"
+            printf 'schema_head=%s\n' "$$schema_before"
+            printf 'schema_head_before=%s\n' "$$schema_before"
+            printf 'schema_head_after=%s\n' "$$schema_after"
+            printf 'started_at=%s\n' "$$started_at"
+            printf 'completed_at=%s\n' "$$completed_at"
+            printf 'archive_bytes=%s\n' "$$archive_bytes"
+            printf 'archive_sha256=%s\n' "$$archive_sha256"
+            printf 'catalog_entries=%s\n' "$$catalog_entries"
+            printf 'catalog_sha256=%s\n' "$$catalog_sha256"
+            printf 'catalog_verified=true\n'
+            printf 'schema_stable_during_dump=true\n'
+            printf 'full_restore_verified=false\n'
+          } >"$$partial_dir/manifest.txt" || exit 1
+          test -s "$$partial_dir/manifest.txt" || exit 1
+          sync || exit 1
+          test ! -e "$$target_dir" || exit 1
+          mv -T "$$partial_dir" "$$target_dir" || exit 1
+          sync || exit 1
+          trap - EXIT || exit 1
+        )
+
+        accepted_restore_point() {
+          directory="$$1"
+          case "$$directory" in
+            /backups/stratus_*.backup) ;;
+            *) return 1 ;;
+          esac
+          basename="$${directory##*/}"
+          case "$$basename" in
+            stratus_*.backup) ;;
+            *) return 1 ;;
+          esac
+          case "$$basename" in
+            *[!A-Za-z0-9_.-]*|'') return 1 ;;
+          esac
+          test ! -L "$$directory" || return 1
+          test -d "$$directory" || return 1
+          archive="$$directory/stratus.dump"
+          catalog="$$directory/catalog.list"
+          manifest="$$directory/manifest.txt"
+          test ! -L "$$archive" || return 1
+          test ! -L "$$catalog" || return 1
+          test ! -L "$$manifest" || return 1
+          test -s "$$archive" || return 1
+          test -s "$$catalog" || return 1
+          test -s "$$manifest" || return 1
+          grep -qx 'format=stratus-backup-manifest-v2' "$$manifest" || return 1
+          grep -qx 'archive=stratus.dump' "$$manifest" || return 1
+          grep -qx "database=$$PGDATABASE" "$$manifest" || return 1
+          grep -qx 'catalog_verified=true' "$$manifest" || return 1
+          grep -qx 'schema_stable_during_dump=true' "$$manifest" || return 1
+
+          schema_head="$$(awk -F= '$$1 == "schema_head" {print $$2}' "$$manifest")" || return 1
+          schema_before="$$(awk -F= '$$1 == "schema_head_before" {print $$2}' "$$manifest")" \
+            || return 1
+          schema_after="$$(awk -F= '$$1 == "schema_head_after" {print $$2}' "$$manifest")" \
+            || return 1
+          case "$$schema_head$$schema_before$$schema_after" in
+            ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+          esac
+          test "$$schema_head" = "$$schema_before" || return 1
+          test "$$schema_before" = "$$schema_after" || return 1
+
+          expected_archive_bytes="$$(awk -F= '$$1 == "archive_bytes" {print $$2}' "$$manifest")" \
+            || return 1
+          actual_archive_bytes="$$(stat -c '%s' "$$archive")" || return 1
+          case "$$expected_archive_bytes" in
+            ''|*[!0-9]*) return 1 ;;
+          esac
+          test "$$expected_archive_bytes" -gt 0 || return 1
+          test "$$expected_archive_bytes" = "$$actual_archive_bytes" || return 1
+
+          expected_archive_sha="$$(awk -F= '$$1 == "archive_sha256" {print $$2}' "$$manifest")" \
+            || return 1
+          actual_archive_sha="$$(sha256sum "$$archive" | awk '{print $$1}')" || return 1
+          expected_catalog_sha="$$(awk -F= '$$1 == "catalog_sha256" {print $$2}' "$$manifest")" \
+            || return 1
+          actual_catalog_sha="$$(sha256sum "$$catalog" | awk '{print $$1}')" || return 1
+          case "$$expected_archive_sha$$expected_catalog_sha" in
+            *[!0-9a-f]*|'') return 1 ;;
+          esac
+          test "$${#expected_archive_sha}" -eq 64 || return 1
+          test "$${#expected_catalog_sha}" -eq 64 || return 1
+          test "$$expected_archive_sha" = "$$actual_archive_sha" || return 1
+          test "$$expected_catalog_sha" = "$$actual_catalog_sha" || return 1
+
+          expected_catalog_entries="$$(awk -F= '$$1 == "catalog_entries" {print $$2}' "$$manifest")" \
+            || return 1
+          actual_catalog_entries="$$(grep -c '^[0-9]' "$$catalog" || :)"
+          case "$$expected_catalog_entries" in
+            ''|*[!0-9]*) return 1 ;;
+          esac
+          test "$$expected_catalog_entries" -gt 0 || return 1
+          test "$$expected_catalog_entries" = "$$actual_catalog_entries" || return 1
+          pg_restore --list "$$archive" >/dev/null 2>&1 || return 1
+        }
+
+        cleanup_abandoned_partials() {
+          for abandoned in /backups/.stratus_*.backup.partial; do
+            if [ ! -e "$$abandoned" ] && [ ! -L "$$abandoned" ]; then
+              continue
+            fi
+            case "$$abandoned" in
+              /backups/.stratus_*.backup.partial)
+                rm -rf -- "$$abandoned" || return 1
+                ;;
+              *) return 1 ;;
+            esac
+          done
+          for abandoned in /backups/.stratus_*.backup.partial; do
+            if [ -e "$$abandoned" ] || [ -L "$$abandoned" ]; then
+              return 1
+            fi
+          done
+        }
+
+        write_health_marker() {
+          target_basename="$${1##*/}"
+          case "$$target_basename" in
+            stratus_*.backup) ;;
+            *) return 1 ;;
+          esac
+          case "$$target_basename" in
+            *[!A-Za-z0-9_.-]*) return 1 ;;
+          esac
+          manifest="$$1/manifest.txt"
+          manifest_sha="$$(sha256sum "$$manifest" | awk '{print $$1}')" || return 1
+          case "$$manifest_sha" in
+            *[!0-9a-f]*|'') return 1 ;;
+          esac
+          test "$${#manifest_sha}" -eq 64 || return 1
+          health_tmp=/backups/.stratus-backup-health.partial
+          rm -f -- "$$health_tmp" || return 1
+          {
+            printf 'format=stratus-backup-health-v1\n'
+            printf 'target=%s\n' "$$target_basename"
+            printf 'manifest_sha256=%s\n' "$$manifest_sha"
+          } >"$$health_tmp" || return 1
+          sync || {
+            rm -f -- "$$health_tmp"
+            return 1
+          }
+          mv -T "$$health_tmp" /backups/.stratus-backup-health || {
+            rm -f -- "$$health_tmp"
+            return 1
+          }
+          sync || {
+            rm -f -- /backups/.stratus-backup-health
+            sync || :
+            return 1
+          }
+        }
+
+        prune_published() {
+          published_count=0
+          for candidate in /backups/stratus_*.backup; do
+            if [ ! -e "$$candidate" ] && [ ! -L "$$candidate" ]; then
+              continue
+            fi
+            if accepted_restore_point "$$candidate"; then
+              published_count=$$((published_count + 1))
+            else
+              echo "not counting invalid restore point for retention: $$candidate" >&2
+            fi
+          done
+          delete_budget=$$((published_count - 3))
+          if [ "$$delete_budget" -le 0 ]; then
+            return 0
+          fi
+          for old in $$(find /backups -maxdepth 1 -type d \
+              -name 'stratus_*.backup' -mtime +14 -print | sort); do
+            if [ "$$delete_budget" -le 0 ]; then
+              break
+            fi
+            case "$$old" in
+              /backups/stratus_*.backup)
+                if accepted_restore_point "$$old"; then
+                  rm -rf -- "$$old" || return 1
+                  delete_budget=$$((delete_budget - 1))
+                fi
+                ;;
+              *) return 1 ;;
+            esac
+          done
+        }
+
         while true; do
-          target="/backups/stratus_$$(date -u +%Y%m%dT%H%M%SZ).dump"
-          pg_dump --format=custom --compress=6 --file="$$target"
-          pg_restore --list "$$target" >/dev/null
-          find /backups -type f -name 'stratus_*.dump' -mtime +14 -delete
-          sleep 86400
+          exec 9>/backups/.stratus-backup.lock
+          if ! flock -n 9; then
+            echo "another STRATUS backup owns the shared lock; retrying in 900s" >&2
+            exec 9>&-
+            sleep 900
+            continue
+          fi
+          if ! cleanup_abandoned_partials; then
+            echo "cannot remove abandoned backup partials; refusing a new dump" >&2
+            flock -u 9 || :
+            exec 9>&-
+            exit 1
+          fi
+
+          stamp="$$(date -u +%Y%m%dT%H%M%SZ)"
+          instance="$$(hostname | tr -cd 'A-Za-z0-9_.-')"
+          backup_id="$${stamp}_$${instance}_$$$$"
+          partial_dir="/backups/.stratus_$${backup_id}.backup.partial"
+          target_dir="/backups/stratus_$${backup_id}.backup"
+          started_at="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          success=false
+
+          case "$$partial_dir" in
+            /backups/.stratus_*.backup.partial) ;;
+            *) echo "unsafe backup work path" >&2; exit 1 ;;
+          esac
+          # Invoke the fail-fast subshell as a simple command. POSIX shells
+          # suppress `set -e` throughout a function used directly as an `if`
+          # condition, which can otherwise turn failed psql/pg_dump checks
+          # into a false successful publication.
+          create_backup "$$partial_dir" "$$target_dir" "$$started_at"
+          backup_status=$$?
+          if [ "$$backup_status" -eq 0 ] \
+            && [ -s "$$target_dir/stratus.dump" ] \
+            && [ -s "$$target_dir/catalog.list" ] \
+            && [ -s "$$target_dir/manifest.txt" ] \
+            && grep -Eq '^schema_head_before=.+$$' "$$target_dir/manifest.txt" \
+            && grep -Eq '^schema_head_after=.+$$' "$$target_dir/manifest.txt" \
+            && grep -Eq '^archive_bytes=[1-9][0-9]*$$' "$$target_dir/manifest.txt" \
+            && grep -Eq '^catalog_entries=[1-9][0-9]*$$' "$$target_dir/manifest.txt" \
+            && accepted_restore_point "$$target_dir"; then
+            echo "published $$target_dir"
+            success=true
+            if ! write_health_marker "$$target_dir"; then
+              echo "backup published but health marker update failed; sidecar remains unhealthy" >&2
+            fi
+          elif [ -e "$$target_dir" ]; then
+            rejected_dir="$${target_dir}.rejected-incomplete"
+            test ! -e "$$rejected_dir" || exit 1
+            mv -T "$$target_dir" "$$rejected_dir" || exit 1
+            echo "quarantined invalid published backup: $$rejected_dir" >&2
+          fi
+
+          if [ "$$success" = true ]; then
+            retry_seconds=300
+          else
+            echo "backup failed; unpublished partial removed; retrying in $${retry_seconds}s" >&2
+            rm -rf -- "$$partial_dir"
+          fi
+
+          # Legacy accepted .dump archives are never automatically pruned.
+          # New atomic backups are pruned only after a successful publication,
+          # and at least the three newest local restore points are retained.
+          find /backups -maxdepth 1 -type f -name 'stratus_*.dump.partial' -mtime +1 -delete
+          find /backups -maxdepth 1 -type d -name '.stratus_*.backup.partial' -mtime +1 \
+            -exec rm -rf -- {} +
+          if [ "$$success" = true ] && ! prune_published; then
+            echo "backup published but retention pruning failed closed" >&2
+          fi
+
+          flock -u 9
+          exec 9>&-
+          if [ "$$success" = true ]; then
+            sleep 86400
+          else
+            sleep "$$retry_seconds"
+            retry_seconds=$$((retry_seconds * 2))
+            if [ "$$retry_seconds" -gt "$$max_retry_seconds" ]; then
+              retry_seconds="$$max_retry_seconds"
+            fi
+          fi
         done
     volumes:
       - ./backups:/backups
     depends_on:
       postgres:
         condition: service_healthy
-    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          set -eu
+          marker=/backups/.stratus-backup-health
+          test -s "$$marker"
+          find "$$marker" -mmin -1560 -print -quit | grep -q .
+          test "$$(grep -c '^format=' "$$marker")" -eq 1
+          test "$$(grep -c '^target=' "$$marker")" -eq 1
+          test "$$(grep -c '^manifest_sha256=' "$$marker")" -eq 1
+          grep -qx 'format=stratus-backup-health-v1' "$$marker"
+          target="$$(awk -F= '$$1 == "target" {print $$2}' "$$marker")"
+          expected_sha="$$(awk -F= '$$1 == "manifest_sha256" {print $$2}' "$$marker")"
+          case "$$target" in
+            stratus_*.backup) ;;
+            *) exit 1 ;;
+          esac
+          case "$$target$$expected_sha" in
+            *[!A-Za-z0-9_.-]*|'') exit 1 ;;
+          esac
+          test "$${#expected_sha}" -eq 64
+          directory="/backups/$$target"
+          test ! -L "$$directory"
+          test -d "$$directory"
+          test ! -L "$$directory/stratus.dump"
+          test ! -L "$$directory/catalog.list"
+          test ! -L "$$directory/manifest.txt"
+          test -s "$$directory/stratus.dump"
+          test -s "$$directory/catalog.list"
+          test -s "$$directory/manifest.txt"
+          actual_sha="$$(sha256sum "$$directory/manifest.txt" | awk '{print $$1}')"
+          test "$$actual_sha" = "$$expected_sha"
+      interval: 30m
+      timeout: 5s
+      retries: 2
+      start_period: 6h
+    restart: "on-failure:5"
 
   # Off-site copy of the daily dumps. Opt-in: configure an rclone remote in
   # ./rclone.conf (gitignored), set OFFSITE_REMOTE in .env, then run with
   # `docker compose --profile offsite up -d`.
   backup-offsite:
-    image: rclone/rclone:1.68
-    entrypoint: ["/bin/sh", "-ec"]
+    image: rclone/rclone:1.68@sha256:74c51b8817e5431bd6d7ed27cb2a50d8ee78d77f6807b72a41ef6f898845942b
+    entrypoint: ["/bin/sh", "-c"]
     command:
       - |
+        set -u
         if [ -z "$${OFFSITE_REMOTE:-}" ]; then
           echo "OFFSITE_REMOTE is not set; refusing to start" >&2
           exit 1
         fi
+        case "$$OFFSITE_REMOTE" in
+          crypt:*) ;;
+          *) echo "OFFSITE_REMOTE must use the configured crypt: remote" >&2; exit 1 ;;
+        esac
+        if ! rclone config show crypt | grep -Eq '^type[[:space:]]*=[[:space:]]*crypt$$'; then
+          echo "the rclone remote named crypt is not a crypt backend" >&2
+          exit 1
+        fi
+        mkdir -p /state || exit 1
+        remote_root="$${OFFSITE_REMOTE%/}"
+
+        record_full_scrub() {
+          scrubbed_name="$$1"
+          case "$$scrubbed_name" in
+            stratus_*.backup) ;;
+            *) return 1 ;;
+          esac
+          case "$$scrubbed_name" in
+            *[!A-Za-z0-9_.-]*|'') return 1 ;;
+          esac
+          state_tmp="/state/.full-scrub-state.$$$$"
+          printf '%s\n' "$$scrubbed_name" >"$$state_tmp" || return 1
+          mv "$$state_tmp" /state/full-scrub-state || {
+            rm -f "$$state_tmp"
+            return 1
+          }
+        }
+
         while true; do
-          rclone copy /backups "$$OFFSITE_REMOTE" \
-            --include 'stratus_*.dump' --min-age 5m --transfers 2
-          sleep 3600
+          failed=false
+          verified_count=0
+          scrub_due=false
+          if [ ! -s /state/full-scrub-state ] \
+            || ! find /state/full-scrub-state -mmin -1440 -print -quit | grep -q .; then
+            scrub_due=true
+          fi
+          scrub_cursor="$$(cat /state/full-scrub-state 2>/dev/null || :)"
+          case "$$scrub_cursor" in
+            *[!A-Za-z0-9_.-]*) scrub_cursor='' ;;
+          esac
+          first_existing_verified=''
+          scrub_candidate=''
+          cursor_seen=false
+          fresh_full_verified=''
+          for source_dir in /backups/stratus_*.backup; do
+            if [ ! -d "$$source_dir" ]; then
+              continue
+            fi
+            if [ -L "$$source_dir" ]; then
+              echo "refusing symlinked local backup: $$source_dir" >&2
+              failed=true
+              continue
+            fi
+            manifest="$$source_dir/manifest.txt"
+            archive="$$source_dir/stratus.dump"
+            catalog="$$source_dir/catalog.list"
+            if [ -L "$$manifest" ] || [ -L "$$archive" ] || [ -L "$$catalog" ] \
+              || [ ! -s "$$manifest" ] || [ ! -s "$$archive" ] || [ ! -s "$$catalog" ]; then
+              echo "refusing incomplete local backup: $$source_dir" >&2
+              failed=true
+              continue
+            fi
+            expected_archive_sha="$$(awk -F= '$$1 == "archive_sha256" {print $$2}' "$$manifest")"
+            expected_catalog_sha="$$(awk -F= '$$1 == "catalog_sha256" {print $$2}' "$$manifest")"
+            actual_archive_sha="$$(sha256sum "$$archive" | awk '{print $$1}')"
+            actual_catalog_sha="$$(sha256sum "$$catalog" | awk '{print $$1}')"
+            if [ "$${#expected_archive_sha}" -ne 64 ] \
+              || [ "$${#expected_catalog_sha}" -ne 64 ] \
+              || [ "$$expected_archive_sha" != "$$actual_archive_sha" ] \
+              || [ "$$expected_catalog_sha" != "$$actual_catalog_sha" ]; then
+              echo "refusing backup with invalid local checksums: $$source_dir" >&2
+              failed=true
+              continue
+            fi
+
+            backup_name="$$(basename "$$source_dir")"
+            remote_dir="$$remote_root/$$backup_name"
+            manifest_sha="$$(sha256sum "$$manifest" | awk '{print $$1}')"
+            marker="/tmp/$${backup_name}.COMPLETE.$$$$"
+            marker_body="manifest_sha256=$$manifest_sha"
+            remote_marker="$$(rclone cat "$$remote_dir/COMPLETE" 2>/dev/null || :)"
+            if [ "$$remote_marker" = "$$marker_body" ]; then
+              if rclone check "$$source_dir" "$$remote_dir" \
+                --one-way --size-only --exclude COMPLETE; then
+                echo "reverified off-site backup metadata: $$backup_name"
+                verified_count=$$((verified_count + 1))
+                if [ -z "$$first_existing_verified" ]; then
+                  first_existing_verified="$$source_dir"
+                fi
+                if [ "$$scrub_due" = true ] && [ -z "$$scrub_candidate" ] \
+                  && { [ -z "$$scrub_cursor" ] || [ "$$cursor_seen" = true ]; }; then
+                  scrub_candidate="$$source_dir"
+                fi
+                if [ "$$backup_name" = "$$scrub_cursor" ]; then
+                  cursor_seen=true
+                fi
+                continue
+              fi
+              echo "existing off-site backup failed reverification: $$backup_name" >&2
+              rclone deletefile "$$remote_dir/COMPLETE" >/dev/null 2>&1 || :
+            fi
+
+            printf '%s\n' "$$marker_body" >"$$marker"
+            if rclone copy "$$source_dir" "$$remote_dir" --exclude COMPLETE --transfers 2 \
+              && rclone check "$$source_dir" "$$remote_dir" \
+                --one-way --download --exclude COMPLETE \
+              && rclone copyto "$$marker" "$$remote_dir/COMPLETE" \
+              && [ "$$(rclone cat "$$remote_dir/COMPLETE")" = "$$marker_body" ]; then
+              echo "verified encrypted off-site backup: $$backup_name"
+              verified_count=$$((verified_count + 1))
+              fresh_full_verified="$$backup_name"
+            else
+              echo "off-site verification failed; COMPLETE was not accepted: $$backup_name" >&2
+              rclone deletefile "$$remote_dir/COMPLETE" >/dev/null 2>&1 || :
+              failed=true
+            fi
+            rm -f "$$marker"
+          done
+          if [ "$$scrub_due" = true ]; then
+            if [ -z "$$scrub_candidate" ]; then
+              scrub_candidate="$$first_existing_verified"
+            fi
+            if [ -n "$$scrub_candidate" ]; then
+              scrub_name="$${scrub_candidate##*/}"
+              scrub_remote="$$remote_root/$$scrub_name"
+              if rclone check "$$scrub_candidate" "$$scrub_remote" \
+                --one-way --download --exclude COMPLETE \
+                && record_full_scrub "$$scrub_name"; then
+                echo "completed rotating full off-site scrub: $$scrub_name"
+              else
+                echo "full off-site scrub failed: $$scrub_name" >&2
+                rclone deletefile "$$scrub_remote/COMPLETE" >/dev/null 2>&1 || :
+                failed=true
+              fi
+            elif [ -n "$$fresh_full_verified" ]; then
+              if ! record_full_scrub "$$fresh_full_verified"; then
+                echo "could not persist full off-site scrub state" >&2
+                failed=true
+              fi
+            fi
+          fi
+          if [ "$$failed" = false ] && [ "$$verified_count" -gt 0 ]; then
+            touch /tmp/stratus-offsite-health
+            sleep 3600
+          else
+            rm -f /tmp/stratus-offsite-health
+            if [ "$$verified_count" -eq 0 ]; then
+              echo "no verified off-site restore point; remaining unhealthy" >&2
+            fi
+            sleep 900
+          fi
         done
     environment:
       OFFSITE_REMOTE: ${OFFSITE_REMOTE:-}
     volumes:
       - ./backups:/backups:ro
       - ${RCLONE_CONFIG_FILE:-./rclone.conf}:/config/rclone/rclone.conf:ro
+      - stratus-offsite-state:/state
     depends_on:
       postgres:
         condition: service_healthy
-    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/stratus-offsite-health && find /tmp/stratus-offsite-health -mmin -120 -print -quit | grep -q ."]
+      interval: 30m
+      timeout: 5s
+      retries: 2
+      start_period: 30m
+    restart: "on-failure:5"
     profiles: ["offsite"]
 
   telegram:
-    image: stratus:local
+    image: ${STRATUS_IMAGE:-stratus:local}
     command: ["stratus-telegram"]
     environment:
       <<: *stratus-environment
+      MIGRATION_DATABASE_URL: ""
+      DATABASE_URL: ""
+      STRATUS_RUNTIME_DATABASE_URL: ""
+      STRATUS_RUNTIME_PASSWORD_FILE: /run/secrets/stratus_runtime_password
+      STRATUS_DATABASE_HOST: postgres
+      STRATUS_DATABASE_NAME: stratus
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_ADMIN_USER_ID: ${TELEGRAM_ADMIN_USER_ID:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    entrypoint: ["/usr/local/bin/stratus-runtime-entrypoint"]
+    secrets:
+      - source: stratus-runtime-password
+        target: stratus_runtime_password
     depends_on:
-      migrate:
+      provision-runtime-role:
         condition: service_completed_successfully
     restart: unless-stopped
     profiles: ["telegram"]
 
 volumes:
   stratus-postgres:
+    driver: local
+  stratus-capacity-probe:
+    driver: local
+  stratus-offsite-state:
+    driver: local
+
+secrets:
+  stratus-runtime-password:
+    file: ${STRATUS_RUNTIME_PASSWORD_FILE:-./.secrets/stratus_runtime_password}

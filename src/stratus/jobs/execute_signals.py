@@ -6,33 +6,71 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from stratus.collectors.clob import ClobClient
 from stratus.config import Settings, get_settings
-from stratus.db.models import ExecutionMode, Market, Signal, SignalStatus, TradeSide
+from stratus.db.models import (
+    ClobMarketSnapshot,
+    ExecutionMode,
+    ExecutionOrderIntent,
+    Market,
+    Order,
+    Signal,
+    SignalStatus,
+    Station,
+    StationReliabilitySnapshot,
+    StationStage,
+)
 from stratus.db.session import session_factory_scope
+from stratus.jobs.execution_capacity import (
+    acquire_execution_capacity_gate,
+    engage_capacity_failure,
+)
+from stratus.repositories.clob_snapshots import (
+    eligible_clob_snapshots_at_or_after,
+    load_attested_token_book,
+)
+from stratus.repositories.evidence_continuity_gate import probability_release_gate
 from stratus.repositories.execution import (
+    PAPER_STATUS_PENDING,
+    PAPER_STATUS_RESTING,
     MakerFillValue,
     PaperExecutionValue,
     RestingPaperOrder,
     expire_pending_signals,
     expire_resting_paper_orders,
-    insert_resting_paper_orders,
-    persist_maker_fills,
-    persist_paper_executions,
-    resting_paper_orders,
+)
+from stratus.repositories.execution_cost_ledger import (
+    PaperFillLegSpec,
+    create_intent_for_order,
+    record_paper_fill,
+    record_terminal_no_fill,
 )
 from stratus.repositories.risk import enforce_loss_limits
 from stratus.repositories.runtime_control import get_runtime_control
+from stratus.repositories.selection_policy import capture_selection_policy_decisions
+from stratus.repositories.station_reliability import (
+    acquire_station_reliability_gate_lock,
+    latest_station_reliability_by_station,
+    signal_station_reliability_gate_reasons,
+)
+from stratus.services.clob_evidence import CLOB_DUAL_PROTOCOL
 from stratus.services.execution import (
     PaperExecutionError,
     best_bid_ask,
+    executable_ask_levels,
     maker_fill,
     maker_limit_price,
+    taker_fee,
     usable_ask_depth_usd,
     walk_ask_book,
+)
+from stratus.services.execution_cost import (
+    ExecutionCostIntegrityError,
+    purchased_side_quote,
+    walk_taker_ask_levels,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,8 +90,14 @@ async def execute_signals(
         if mode is ExecutionMode.LIVE:
             from stratus.jobs.execute_live_signals import execute_live_signals
 
-            return await execute_live_signals(settings, sessions)
-        return await execute_paper_signals(settings, sessions)
+            result = await execute_live_signals(settings, sessions)
+        else:
+            result = await execute_paper_signals(settings, sessions)
+        async with sessions.begin() as session:
+            recorded = await capture_selection_policy_decisions(session)
+        if recorded:
+            logger.info("recorded %d prospective selection-policy decisions", recorded)
+        return result
 
 
 def _paper_fee_rate(market: Market, *, taker: bool) -> Decimal:
@@ -70,143 +114,522 @@ async def execute_paper_signals(
     settings: Settings | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[int, int, int]:
+    """Execute prospective paper orders only from persisted CLOB evidence.
+
+    The first transaction commits an order plus immutable 0038 intent.  A
+    later price cycle must begin after that witness; only then may this job
+    consume the first eligible attested book and create atomic fill legs.
+    """
+
     settings = settings or get_settings()
     now = datetime.now(UTC)
     ttl = timedelta(minutes=settings.paper_order_ttl_minutes)
-    async with session_factory_scope(settings, session_factory) as session_factory:
-        async with session_factory.begin() as session:
-            control = await get_runtime_control(session)
-            if control.kill_switch or control.halted_reason:
-                logger.info("paper execution blocked by runtime control")
-                return 0, 0, 0
-            loss_limits, risk_expired = await enforce_loss_limits(
-                session,
-                mode=ExecutionMode.PAPER,
-                initial_bankroll_usd=settings.initial_bankroll_usd,
-                timezone=settings.risk_timezone,
-                now=now,
-            )
-            if loss_limits.daily_breached or loss_limits.weekly_breached:
-                logger.warning(
-                    "paper execution blocked by loss limit: daily=%s weekly=%s expired=%d",
-                    loss_limits.daily_breached,
-                    loss_limits.weekly_breached,
-                    risk_expired,
+    expired = 0
+    posted = 0
+    unfilled = 0
+    executed = 0
+    async with session_factory_scope(settings, session_factory) as sessions:
+        try:
+            # Phase 1: make the intent durable.  No execution book is selected
+            # in this transaction.
+            async with sessions.begin() as session:
+                await acquire_station_reliability_gate_lock(session)
+                control = await get_runtime_control(session)
+                if control.kill_switch or control.halted_reason:
+                    logger.info("paper execution blocked by runtime control")
+                    return 0, 0, 0
+                loss_limits, risk_expired = await enforce_loss_limits(
+                    session,
+                    mode=ExecutionMode.PAPER,
+                    initial_bankroll_usd=settings.initial_bankroll_usd,
+                    timezone=settings.risk_timezone,
+                    now=now,
                 )
-                return 0, risk_expired, 0
-            rows = (
-                await session.execute(
-                    select(Signal, Market)
-                    .join(Market, Signal.market_id == Market.id)
-                    .where(Signal.status == SignalStatus.PENDING)
-                    .order_by(Signal.ts)
-                )
-            ).all()
-            resting_prices: dict[int, Decimal] = {}
-            resting_ids: dict[int, int] = {}
-            if settings.paper_maker_execution:
-                for signal_id, order in (await resting_paper_orders(session)).items():
-                    resting_prices[signal_id] = order.price
-                    resting_ids[signal_id] = order.id
-
-        expired_ids = [signal.id for signal, _ in rows if now - signal.ts > ttl]
-        active_rows = [
-            (signal, market)
-            for signal, market in rows
-            if signal.id not in set(expired_ids)
-        ]
-        token_by_signal: dict[int, str] = {}
-        for signal, market in active_rows:
-            token_id = (
-                market.yes_token_id
-                if signal.side is TradeSide.BUY_YES
-                else market.no_token_id
-            )
-            if token_id:
-                token_by_signal[signal.id] = token_id
-
-        books_by_token: dict[str, dict[str, Any]] = {}
-        if token_by_signal:
-            async with ClobClient(
-                books_url=settings.clob_books_url,
-                batch_size=settings.clob_batch_size,
-            ) as client:
-                books = await client.fetch_books(list(dict.fromkeys(token_by_signal.values())))
-            books_by_token = {
-                str(book.get("asset_id")): book
-                for book in books
-                if isinstance(book.get("asset_id"), str)
-            }
-
-        executions: list[PaperExecutionValue] = []
-        placements: list[RestingPaperOrder] = []
-        maker_fills: list[MakerFillValue] = []
-        unfilled = 0
-        for signal, market in active_rows:
-            token_id = token_by_signal.get(signal.id)
-            book = books_by_token.get(token_id) if token_id else None
-            if book is None:
-                unfilled += 1
-                continue
-            try:
-                if market.fees_enabled and market.fee_exponent != 1:
-                    raise PaperExecutionError(
-                        f"unsupported fee exponent {market.fee_exponent}"
+                expired += risk_expired
+                if loss_limits.daily_breached or loss_limits.weekly_breached:
+                    logger.warning(
+                        "paper execution blocked by loss limit: daily=%s weekly=%s expired=%d",
+                        loss_limits.daily_breached,
+                        loss_limits.weekly_breached,
+                        risk_expired,
                     )
-                if settings.paper_maker_execution:
-                    outcome = _process_maker_signal(
-                        signal,
-                        market,
-                        book,
-                        resting_price=resting_prices.get(signal.id),
-                        resting_order_id=resting_ids.get(signal.id),
+                    return 0, expired, 0
+
+                nonpositive_pending_ids = list(
+                    (
+                        await session.scalars(
+                            select(Signal.id).where(
+                                Signal.status == SignalStatus.PENDING,
+                                Signal.size_usd <= 0,
+                            )
+                        )
+                    ).all()
+                )
+                if nonpositive_pending_ids:
+                    expired += await expire_pending_signals(
+                        session,
+                        nonpositive_pending_ids,
+                        reason="paper_order_size_nonpositive",
+                    )
+                    await expire_resting_paper_orders(session, nonpositive_pending_ids)
+
+                legacy_pending_ids = list(
+                    (
+                        await session.scalars(
+                            select(Signal.id).where(
+                                Signal.status == SignalStatus.PENDING,
+                                (
+                                    (Signal.benchmark_protocol != CLOB_DUAL_PROTOCOL)
+                                    | Signal.token_id.is_(None)
+                                    | Signal.clob_snapshot_id.is_(None)
+                                ),
+                            )
+                        )
+                    ).all()
+                )
+                if legacy_pending_ids:
+                    expired += await expire_pending_signals(
+                        session,
+                        legacy_pending_ids,
+                        reason="legacy_price_protocol",
+                    )
+                    await expire_resting_paper_orders(session, legacy_pending_ids)
+
+                unproven_pending_ids = list(
+                    (
+                        await session.scalars(
+                            select(Signal.id).where(
+                                Signal.status == SignalStatus.PENDING,
+                                Signal.station_reliability_snapshot_id.is_(None),
+                            )
+                        )
+                    ).all()
+                )
+                if unproven_pending_ids:
+                    expired += await expire_pending_signals(
+                        session,
+                        unproven_pending_ids,
+                        reason="station_reliability_provenance_missing",
+                    )
+                    await expire_resting_paper_orders(session, unproven_pending_ids)
+
+                rows = (
+                    await session.execute(
+                        select(Signal, Market, Station, Order, ExecutionOrderIntent)
+                        .join(Market, Signal.market_id == Market.id)
+                        .join(Station, Market.station_id == Station.id)
+                        .outerjoin(
+                            Order,
+                            and_(
+                                Order.signal_id == Signal.id,
+                                Order.mode == ExecutionMode.PAPER,
+                            ),
+                        )
+                        .outerjoin(
+                            ExecutionOrderIntent,
+                            ExecutionOrderIntent.order_id == Order.id,
+                        )
+                        .where(
+                            Signal.status == SignalStatus.PENDING,
+                            Signal.benchmark_protocol == CLOB_DUAL_PROTOCOL,
+                            Signal.token_id.is_not(None),
+                            Signal.clob_snapshot_id.is_not(None),
+                            Station.active.is_(True),
+                            Station.stage.in_((StationStage.PAPER, StationStage.APPROVED)),
+                        )
+                        .order_by(Signal.ts, Signal.id)
+                        .with_for_update(of=Signal, skip_locked=True)
+                    )
+                ).all()
+
+                current_reliability = await latest_station_reliability_by_station(
+                    session,
+                    sorted({station.id for _signal, _market, station, _order, _intent in rows}),
+                )
+
+                # Expiration is safe before the capacity preflight: it cannot
+                # create exposure and prevents stale signals from lingering.
+                active: list[
+                    tuple[Signal, Market, Station, Order | None, ExecutionOrderIntent | None]
+                ] = []
+                for signal, market, station, order, intent in rows:
+                    attested_snapshot = await session.get(
+                        StationReliabilitySnapshot,
+                        signal.station_reliability_snapshot_id,
+                    )
+                    reliability_reasons = signal_station_reliability_gate_reasons(
+                        signal=signal,
+                        market=market,
+                        station=station,
+                        attested_snapshot=attested_snapshot,
+                        current_snapshot=current_reliability.get(station.id),
+                        settings=settings,
                         now=now,
+                        require_reliable=False,
                     )
-                    if isinstance(outcome, RestingPaperOrder):
-                        placements.append(outcome)
-                    elif isinstance(outcome, MakerFillValue):
-                        maker_fills.append(outcome)
-                    elif isinstance(outcome, PaperExecutionValue):
-                        executions.append(outcome)
+                    if reliability_reasons:
+                        failure_reason = reliability_reasons[0]
+                        if intent is not None:
+                            await record_terminal_no_fill(
+                                session,
+                                intent.id,
+                                terminal_status="rejected",
+                                failure_reason=failure_reason,
+                            )
+                        else:
+                            signal.status = SignalStatus.EXPIRED
+                            signal.skip_reason = failure_reason
+                            if order is not None:
+                                order.status = "rejected"
+                        expired += 1
+                        continue
+                    if now - signal.ts <= ttl:
+                        active.append((signal, market, station, order, intent))
+                        continue
+                    if intent is not None:
+                        await record_terminal_no_fill(
+                            session,
+                            intent.id,
+                            terminal_status=(
+                                "unfilled_maker"
+                                if intent.order_style == "maker"
+                                else "expired"
+                            ),
+                            failure_reason=(
+                                "unfilled_maker"
+                                if intent.order_style == "maker"
+                                else "paper_execution_timeout"
+                            ),
+                        )
                     else:
-                        unfilled += 1
-                    continue
-                taker = _taker_execution(signal, market, book, now=now)
-                if taker is None:
-                    unfilled += 1
-                else:
-                    executions.append(taker)
-            except PaperExecutionError as exc:
-                logger.warning("invalid paper book for signal %d: %s", signal.id, exc)
-                unfilled += 1
-                continue
+                        signal.status = SignalStatus.EXPIRED
+                        signal.skip_reason = "paper_execution_timeout"
+                        if order is not None:
+                            order.status = "unfilled_maker"
+                    expired += 1
 
-        async with session_factory.begin() as session:
-            expired = await expire_pending_signals(
-                session,
-                expired_ids,
-                reason=(
-                    "unfilled_maker"
-                    if settings.paper_maker_execution
-                    else "paper_execution_timeout"
-                ),
-            )
-            expired_orders = await expire_resting_paper_orders(session, expired_ids)
-            posted = await insert_resting_paper_orders(session, placements)
-            filled_maker = await persist_maker_fills(session, maker_fills)
-            executed = await persist_paper_executions(session, executions)
-        logger.info(
-            "paper execution complete: pending=%d executed=%d maker_filled=%d "
-            "posted=%d expired=%d expired_orders=%d unfilled=%d",
-            len(rows),
-            executed,
-            filled_maker,
-            posted,
-            expired,
-            expired_orders,
-            unfilled,
+                if active:
+                    capacity_gate = await acquire_execution_capacity_gate(
+                        session,
+                        settings,
+                        now=datetime.now(UTC),
+                    )
+                    if not capacity_gate.allowed:
+                        return 0, expired, 0
+                    control = await get_runtime_control(session)
+                    if (
+                        control.kill_switch
+                        or control.halted_reason
+                        or control.mode is not ExecutionMode.PAPER
+                    ):
+                        logger.info("paper intent blocked by authoritative runtime control")
+                        return 0, expired, 0
+                    if any(
+                        intent is None and order is None
+                        for _, _, _, order, intent in active
+                    ):
+                        release_gate = await probability_release_gate(session, settings)
+                        if not release_gate.allowed:
+                            logger.error(
+                                "paper intent blocked by probability release epoch: "
+                                "reason=%s active=%s candidate=%s",
+                                release_gate.reason,
+                                release_gate.active_cohort,
+                                release_gate.candidate_cohort,
+                            )
+                            return 0, expired, 0
+
+                for signal, market, _station, order, intent in active:
+                    if intent is not None:
+                        continue
+                    if order is not None:
+                        # A committed post-boundary order without an intent is
+                        # an invariant violation.  Never try to infer/backfill
+                        # its missing decision evidence.
+                        order.status = "rejected"
+                        signal.status = SignalStatus.EXPIRED
+                        signal.skip_reason = "execution_intent_missing"
+                        expired += 1
+                        logger.error(
+                            "paper order %d has no immutable execution intent; rejected",
+                            order.id,
+                        )
+                        continue
+                    try:
+                        async with session.begin_nested():
+                            snapshot = await session.get(
+                                ClobMarketSnapshot,
+                                signal.clob_snapshot_id,
+                            )
+                            if snapshot is None:
+                                raise ExecutionCostIntegrityError(
+                                    "signal decision snapshot is unavailable"
+                                )
+                            quote = purchased_side_quote(
+                                snapshot,
+                                signal.side,
+                                signal.model_prob,
+                            )
+                            style = "maker" if settings.paper_maker_execution else "taker"
+                            limit_price = (
+                                maker_limit_price(quote.best_bid, quote.best_ask)
+                                if style == "maker"
+                                else min(
+                                    Decimal("0.999999"),
+                                    signal.market_price + Decimal("0.01"),
+                                )
+                            )
+                            if limit_price is None:
+                                raise ExecutionCostIntegrityError(
+                                    "decision book cannot support a passive limit"
+                                )
+                            requested_shares = (signal.size_usd / limit_price).quantize(
+                                Decimal("0.000001")
+                            )
+                            expected_fee = taker_fee(
+                                requested_shares,
+                                limit_price,
+                                _paper_fee_rate(market, taker=style == "taker"),
+                            )
+                            order = Order(
+                                signal_id=signal.id,
+                                mode=ExecutionMode.PAPER,
+                                clob_order_id=f"paper-{signal.id}",
+                                token_id=quote.token_id,
+                                side=signal.side,
+                                price=limit_price,
+                                size_usd=signal.size_usd,
+                                filled_usd=Decimal(0),
+                                fee_usd=None,
+                                status=(
+                                    PAPER_STATUS_RESTING
+                                    if style == "maker"
+                                    else PAPER_STATUS_PENDING
+                                ),
+                            )
+                            session.add(order)
+                            await session.flush()
+                            await create_intent_for_order(
+                                session,
+                                order.id,
+                                release_image_digest=settings.release_image_digest,
+                                order_style=style,
+                                expected_fee_usd=expected_fee,
+                                expected_fee_unavailable_reason=None,
+                            )
+                            posted += 1
+                    except (ExecutionCostIntegrityError, PaperExecutionError) as exc:
+                        signal.status = SignalStatus.EXPIRED
+                        signal.skip_reason = "execution_intent_invalid"
+                        expired += 1
+                        logger.error(
+                            "paper intent rejected for signal %d: %s",
+                            signal.id,
+                            exc,
+                        )
+
+            # Phase 2: use only the first eligible request that began after
+            # the committed intent.  This is a persisted evidence read; the
+            # executor performs no unaudited HTTP request.
+            async with sessions.begin() as session:
+                await acquire_station_reliability_gate_lock(session)
+                capacity_gate = await acquire_execution_capacity_gate(
+                    session,
+                    settings,
+                    now=datetime.now(UTC),
+                )
+                if not capacity_gate.allowed:
+                    return 0, expired, 0
+                control = await get_runtime_control(session)
+                if (
+                    control.kill_switch
+                    or control.halted_reason
+                    or control.mode is not ExecutionMode.PAPER
+                ):
+                    logger.info("paper fill blocked by authoritative runtime control")
+                    return 0, expired, 0
+                pending = (
+                    await session.execute(
+                        select(Signal, Market, Station, Order, ExecutionOrderIntent)
+                        .join(Market, Market.id == Signal.market_id)
+                        .join(Station, Station.id == Market.station_id)
+                        .join(
+                            Order,
+                            and_(
+                                Order.signal_id == Signal.id,
+                                Order.mode == ExecutionMode.PAPER,
+                            ),
+                        )
+                        .join(
+                            ExecutionOrderIntent,
+                            ExecutionOrderIntent.order_id == Order.id,
+                        )
+                        .where(
+                            Signal.status == SignalStatus.PENDING,
+                            Order.status.in_((PAPER_STATUS_PENDING, PAPER_STATUS_RESTING)),
+                        )
+                        .order_by(ExecutionOrderIntent.intent_at, ExecutionOrderIntent.id)
+                        .with_for_update(of=Order, skip_locked=True)
+                    )
+                ).all()
+                current_reliability = await latest_station_reliability_by_station(
+                    session,
+                    sorted(
+                        {
+                            station.id
+                            for _signal, _market, station, _order, _intent in pending
+                        }
+                    ),
+                )
+                for signal, market, station, order, intent in pending:
+                    attested_snapshot = await session.get(
+                        StationReliabilitySnapshot,
+                        signal.station_reliability_snapshot_id,
+                    )
+                    reliability_reasons = signal_station_reliability_gate_reasons(
+                        signal=signal,
+                        market=market,
+                        station=station,
+                        attested_snapshot=attested_snapshot,
+                        current_snapshot=current_reliability.get(station.id),
+                        settings=settings,
+                        now=datetime.now(UTC),
+                        require_reliable=False,
+                    )
+                    if reliability_reasons:
+                        await record_terminal_no_fill(
+                            session,
+                            intent.id,
+                            terminal_status="rejected",
+                            failure_reason=reliability_reasons[0],
+                        )
+                        expired += 1
+                        continue
+                    try:
+                        async with session.begin_nested():
+                            snapshots = await eligible_clob_snapshots_at_or_after(
+                                session,
+                                market_id=market.id,
+                                not_before=intent.intent_at,
+                            )
+                            if market.fees_enabled and market.fee_exponent != 1:
+                                raise PaperExecutionError(
+                                    f"unsupported fee exponent {market.fee_exponent}"
+                                )
+                            qualifying: tuple[
+                                ClobMarketSnapshot,
+                                tuple[PaperFillLegSpec, ...],
+                            ] | None = None
+                            for snapshot in snapshots:
+                                # Re-attest candidates in strict witness order.
+                                # A corrupt earlier row raises; it is never
+                                # silently skipped in favour of a later book.
+                                _batch, _stored_snapshot, book = (
+                                    await load_attested_token_book(
+                                        session,
+                                        snapshot_id=snapshot.id,
+                                        token_id=intent.token_id,
+                                    )
+                                )
+                                specs = _paper_fill_leg_specs(
+                                    signal,
+                                    market,
+                                    order,
+                                    intent,
+                                    book,
+                                )
+                                if specs:
+                                    qualifying = (snapshot, specs)
+                                    break
+                            if qualifying is None:
+                                unfilled += 1
+                                continue
+                            snapshot, specs = qualifying
+                            await record_paper_fill(
+                                session,
+                                intent.id,
+                                snapshot.id,
+                                specs,
+                            )
+                            executed += 1
+                    except (ExecutionCostIntegrityError, PaperExecutionError) as exc:
+                        unfilled += 1
+                        logger.warning(
+                            "invalid attested paper book for signal %d: %s",
+                            signal.id,
+                            exc,
+                        )
+        except DBAPIError:
+            logger.exception("paper execution capacity/evidence transaction failed")
+            try:
+                async with sessions.begin() as session:
+                    await engage_capacity_failure(
+                        session,
+                        reason="capacity_or_execution_evidence_unavailable",
+                    )
+            except DBAPIError:
+                logger.exception("paper execution could not persist capacity kill switch")
+            return 0, expired, unfilled
+
+    logger.info(
+        "paper execution complete: executed=%d posted=%d expired=%d unfilled=%d",
+        executed,
+        posted,
+        expired,
+        unfilled,
+    )
+    return executed, expired, unfilled
+
+
+def _paper_fill_leg_specs(
+    signal: Signal,
+    market: Market,
+    order: Order,
+    intent: ExecutionOrderIntent,
+    book: dict[str, Any],
+) -> tuple[PaperFillLegSpec, ...]:
+    quote = best_bid_ask(book)
+    if quote is None:
+        return ()
+    _best_bid, best_ask = quote
+    fee_rate = _paper_fee_rate(market, taker=intent.order_style == "taker")
+    if intent.order_style == "maker":
+        if best_ask > order.price:
+            return ()
+        if usable_ask_depth_usd(book, max_price=order.price) < signal.size_usd:
+            return ()
+        fill = maker_fill(
+            limit_price=order.price,
+            target_usd=signal.size_usd,
+            fee_rate=fee_rate,
         )
-        return executed + filled_maker, expired, unfilled
+        return (
+            PaperFillLegSpec(
+                sequence=1,
+                shares=fill.size_shares,
+                price=order.price,
+                fee_usd=fill.fee_usd,
+                liquidity_role="maker",
+            ),
+        )
+
+    if usable_ask_depth_usd(book, max_price=order.price) < 3 * signal.size_usd:
+        return ()
+    walk = walk_taker_ask_levels(
+        executable_ask_levels(book, max_price=order.price),
+        target_notional_usd=signal.size_usd,
+        fee_fn=lambda shares, price: taker_fee(shares, price, fee_rate),
+    )
+    return tuple(
+        PaperFillLegSpec(
+            sequence=leg.sequence,
+            shares=leg.shares,
+            price=leg.price,
+            fee_usd=leg.fee_usd,
+            liquidity_role="taker",
+        )
+        for leg in walk.legs
+    )
 
 
 def _taker_execution(
@@ -280,6 +703,7 @@ def _process_maker_signal(
             side=signal.side,
             limit_price=limit,
             size_usd=signal.size_usd,
+            token_id=signal.token_id,
         )
 
     assert resting_order_id is not None

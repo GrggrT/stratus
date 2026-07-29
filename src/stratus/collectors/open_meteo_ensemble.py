@@ -3,15 +3,18 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
 from stratus.collectors.open_meteo import (
+    ForecastBundle,
     ForecastValue,
     OpenMeteoError,
+    SourceResponseEvidence,
     StationTarget,
+    _response_evidence,
     parse_daily_extremes,
 )
 
@@ -112,6 +115,19 @@ class OpenMeteoEnsembleClient:
         run_time: datetime,
         fetched_at: datetime,
     ) -> list[ForecastValue]:
+        bundle = await self.fetch_bundle(
+            station, model, run_time=run_time, fetched_at=fetched_at
+        )
+        return list(bundle.forecasts)
+
+    async def fetch_bundle(
+        self,
+        station: StationTarget,
+        model: str,
+        *,
+        run_time: datetime,
+        fetched_at: datetime,
+    ) -> ForecastBundle:
         model_config = ENSEMBLE_MODELS.get(model)
         if model_config is None:
             raise ValueError(f"unsupported ensemble model: {model}")
@@ -127,26 +143,40 @@ class OpenMeteoEnsembleClient:
             "temperature_unit": "celsius",
         }
         async with self._semaphore:
-            payload = await self._get_json(params)
-        return parse_ensemble_daily_extremes(
-            payload,
-            station_id=station.id,
-            model=model,
-            run_time=run_time,
-            fetched_at=fetched_at,
+            payload, evidence = await self._get_json(params)
+        return ForecastBundle(
+            forecasts=tuple(
+                parse_ensemble_daily_extremes(
+                    payload,
+                    station_id=station.id,
+                    model=model,
+                    run_time=run_time,
+                    fetched_at=fetched_at,
+                )
+            ),
+            trajectories=(),
+            evidence=(evidence,),
         )
 
-    async def _get_json(self, params: dict[str, str | int | float]) -> dict[str, Any]:
+    async def _get_json(
+        self, params: dict[str, str | int | float]
+    ) -> tuple[dict[str, Any], SourceResponseEvidence]:
         assert self._client is not None
         last_error: Exception | None = None
         for attempt in range(3):
             try:
+                request_started_at = datetime.now(UTC)
                 response = await self._client.get(self.base_url, params=params)
+                response_received_at = datetime.now(UTC)
                 response.raise_for_status()
                 payload = response.json()
                 if not isinstance(payload, dict):
                     raise OpenMeteoError("ensemble API returned a non-object JSON response")
-                return payload
+                return payload, _response_evidence(
+                    response,
+                    request_started_at=request_started_at,
+                    response_received_at=response_received_at,
+                )
             except (httpx.HTTPError, ValueError, OpenMeteoError) as exc:
                 last_error = exc
                 if attempt < 2:

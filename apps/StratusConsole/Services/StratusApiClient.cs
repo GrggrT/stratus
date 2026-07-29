@@ -50,7 +50,11 @@ public sealed class StratusApiClient : IDisposable
 
     public Task<CollectionResponse<CalibrationDto>> GetCalibrationsAsync(
         CancellationToken cancellationToken = default) =>
-        GetRequiredAsync<CollectionResponse<CalibrationDto>>("api/v1/calibration?limit=200", cancellationToken);
+        GetRequiredAsync<CollectionResponse<CalibrationDto>>("api/v1/calibration?limit=500", cancellationToken);
+
+    public Task<StationLifecycleResponse> GetStationsAsync(
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<StationLifecycleResponse>("api/v1/stations", cancellationToken);
 
     public Task<CollectionResponse<JobDto>> GetJobsAsync(
         CancellationToken cancellationToken = default) =>
@@ -75,6 +79,189 @@ public sealed class StratusApiClient : IDisposable
         CancellationToken cancellationToken = default) =>
         GetRequiredAsync<EdgeReportDto>(
             $"api/v1/edge-report?mode={mode}", cancellationToken);
+
+    public Task<ProspectiveValidationLedgerDto> GetProspectiveValidationLedgerAsync(
+        string mode,
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<ProspectiveValidationLedgerDto>(
+            $"api/v1/validation-ledger?mode={mode}", cancellationToken);
+
+    public async Task<AlertsResponseDto> GetAlertsAsync(
+        string state,
+        int limit = 100,
+        CancellationToken cancellationToken = default)
+    {
+        string queryState = state.Equals("all", StringComparison.OrdinalIgnoreCase)
+            ? "all"
+            : "unacknowledged";
+        int boundedLimit = Math.Clamp(limit, 1, 500);
+        AlertsResponseDto response = await GetRequiredAsync<AlertsResponseDto>(
+            $"api/v1/alerts?state={queryState}&limit={boundedLimit}",
+            cancellationToken);
+        string[] channelStates = ["not_activated", "healthy", "stale", "degraded"];
+        string[] externalStates =
+            ["dead_letter", "sent", "local_only", "in_flight", "retry_scheduled", "pending"];
+        if (response.Items is null
+            || string.IsNullOrWhiteSpace(response.Channel)
+            || !response.QueryState.Equals(queryState, StringComparison.OrdinalIgnoreCase)
+            || !channelStates.Contains(response.ChannelState, StringComparer.OrdinalIgnoreCase)
+            || response.TotalCount < 0
+            || response.UnacknowledgedCount < 0
+            || response.UnacknowledgedCount > response.TotalCount
+            || response.PendingAfterActivation < 0
+            || response.DeadLetterCount < 0
+            || response.OldestUnacknowledgedAgeSeconds is < 0
+            || response.Items.Count > response.TotalCount
+            || response.Items.Select(item => item.Id).Distinct().Count() != response.Items.Count
+            || response.Items.Any(item => item.Id < 1
+                || item.Attempts < 0
+                || string.IsNullOrWhiteSpace(item.EventKey)
+                || string.IsNullOrWhiteSpace(item.Category)
+                || item.Payload is null)
+            || (queryState == "unacknowledged"
+                && response.Items.Any(item => item.AcknowledgedAt is not null))
+            || response.Items.Any(item => !externalStates.Contains(
+                item.ExternalState,
+                StringComparer.OrdinalIgnoreCase)))
+        {
+            throw new InvalidDataException(
+                "/api/v1/alerts returned an incompatible response.");
+        }
+
+        return response;
+    }
+
+    public async Task<AlertAcknowledgementResponseDto> AcknowledgeAlertAsync(
+        long alertId,
+        CancellationToken cancellationToken = default)
+    {
+        using HttpResponseMessage response = await _httpClient.PostAsync(
+            $"api/v1/alerts/{alertId}/ack",
+            content: null,
+            cancellationToken);
+        response.EnsureSuccessStatusCode();
+        AlertAcknowledgementResponseDto? payload =
+            await response.Content.ReadFromJsonAsync<AlertAcknowledgementResponseDto>(
+                cancellationToken);
+        if (payload is null || payload.Acknowledged != 1)
+        {
+            throw new InvalidDataException(
+                $"/api/v1/alerts/{alertId}/ack returned an invalid response.");
+        }
+
+        return payload;
+    }
+
+    public async Task<AlertAcknowledgementResponseDto> AcknowledgeAlertsThroughAsync(
+        long throughId,
+        CancellationToken cancellationToken = default)
+    {
+        using HttpResponseMessage response = await _httpClient.PostAsJsonAsync(
+            "api/v1/alerts/ack-through",
+            new AlertAckThroughRequestDto(throughId),
+            cancellationToken);
+        response.EnsureSuccessStatusCode();
+        AlertAcknowledgementResponseDto? payload =
+            await response.Content.ReadFromJsonAsync<AlertAcknowledgementResponseDto>(
+                cancellationToken);
+        if (payload is null
+            || payload.Acknowledged < 0
+            || payload.ThroughId != throughId)
+        {
+            throw new InvalidDataException(
+                "/api/v1/alerts/ack-through returned an invalid response.");
+        }
+
+        return payload;
+    }
+
+    public Task<AccuracyOverviewDto> GetAccuracyOverviewAsync(
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<AccuracyOverviewDto>("api/v1/accuracy-overview", cancellationToken);
+
+    public Task<ResolutionReconciliationResponseDto> GetResolutionReconciliationAsync(
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<ResolutionReconciliationResponseDto>(
+            "api/v1/resolution-reconciliation?limit=40", cancellationToken);
+
+    public Task<SettlementCasesResponseDto> GetSettlementCasesAsync(
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<SettlementCasesResponseDto>(
+            "api/v1/settlement-cases?limit=40", cancellationToken);
+
+    public Task<StorageCapacityDto> GetStorageCapacityAsync(
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<StorageCapacityDto>("api/v1/storage-capacity", cancellationToken);
+
+    public Task<ForecastProvenanceDto> GetForecastProvenanceAsync(
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<ForecastProvenanceDto>(
+            "api/v1/forecast-provenance", cancellationToken);
+
+    public Task<OfficialResolutionSourcesDto> GetOfficialResolutionSourcesAsync(
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<OfficialResolutionSourcesDto>(
+            "api/v1/official-resolution-sources", cancellationToken);
+
+    public async Task<EvidenceContinuityDto> GetEvidenceContinuityAsync(
+        CancellationToken cancellationToken = default)
+    {
+        EvidenceContinuityDto payload = await GetRequiredAsync<EvidenceContinuityDto>(
+            "api/v1/evidence-continuity",
+            cancellationToken);
+        bool knownState = payload.State is "activation_required"
+            or "collecting"
+            or "cohort_change_blocked";
+        bool stateIsCoherent = payload.State switch
+        {
+            "activation_required" => payload.ActiveEpoch is null,
+            "collecting" => payload.ActiveEpoch is not null
+                && !string.IsNullOrWhiteSpace(payload.ActiveCohort)
+                && payload.CohortMatch,
+            "cohort_change_blocked" => payload.ActiveEpoch is not null
+                && !string.IsNullOrWhiteSpace(payload.ActiveCohort)
+                && !payload.CohortMatch,
+            _ => false,
+        };
+        if (!knownState
+            || !stateIsCoherent
+            || payload.GeneratedAt == default
+            || string.IsNullOrWhiteSpace(payload.CandidateCohort)
+            || string.IsNullOrWhiteSpace(payload.CurrentBottleneck)
+            || string.IsNullOrWhiteSpace(payload.CurrentBottleneckDetail)
+            || payload.TopSkipReasons is null
+            || payload.Lanes is null)
+        {
+            throw new InvalidDataException(
+                "/api/v1/evidence-continuity returned an invalid continuity contract.");
+        }
+
+        return payload;
+    }
+
+    public Task<ExecutionCostReportDto> GetExecutionCostReportAsync(
+        string mode,
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<ExecutionCostReportDto>(
+            $"api/v1/execution-cost-report?mode={Uri.EscapeDataString(mode)}",
+            cancellationToken);
+
+    public Task<ExecutionCostOrdersDto> GetExecutionCostOrdersAsync(
+        string mode,
+        int limit = 50,
+        int offset = 0,
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<ExecutionCostOrdersDto>(
+            "api/v1/execution-cost-report/orders"
+            + $"?mode={Uri.EscapeDataString(mode)}"
+            + $"&limit={limit}&offset={offset}",
+            cancellationToken);
+
+    public Task<SelectionPolicyReportDto> GetSelectionPolicyReportAsync(
+        string mode,
+        CancellationToken cancellationToken = default) =>
+        GetRequiredAsync<SelectionPolicyReportDto>(
+            $"api/v1/selection-policy-report?mode={mode}", cancellationToken);
 
     public Task<BrierReportDto> GetBrierReportAsync(
         string mode,
@@ -129,7 +316,7 @@ public sealed class StratusApiClient : IDisposable
         long marketId,
         CancellationToken cancellationToken = default) =>
         GetRequiredAsync<ProbabilitySeriesResponse>(
-            $"api/v1/probability-timeseries?market_id={marketId}&limit=240",
+            $"api/v1/probability-timeseries?market_id={marketId}&benchmark_protocol=clob-dual-v1&limit=240",
             cancellationToken);
 
     public Task<OrderBookResponse> GetOrderBookAsync(

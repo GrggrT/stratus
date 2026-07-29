@@ -18,15 +18,11 @@ _CITY_ALIASES = {
 }
 # ICAO codes are uppercase; matching case-sensitively keeps ordinary lowercase
 # path segments ("/data", "/wrh1") from becoming false station candidates.
-_STATION_URL_PATTERN = re.compile(
-    r"(?i:https?)://[^\s)]+?/([A-Z][A-Z0-9]{3})(?:[/?#.)]|$)"
-)
+_STATION_URL_PATTERN = re.compile(r"(?i:https?)://[^\s)]+?/([A-Z][A-Z0-9]{3})(?:[/?#.)]|$)")
 _EXPLICIT_STATION_PATTERN = re.compile(
     r"\b(?i:station|airport)\s+(?i:id|code)\s*[:#-]?\s*([A-Z][A-Z0-9]{3})\b"
 )
-_EVENT_PATTERN = re.compile(
-    r"^(highest|lowest)\s+temperature\s+in\s+(.+?)\s+on\s+", re.IGNORECASE
-)
+_EVENT_PATTERN = re.compile(r"^(highest|lowest)\s+temperature\s+in\s+(.+?)\s+on\s+", re.IGNORECASE)
 
 
 class MarketRulesError(ValueError):
@@ -164,20 +160,21 @@ def parse_event_identity(event: dict[str, Any]) -> EventIdentity:
             market_date = date.fromisoformat(raw_date[:10])
         else:
             slug = str(event.get("slug", ""))
-            date_match = re.search(
-                r"-on-([a-z]+)-(\d{1,2})-(\d{4})$", slug, re.IGNORECASE
-            )
+            date_match = re.search(r"-on-([a-z]+)-(\d{1,2})-(\d{4})$", slug, re.IGNORECASE)
             if date_match is None:
                 raise ValueError
-            market_date = datetime.strptime(
-                " ".join(date_match.groups()), "%B %d %Y"
-            ).date()
+            market_date = datetime.strptime(" ".join(date_match.groups()), "%B %d %Y").date()
     except ValueError as exc:
         raise MarketRulesError(f"cannot parse market date for event: {title}") from exc
     return EventIdentity(city=city, kind=kind, market_date=market_date)
 
 
-def parse_bucket_boundaries(title: str) -> BucketBoundaries:
+def parse_bucket_boundaries(
+    title: str, *, source_increment: Decimal = Decimal("1")
+) -> BucketBoundaries:
+    if source_increment <= 0:
+        raise MarketRulesError("source increment must be positive")
+    half_increment = source_increment / Decimal(2)
     normalized = title.replace("Â°", "°").strip()
 
     below = re.fullmatch(
@@ -187,7 +184,7 @@ def parse_bucket_boundaries(title: str) -> BucketBoundaries:
     )
     if below:
         value, unit = below.groups()
-        return BucketBoundaries(None, _to_celsius_boundary(Decimal(value) + Decimal("0.5"), unit))
+        return BucketBoundaries(None, _to_celsius_boundary(Decimal(value) + half_increment, unit))
 
     above = re.fullmatch(
         rf"\s*({_NUMBER})\s*°?\s*([FC])\s+or\s+(?:higher|above|more)\s*",
@@ -196,7 +193,7 @@ def parse_bucket_boundaries(title: str) -> BucketBoundaries:
     )
     if above:
         value, unit = above.groups()
-        return BucketBoundaries(_to_celsius_boundary(Decimal(value) - Decimal("0.5"), unit), None)
+        return BucketBoundaries(_to_celsius_boundary(Decimal(value) - half_increment, unit), None)
 
     interval = re.fullmatch(
         rf"\s*({_NUMBER})\s*(?:-|–|to)\s*({_NUMBER})\s*°?\s*([FC])\s*",
@@ -209,19 +206,17 @@ def parse_bucket_boundaries(title: str) -> BucketBoundaries:
         if low_value > high_value:
             raise MarketRulesError(f"bucket lower bound exceeds upper bound: {title}")
         return BucketBoundaries(
-            _to_celsius_boundary(low_value - Decimal("0.5"), unit),
-            _to_celsius_boundary(high_value + Decimal("0.5"), unit),
+            _to_celsius_boundary(low_value - half_increment, unit),
+            _to_celsius_boundary(high_value + half_increment, unit),
         )
 
-    exact = re.fullmatch(
-        rf"\s*({_NUMBER})\s*°?\s*([FC])\s*", normalized, re.IGNORECASE
-    )
+    exact = re.fullmatch(rf"\s*({_NUMBER})\s*°?\s*([FC])\s*", normalized, re.IGNORECASE)
     if exact:
         value, unit = exact.groups()
         numeric_value = Decimal(value)
         return BucketBoundaries(
-            _to_celsius_boundary(numeric_value - Decimal("0.5"), unit),
-            _to_celsius_boundary(numeric_value + Decimal("0.5"), unit),
+            _to_celsius_boundary(numeric_value - half_increment, unit),
+            _to_celsius_boundary(numeric_value + half_increment, unit),
         )
     raise MarketRulesError(f"unsupported temperature bucket: {title}")
 

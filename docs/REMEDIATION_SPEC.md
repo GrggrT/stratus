@@ -1,11 +1,12 @@
 # STRATUS remediation and modernization spec
 
-Status: items in "Implemented" landed together with this document; items in
-"Roadmap" are recommended follow-ups that need an owner decision or a
-migration and are intentionally not bundled here.
+Status: the original remediation items and the eight roadmap follow-ups are
+implemented. Later least-privilege and evidence-continuity hardening through
+revision 0044 is recorded in the acceptance addendum below.
 
 Source: full-codebase review of 2026-07-06 (all money paths read in full;
-88 tests green, ruff clean at the time of writing).
+88 tests green and ruff clean at the time of writing). This is a historical
+baseline, not the current release-acceptance total.
 
 Related follow-up: `docs/QUALITY_ROADMAP.md` defines the post-remediation
 quality plan: data reconciliation, model validation, signal hardening,
@@ -20,9 +21,11 @@ operator console, and live-readiness gates.
    rules text it was granted for.
 4. Make builds and CI reproducible and boring.
 
-Non-goals: any change to trading semantics (sizing, edge thresholds,
-gate criteria), and anything that only matters for the live executor,
-which remains intentionally undeployed.
+Non-goals of the original remediation: changes to trading semantics (sizing,
+edge thresholds, gate criteria) and LIVE execution semantics. A live executor
+now exists, but it remains fail-closed behind continuity, quantitative, legal,
+credential, risk, and explicit operator gates; this document grants no LIVE
+authority.
 
 ## Implemented
 
@@ -33,12 +36,20 @@ static password `stratus`. The database stores the kill switch, execution
 mode, and calibrations — DB access equals trade control.
 
 - Postgres is now bound to `127.0.0.1` only.
-- `POSTGRES_PASSWORD` is parameterized via the compose `.env`
-  (default remains `stratus` for local dev; set a real value on any
-  shared host). `DATABASE_URL` for app containers and `PGPASSWORD` for the
-  backup sidecar derive from the same variable.
+- `POSTGRES_PASSWORD` has no default. Compose refuses an absent, short,
+  non-URL-safe, or known-default owner credential. The owner secret is exposed
+  only to PostgreSQL, one-shot migration/provisioning, and the backup service;
+  application runtimes receive a separate file-mounted database-qualified
+  credential.
+- Runtime services use deterministic database-qualified roles and an ignored
+  password file. Generic `DATABASE_URL` is not a settings source, preventing a
+  legacy owner DSN from reaching API, worker, Telegram, or job entrypoints.
+  Every physical runtime connection rechecks the database ACL assertion.
+- Production HBA admits the exact database-qualified runtime login only to
+  `stratus` and rejects the complete runtime-role family for every other
+  database over local sockets, IPv4, and IPv6.
 - `alembic.ini` no longer carries a hardcoded DSN; `migrations/env.py`
-  always injects the URL from application settings.
+  accepts only `MIGRATION_DATABASE_URL`.
 
 ### 2. Unbounded latest-row scans (performance, high)
 
@@ -118,18 +129,18 @@ image contains exactly the locked versions that were reviewed and tested.
 
 ### 8. CI (process)
 
-`.github/workflows/ci.yml` runs `ruff check` and `pytest` with uv on every
-push and pull request.
+`.github/workflows/ci.yml` runs Ruff, strict mypy, pytest, Compose validation,
+and a reproducible Docker build with uv on every push and pull request. A
+separate workflow compiles the WinUI operator console.
 
 ## Roadmap follow-up (implemented 2026-07-06)
 
 All eight roadmap items landed in the follow-up pass:
 
-1. **Shared engine in the scheduler process.** All 13 scheduled jobs accept
-   an optional `session_factory`; `runtime.py` creates one engine and hands
-   its factory to every job (and to the event listener). CLI entry points
-   keep the engine-per-invocation behaviour via
-   `db/session.py::session_factory_scope`.
+1. **Shared engine in the scheduler process.** All scheduled jobs use the
+   shared scheduler engine/session factory; composite parent/child ordering is
+   documented in the evidence-continuity protocol. CLI entry points keep the
+   engine-per-invocation behaviour via `db/session.py::session_factory_scope`.
 2. **Depth checks against the executed book.** `execute_signals` re-checks
    the 3x-depth rule against the book the order actually walks
    (`services/execution.py::usable_ask_depth_usd`); a thin executed book
@@ -171,11 +182,14 @@ All eight roadmap items landed in the follow-up pass:
    risk: calibrating on METAR while Polymarket resolves on official
    climate reports.
 3. **Off-site backups.** Opt-in `backup-offsite` compose service
-   (`--profile offsite`) copies verified dumps to any rclone remote
-   (`OFFSITE_REMOTE`, config in gitignored `rclone.conf`), so a dead host
-   disk no longer takes the backups with it.
+   (`--profile offsite`) accepts only the rclone remote named `crypt`
+   (`OFFSITE_REMOTE=crypt:<path>`, config in gitignored `rclone.conf`). It
+   validates the local manifest hashes, download-verifies the encrypted remote
+   copy, and publishes `COMPLETE` last. A partial remote prefix is never an
+   accepted restore point, so a dead host disk does not silently turn an
+   interrupted plaintext upload into the only backup.
 
-## Remaining recommendations
+## Remaining recommendation in this original remediation scope
 
 - Before live trading: re-read the live-readiness checklist in
   `AUSTRIA_LIVE_READINESS.md`.
@@ -183,8 +197,11 @@ All eight roadmap items landed in the follow-up pass:
 ## Acceptance criteria
 
 - `docker compose up` on a fresh host exposes no database port beyond
-  loopback; changing `POSTGRES_PASSWORD` in `.env` propagates to app,
-  migrate, and backup containers.
+  loopback. Rotating `POSTGRES_PASSWORD` affects PostgreSQL,
+  migration/provisioning, and backup only; application services continue to
+  use the separately rotated runtime-password file.
+- API, worker, Telegram, and Binance containers run non-root and expose no
+  owner DSN/password, generic `DATABASE_URL`, migration DSN, or Docker socket.
 - Signal generation latency does not grow with `market_prices` table size
   (verify with `EXPLAIN`: index scan behind `DISTINCT ON`).
 - Discovery run with one poisoned market fixture still upserts all other
@@ -194,3 +211,109 @@ All eight roadmap items landed in the follow-up pass:
   re-approval then survives subsequent unchanged re-discoveries.
 - `pytest` and `ruff check` pass locally and in CI; the Docker image builds
   from `uv.lock` only.
+
+## Revision 0044 acceptance addendum — 2026-07-20
+
+Revision 0044 was migrated only after a 1,572,434,322-byte pre-migration custom-format backup had
+passed catalog inspection and full isolated restore. The database retained 263/263 contracts, 144
+positions, and the same canonical contract hash across migration. Production HBA contains nine
+valid rules and limits every `stratus_app_[0-9a-f]{32}` runtime role to database `stratus`; app containers run as
+uid/gid 10001 with no owner secret or generic DSN. Safe catalog/authentication checks and isolated
+PostgreSQL tests prove the boundary without destructive probes against production data.
+
+The first restricted worker exposed an operational defect: the capacity query evaluated privileged
+`current_setting('data_directory')` despite an explicit path override. It failed closed under the
+kill switch and was stopped before execution resumed. The fix binds the explicit path without
+granting `pg_read_all_settings`; capacity enforcement and its callers are now hashed into the
+`operational_legacy` continuity lane. A six-continue preview that revealed the missing source
+closure was never activated.
+
+The capacity-corrected image first passed reviewed plan 18 and epoch 11. Subsequent backup review
+found that the owner-only sidecar still lacked cross-process serialization, bounded retry,
+retention-floor, and atomic verified off-site semantics. No backup was started from that candidate.
+The epoch-13 accepted image is
+`sha256:c5076ba953fe44dca9b885c1c9823e2bca82f84f5ecc90fe70ddc89c17bcf2f5`,
+accepted through reviewed plan 20 and epoch 13. Only `operational_legacy` forked; all five evidence
+lanes continued exact parent identities. Capacity is fresh and within budget, continuity exactly
+matches, and the bounded accuracy audit completed with 33,392 reports and 118 drift events.
+
+Final verification is 843 unit/static tests, Ruff, strict mypy over 170 source files, the complete
+275-case PostgreSQL matrix across its production-HBA and isolated-login contours, 23 focused
+post-closure continuity/capacity PostgreSQL tests, rendered shell syntax in the pinned tool images,
+Compose validation, Docker build, and a zero-error WinUI Release x64 build. After the weekly reset,
+fresh pre- and post-cycle audits had zero critical/blocking/loss findings. Audited command 12
+resumed only Polymarket PAPER; Binance stayed `backtest + kill`, both readiness probes return 200,
+and the first natural price/execution cycle succeeded without creating any LIVE state. This
+addendum grants no LIVE authority.
+
+The first hardened daily backup was then atomically published as
+`backups/stratus_20260720T041256Z_9379ef5bda23_1.backup` (1,265,297,862 bytes; SHA-256
+`f422dd32866a697f12d2d3077901512fadec929b21c9d05ffb0c87c538e9b7b2`; 1,074 TOC entries) and
+fully restored into an isolated PostgreSQL 16 instance. Schema head, all 79 public tables,
+index/constraint/trigger validity, epoch 13/78 lanes, and zero LIVE state were verified before the
+temporary restore volume was removed. The recurring sidecar is healthy and no owner client session
+remains connected while it sleeps.
+
+### Post-acceptance backup incident and epoch 14 corrective release — 2026-07-20
+
+The epoch-13 record above is a valid historical acceptance snapshot, not the current release. A
+later Docker restart exposed a backup publication defect: a zero-byte archive directory and a
+health marker had been published even though the dump had failed. Both artifacts were retained for
+forensics and quarantined as
+`backups/.rejected-zero-byte-stratus_20260720T071344Z_9379ef5bda23_1.backup` and
+`backups/.stratus-backup-health.rejected-20260720T071344Z`; neither is an accepted restore point.
+The root cause was POSIX `errexit` suppression inside a function invoked as the condition of an
+`if` statement.
+
+The corrected backup contract gives every critical producer command an explicit failure exit,
+captures the function status outside conditional context, and revalidates the complete restore
+point before success is reported. Publication and its manifest-bound health marker are atomic;
+noncanonical names, symbolic links, empty archives, unreadable catalogs, mismatched hashes or
+schema heads, and abandoned partials are rejected. Retention counts accepted restore points only.
+Off-site copies remain unhealthy when the remote store is empty, receive a lightweight hourly
+size check when their `COMPLETE` marker still matches, and receive one rotating full download scrub
+per day from state retained in the `stratus-offsite-state` volume; every fresh upload still receives
+a full download verification.
+
+The PostgreSQL owner credential was treated as exposed during diagnostics and rotated without
+printing either the replacement or the retired value. The new credential was accepted, the old
+one was rejected, stopped containers carrying the retired secret were removed, and the separate
+least-privilege runtime role was reprovisioned. No owner client backend remained connected after
+the release work.
+
+The corrective application image is
+`sha256:cdcd9d48f6e2aa56c5f54519db88a228e0652f44dc53f4cf209ae5f6e3d1131a`, created at
+`2026-07-20T08:25:07.307215542Z` (191,513,285 bytes). Reviewed plan 21 has plan hash
+`b1102b7392e277a58ef6dec3e669bd79c54344ca5f70be84171217d0c4a780b0` and opened epoch 14
+(parent 13) at `2026-07-20T08:57:06.446500Z`. Only `operational_legacy` forked, to identity
+`1d6fc35e8464917f0fe83946ac356d56697c100ee94d779c7386f77b6d1f8884`; the
+`execution_evidence`, `official_resolution_truth`, `predictive_validation`, `selection_policy`,
+and `station_lifecycle` lanes continued their exact parent identities and boundaries. The lane set
+is complete, image/cohort match, no lane is mismatched or frozen, and the gate reason is
+`evidence_continuity_match`.
+
+The first post-fix accepted restore point is
+`backups/stratus_20260720T085827Z_0d352caf5b71_1.backup`. It completed at
+`2026-07-20T09:10:59Z`; its 1,276,357,110-byte archive has SHA-256
+`cb286806568a688870e20ece21d6711f5bfea740769cbbb87c1432cb9a5a432c`, and its 89,396-byte,
+1,074-entry catalog has SHA-256
+`bba08542e0c364e949b14d6aabc0a711a66b5aef7b4ef77efeed1b9c4dd03611`. The manifest has
+SHA-256 `9b8cf4f8dd4a3c2159b17c1fc37ba651239f0b1eb9e7ad11cafcf6648829ca62` and records schema
+head `20260719_0044` before and after the snapshot. The format-v1 health marker points to this exact
+directory and manifest.
+
+An independent full restore into an isolated PostgreSQL 16.13 container with no network and no
+host port verified head `20260719_0044`, all 79 public tables, 14 epochs, 17 plans, 84 lanes, 290
+resolution contracts, 147 positions, 1,336 orders, 132,048 signals, zero invalid indexes, zero
+unvalidated constraints, zero disabled user triggers, and zero LIVE positions, orders, or intents.
+The temporary restore container and volume were removed after verification.
+
+After bounded capacity and overdue-execution-evidence remediation under the kill switch, audit 711
+had zero critical or blocking findings. Audited command 14
+(`paper-resume-epoch14-20260720t1006z`) resumed only eligible Polymarket PAPER at
+`2026-07-20T10:10:07.974026Z`; Binance remained `backtest + kill`. At the final observed runtime,
+API, PostgreSQL, backup, and worker services were healthy, `/healthz` and `/readyz` returned 200,
+audit 712 had zero critical/blocking/loss findings, and all 21 post-resume orders were PAPER. LIVE
+positions and nonterminal LIVE orders remained zero. The one post-resume job error was a
+fail-closed `daily-actuals` rejection for 14 station-days with fewer than 20 observations, not an
+execution or integrity failure. This corrective release still grants no LIVE authority.

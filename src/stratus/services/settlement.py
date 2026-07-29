@@ -18,9 +18,6 @@ def position_pnl(
 
 
 def closing_line_value(
-    *, side: TradeSide, yes_midpoint: Decimal, entry_price: Decimal
+    *, traded_side_midpoint: Decimal, entry_price: Decimal
 ) -> Decimal:
-    side_midpoint = (
-        yes_midpoint if side is TradeSide.BUY_YES else Decimal(1) - yes_midpoint
-    )
-    return (side_midpoint - entry_price).quantize(Decimal("0.000001"))
+    return (traded_side_midpoint - entry_price).quantize(Decimal("0.000001"))

@@ -19,17 +19,17 @@ async def test_healthz_is_process_liveness_only() -> None:
 
 def test_readiness_accepts_fresh_noncritical_audit() -> None:
     now = datetime(2026, 7, 6, 20, tzinfo=UTC)
+    for status in ("healthy", "info", "warning"):
+        state = evaluate_readiness(
+            audit_status=status,
+            audit_time=now - timedelta(minutes=5),
+            kill_switch=False,
+            halted_reason=None,
+            now=now,
+        )
 
-    state = evaluate_readiness(
-        audit_status="healthy",
-        audit_time=now - timedelta(minutes=5),
-        kill_switch=False,
-        halted_reason=None,
-        now=now,
-    )
-
-    assert state.ready is True
-    assert state.reasons == ()
+        assert state.ready is True
+        assert state.reasons == ()
 
 
 def test_readiness_rejects_stale_audit_and_runtime_blocks() -> None:
@@ -50,3 +50,18 @@ def test_readiness_rejects_stale_audit_and_runtime_blocks() -> None:
         "kill_switch",
         "project_halted",
     )
+
+
+def test_readiness_rejects_new_blocking_audit() -> None:
+    now = datetime(2026, 7, 6, 20, tzinfo=UTC)
+
+    state = evaluate_readiness(
+        audit_status="blocking",
+        audit_time=now - timedelta(minutes=5),
+        kill_switch=False,
+        halted_reason=None,
+        now=now,
+    )
+
+    assert state.ready is False
+    assert state.reasons == ("health_audit_blocking",)

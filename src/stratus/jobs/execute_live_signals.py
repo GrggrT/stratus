@@ -8,20 +8,34 @@ from decimal import Decimal
 from typing import Protocol
 
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from stratus.collectors.clob_trader import ClobTradeError, ClobTrader, PlacedOrder
+from stratus.collectors.clob_trader import (
+    ClobTradeError,
+    ClobTrader,
+    ClobVenueRejected,
+    PlacedOrder,
+)
 from stratus.collectors.geoblock import GeoblockStatus, fetch_geoblock
 from stratus.config import Settings, get_settings
 from stratus.db.models import (
     ExecutionMode,
+    ExecutionOrderIntent,
     Market,
     MarketStatus,
     Signal,
     SignalStatus,
-    TradeSide,
+    Station,
+    StationReliabilitySnapshot,
+    StationStage,
 )
 from stratus.db.session import session_factory_scope
+from stratus.jobs.execution_capacity import (
+    acquire_execution_capacity_gate,
+    engage_capacity_failure,
+)
+from stratus.repositories.evidence_continuity_gate import probability_release_gate
 from stratus.repositories.execution import (
     LIVE_STATUS_CANCEL_REQUESTED,
     LIVE_STATUS_CANCELED,
@@ -41,9 +55,23 @@ from stratus.repositories.execution import (
     stale_submitting_orders,
     upsert_live_position,
 )
+from stratus.repositories.execution_cost_ledger import (
+    append_live_reconciliation_observation,
+    create_intent_for_order,
+    record_terminal_no_fill,
+    record_terminal_unverified_live_execution,
+)
 from stratus.repositories.risk import enforce_loss_limits
 from stratus.repositories.runtime_control import get_runtime_control, set_kill_switch
+from stratus.repositories.selection_policy import capture_selection_policy_decisions
+from stratus.repositories.station_reliability import (
+    acquire_station_reliability_gate_lock,
+    latest_station_reliability_by_station,
+    signal_station_reliability_gate_reasons,
+)
 from stratus.repositories.telegram import enqueue_notification
+from stratus.services.clob_evidence import CLOB_DUAL_PROTOCOL
+from stratus.services.execution_cost import ExecutionCostIntegrityError
 from stratus.services.live_execution import (
     LiveOrderRejected,
     OrderFill,
@@ -97,6 +125,27 @@ async def _halt(session: AsyncSession, key: str, message: str) -> None:
     logger.error("live execution halted: %s", message)
 
 
+async def _seal_live_no_fill(
+    session: AsyncSession,
+    *,
+    order_id: int,
+    terminal_status: str,
+    failure_reason: str,
+) -> None:
+    intent = await session.scalar(
+        select(ExecutionOrderIntent).where(
+            ExecutionOrderIntent.order_id == order_id
+        )
+    )
+    if intent is not None:
+        await record_terminal_no_fill(
+            session,
+            intent.id,
+            terminal_status=terminal_status,
+            failure_reason=failure_reason,
+        )
+
+
 async def execute_live_signals(
     settings: Settings | None = None,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
@@ -119,6 +168,7 @@ async def execute_live_signals(
     failed = 0
     async with session_factory_scope(settings, session_factory) as sessions:
         async with sessions.begin() as session:
+            await acquire_station_reliability_gate_lock(session)
             control = await get_runtime_control(session)
             geo = geoblock or await fetch_geoblock(settings.geoblock_url)
             readiness = evaluate_live_readiness(
@@ -159,36 +209,110 @@ async def execute_live_signals(
                 logger.warning("live execution blocked by loss limit")
                 return 0, 0, 0
 
+            legacy_pending_ids = list(
+                (
+                    await session.execute(
+                        select(Signal.id).where(
+                            Signal.status == SignalStatus.PENDING,
+                            (
+                                (Signal.benchmark_protocol != CLOB_DUAL_PROTOCOL)
+                                | Signal.token_id.is_(None)
+                                | Signal.clob_snapshot_id.is_(None)
+                            ),
+                        )
+                    )
+                ).scalars()
+            )
+            if legacy_pending_ids:
+                await expire_pending_signals(
+                    session,
+                    legacy_pending_ids,
+                    reason="legacy_price_protocol",
+                )
+
+            unproven_pending_ids = list(
+                (
+                    await session.scalars(
+                        select(Signal.id).where(
+                            Signal.status == SignalStatus.PENDING,
+                            Signal.station_reliability_snapshot_id.is_(None),
+                        )
+                    )
+                ).all()
+            )
+            if unproven_pending_ids:
+                await expire_pending_signals(
+                    session,
+                    unproven_pending_ids,
+                    reason="station_reliability_provenance_missing",
+                )
+
             rows = (
                 await session.execute(
-                    select(Signal, Market)
+                    select(Signal, Market, Station)
                     .join(Market, Signal.market_id == Market.id)
-                    .where(Signal.status == SignalStatus.PENDING)
+                    .join(Station, Market.station_id == Station.id)
+                    .where(
+                        Signal.status == SignalStatus.PENDING,
+                        Signal.benchmark_protocol == CLOB_DUAL_PROTOCOL,
+                        Signal.token_id.is_not(None),
+                        Signal.clob_snapshot_id.is_not(None),
+                        Station.active.is_(True),
+                        Station.stage == StationStage.APPROVED,
+                    )
                     .order_by(Signal.ts)
                 )
             ).all()
+            current_reliability = await latest_station_reliability_by_station(
+                session,
+                sorted({station.id for _signal, _market, station in rows}),
+            )
+            reliability_valid_rows: list[tuple[Signal, Market, Station]] = []
+            for signal, market, station in rows:
+                attested_snapshot = await session.get(
+                    StationReliabilitySnapshot,
+                    signal.station_reliability_snapshot_id,
+                )
+                reliability_reasons = signal_station_reliability_gate_reasons(
+                    signal=signal,
+                    market=market,
+                    station=station,
+                    attested_snapshot=attested_snapshot,
+                    current_snapshot=current_reliability.get(station.id),
+                    settings=settings,
+                    now=now,
+                    require_reliable=True,
+                )
+                if reliability_reasons:
+                    signal.status = SignalStatus.EXPIRED
+                    signal.skip_reason = reliability_reasons[0]
+                    logger.warning(
+                        "live signal %d revoked by station reliability: %s",
+                        signal.id,
+                        reliability_reasons[0],
+                    )
+                    continue
+                reliability_valid_rows.append((signal, market, station))
             # Expire signals too old to place, so they stop counting toward
             # exposure. Paper does this; live must too or they linger forever.
             stale_ids = [
-                signal.id for signal, _ in rows if now - signal.ts > LIVE_ORDER_TTL
+                signal.id
+                for signal, _market, _station in reliability_valid_rows
+                if now - signal.ts > LIVE_ORDER_TTL
             ]
-            await expire_pending_signals(
-                session, stale_ids, reason="live_execution_timeout"
-            )
+            await expire_pending_signals(session, stale_ids, reason="live_execution_timeout")
 
         active = [
-            (signal, market) for signal, market in rows if now - signal.ts <= LIVE_ORDER_TTL
+            (signal, market, station)
+            for signal, market, station in reliability_valid_rows
+            if now - signal.ts <= LIVE_ORDER_TTL
         ]
         if not active:
             return 0, 0, 0
 
         live_trader: Trader = trader or await _connect_trader(settings)
-        for signal, market in active:
-            token_id = (
-                market.yes_token_id
-                if signal.side is TradeSide.BUY_YES
-                else market.no_token_id
-            )
+        for signal, market, station in active:
+            token_id = signal.token_id
             if not token_id:
                 failed += 1
                 continue
@@ -210,20 +334,133 @@ async def execute_live_signals(
                 continue
 
             # Durable marker, committed before the network call.
-            async with sessions.begin() as session:
-                order_id = await claim_live_order(
-                    session,
-                    LiveOrderClaim(
-                        signal_id=signal.id,
-                        market_id=market.id,
-                        side=signal.side,
-                        price=plan.price,
-                        size_usd=signal.size_usd,
-                    ),
+            try:
+                async with sessions.begin() as session:
+                    await acquire_station_reliability_gate_lock(session)
+                    capacity_gate = await acquire_execution_capacity_gate(
+                        session,
+                        settings,
+                        now=datetime.now(UTC),
+                    )
+                    if not capacity_gate.allowed:
+                        return placed, failed, 0
+                    release_gate = await probability_release_gate(session, settings)
+                    if not release_gate.allowed:
+                        logger.error(
+                            "live order intent blocked by probability release epoch: "
+                            "reason=%s active=%s candidate=%s",
+                            release_gate.reason,
+                            release_gate.active_cohort,
+                            release_gate.candidate_cohort,
+                        )
+                        return placed, failed, 0
+                    fresh_signal = await session.get(
+                        Signal,
+                        signal.id,
+                        with_for_update=True,
+                    )
+                    fresh_market = await session.get(Market, market.id)
+                    fresh_station = await session.get(Station, station.id)
+                    if (
+                        fresh_signal is None
+                        or fresh_market is None
+                        or fresh_station is None
+                        or fresh_signal.status is not SignalStatus.PENDING
+                    ):
+                        continue
+                    attested_snapshot = await session.get(
+                        StationReliabilitySnapshot,
+                        fresh_signal.station_reliability_snapshot_id,
+                    )
+                    latest_reliability = await latest_station_reliability_by_station(
+                        session,
+                        [fresh_station.id],
+                    )
+                    reliability_reasons = signal_station_reliability_gate_reasons(
+                        signal=fresh_signal,
+                        market=fresh_market,
+                        station=fresh_station,
+                        attested_snapshot=attested_snapshot,
+                        current_snapshot=latest_reliability.get(fresh_station.id),
+                        settings=settings,
+                        now=datetime.now(UTC),
+                        require_reliable=True,
+                    )
+                    if reliability_reasons:
+                        fresh_signal.status = SignalStatus.EXPIRED
+                        fresh_signal.skip_reason = reliability_reasons[0]
+                        logger.warning(
+                            "live signal %d revoked immediately before order intent: %s",
+                            fresh_signal.id,
+                            reliability_reasons[0],
+                        )
+                        continue
+                    # Re-evaluate readiness from the authoritative control row
+                    # while the capacity lock remains held through order intent.
+                    latest_control = await get_runtime_control(session)
+                    latest_readiness = evaluate_live_readiness(
+                        legal_approved=settings.live_legal_approved,
+                        tax_approved=settings.live_tax_approved,
+                        private_key_present=live_executor_configured(settings.polygon_private_key),
+                        mode_is_live=latest_control.mode is ExecutionMode.LIVE,
+                        kill_switch=latest_control.kill_switch,
+                        halted_reason=latest_control.halted_reason,
+                        geoblock_blocked=geo.blocked,
+                    )
+                    if not latest_readiness.ready:
+                        logger.info(
+                            "live order intent blocked by authoritative controls: %s",
+                            ",".join(latest_readiness.reasons),
+                        )
+                        return placed, failed, 0
+                    order_id = await claim_live_order(
+                        session,
+                        LiveOrderClaim(
+                            signal_id=signal.id,
+                            market_id=market.id,
+                            side=signal.side,
+                            price=plan.price,
+                            size_usd=signal.size_usd,
+                            token_id=token_id,
+                        ),
+                    )
+                    if order_id is not None:
+                        # The immutable intent is committed in the same
+                        # transaction as the durable pre-submit marker and
+                        # therefore always precedes signing/network I/O.
+                        await create_intent_for_order(
+                            session,
+                            order_id,
+                            release_image_digest=settings.release_image_digest,
+                            order_style="taker",
+                            expected_fee_usd=None,
+                            expected_fee_unavailable_reason=(
+                                "live_fee_quote_not_modeled"
+                            ),
+                        )
+            except ExecutionCostIntegrityError as exc:
+                logger.error(
+                    "live execution intent rejected for signal %d: %s",
+                    signal.id,
+                    exc,
                 )
+                failed += 1
+                continue
+            except DBAPIError:
+                logger.exception("live order capacity measurement failed")
+                try:
+                    async with sessions.begin() as session:
+                        await engage_capacity_failure(
+                            session,
+                            reason="capacity_measurement_unavailable",
+                        )
+                except DBAPIError:
+                    logger.exception("live execution could not persist capacity kill switch")
+                return placed, failed, 0
             if order_id is None:
                 continue  # already attempted; reconciliation owns it
 
+            placement_request_started_at = datetime.now(UTC)
             try:
                 result = await live_trader.place_gtc_buy(
                     token_id=plan.token_id,
@@ -232,10 +469,16 @@ async def execute_live_signals(
                     tick_size=tick,
                     neg_risk=neg_risk,
                 )
-            except ClobTradeError as exc:
+            except ClobVenueRejected as exc:
                 # The exchange explicitly rejected it: no order on the book.
                 async with sessions.begin() as session:
                     await mark_live_order(session, order_id, status=LIVE_STATUS_SUBMIT_FAILED)
+                    await _seal_live_no_fill(
+                        session,
+                        order_id=order_id,
+                        terminal_status=LIVE_STATUS_SUBMIT_FAILED,
+                        failure_reason="venue_rejected",
+                    )
                 logger.warning("live placement failed for signal %d: %s", signal.id, exc)
                 failed += 1
                 continue
@@ -253,7 +496,21 @@ async def execute_live_signals(
                 logger.exception("live placement unconfirmed for signal %d", signal.id)
                 return placed, failed, 1
 
+            placement_response_received_at = datetime.now(UTC)
             async with sessions.begin() as session:
+                await append_live_reconciliation_observation(
+                    session,
+                    order_id,
+                    observation_kind="placement",
+                    sdk_method="place_gtc_buy",
+                    parser_version="placed-order-v1",
+                    request_started_at=placement_request_started_at,
+                    response_received_at=placement_response_received_at,
+                    normalized_payload={
+                        "order_id": result.order_id,
+                        "status": result.status,
+                    },
+                )
                 await record_live_placement(
                     session,
                     order_id=order_id,
@@ -267,12 +524,9 @@ async def execute_live_signals(
                 # queue it for cancellation so it cannot rest unattended.
                 latest = await get_runtime_control(session)
                 if latest.kill_switch or latest.halted_reason:
-                    await mark_live_order(
-                        session, order_id, status=LIVE_STATUS_CANCEL_REQUESTED
-                    )
+                    await mark_live_order(session, order_id, status=LIVE_STATUS_CANCEL_REQUESTED)
                     logger.warning(
-                        "live order %s placed into an active kill switch; "
-                        "queued for cancellation",
+                        "live order %s placed into an active kill switch; queued for cancellation",
                         result.order_id,
                     )
             placed += 1
@@ -355,9 +609,7 @@ async def preflight_live(
         except Exception as exc:  # noqa: BLE001
             report.checks["tick_size"] = f"{type(exc).__name__}: {exc}"
 
-    logger.info(
-        "live preflight: ready=%s checks=%s", report.ready, report.checks
-    )
+    logger.info("live preflight: ready=%s checks=%s", report.ready, report.checks)
     return report
 
 
@@ -377,17 +629,39 @@ async def _sample_token(
             )
 
 
-async def _trade_fill(trader: Trader, target: OpenLiveOrder) -> TradeFill | None:
-    """Best-effort per-trade VWAP; None on any failure so the caller falls
-    back to the order's conservative limit price."""
+@dataclass(frozen=True, slots=True)
+class TradePollEvidence:
+    fill: TradeFill | None
+    normalized_payload: dict[str, object] | None
+    request_started_at: datetime | None
+    response_received_at: datetime | None
+
+
+async def _trade_fill(trader: Trader, target: OpenLiveOrder) -> TradePollEvidence:
+    """Best-effort trade aggregate plus the normalized SDK evidence used."""
+
     if target.token_id is None:
-        return None
+        return TradePollEvidence(None, None, None, None)
+    request_started_at = datetime.now(UTC)
     try:
         trades = await trader.trades(target.token_id)
     except ClobTradeError as exc:
         logger.warning("could not fetch trades for %s: %s", target.clob_order_id, exc)
-        return None
-    return aggregate_order_trades(trades, target.clob_order_id)
+        return TradePollEvidence(None, None, None, None)
+    response_received_at = datetime.now(UTC)
+    return TradePollEvidence(
+        fill=aggregate_order_trades(trades, target.clob_order_id),
+        normalized_payload={"asset_id": target.token_id, "trades": trades},
+        request_started_at=request_started_at,
+        response_received_at=response_received_at,
+    )
+
+
+def _trade_fill_matches(trade_fill: TradeFill | None, order_fill: OrderFill) -> bool:
+    if trade_fill is None or order_fill.matched_shares <= 0:
+        return False
+    drift = abs(trade_fill.matched_shares - order_fill.matched_shares)
+    return drift <= order_fill.matched_shares * Decimal("0.01")
 
 
 def _reconcile_fill(
@@ -396,18 +670,17 @@ def _reconcile_fill(
     """Prefer the trade-derived VWAP and fee, but only when it agrees with the
     order's authoritative matched size (within 1%); otherwise use the order's
     size at its limit price (a conservative upper bound on cost)."""
-    if trade_fill is not None and order_fill.matched_shares > 0:
-        drift = abs(trade_fill.matched_shares - order_fill.matched_shares)
-        if drift <= order_fill.matched_shares * Decimal("0.01"):
-            return LiveFillValue(
-                order_id=target.order_id,
-                market_id=target.market_id,
-                side=target.side,
-                size_shares=trade_fill.matched_shares,
-                avg_price=trade_fill.avg_price,
-                cost_usd=trade_fill.cost_usd,
-                fee_usd=trade_fill.fee_usd,
-            )
+    if _trade_fill_matches(trade_fill, order_fill):
+        assert trade_fill is not None
+        return LiveFillValue(
+            order_id=target.order_id,
+            market_id=target.market_id,
+            side=target.side,
+            size_shares=trade_fill.matched_shares,
+            avg_price=trade_fill.avg_price,
+            cost_usd=trade_fill.cost_usd,
+            fee_usd=trade_fill.fee_usd,
+        )
     return LiveFillValue(
         order_id=target.order_id,
         market_id=target.market_id,
@@ -436,22 +709,102 @@ async def poll_live_fills(
             targets = await open_live_orders(session)
         live_trader: Trader = trader or await _connect_trader(settings)
         for target in targets:
+            request_started_at = datetime.now(UTC)
             try:
-                order_fill = parse_order_fill(await live_trader.order(target.clob_order_id))
+                order_payload = await live_trader.order(target.clob_order_id)
             except ClobTradeError as exc:
                 logger.warning("could not poll order %s: %s", target.clob_order_id, exc)
                 continue
-            if order_fill is None or order_fill.matched_shares <= 0:
-                continue
-            value = _reconcile_fill(
-                await _trade_fill(live_trader, target), order_fill, target
-            )
+            response_received_at = datetime.now(UTC)
             async with sessions.begin() as session:
-                await upsert_live_position(session, value)
-                if order_fill.terminal and order_fill.status == "matched":
-                    await mark_live_order(session, target.order_id, status=LIVE_STATUS_FILLED)
-                elif order_fill.terminal:
-                    await mark_live_order(session, target.order_id, status=LIVE_STATUS_CANCELED)
+                order_observation = await append_live_reconciliation_observation(
+                    session,
+                    target.order_id,
+                    observation_kind="order",
+                    sdk_method="order",
+                    parser_version="order-fill-v1",
+                    request_started_at=request_started_at,
+                    response_received_at=response_received_at,
+                    normalized_payload=order_payload,
+                )
+                order_observation_id = order_observation.id
+            order_fill = parse_order_fill(order_payload)
+            if order_fill is None:
+                continue
+            if order_fill.matched_shares <= 0:
+                if order_fill.terminal:
+                    async with sessions.begin() as session:
+                        intent_id = await session.scalar(
+                            select(ExecutionOrderIntent.id).where(
+                                ExecutionOrderIntent.order_id == target.order_id
+                            )
+                        )
+                        if intent_id is None:
+                            raise ExecutionCostIntegrityError(
+                                "terminal live order lacks its immutable intent"
+                            )
+                        await record_terminal_unverified_live_execution(
+                            session,
+                            intent_id,
+                            order_observation_id,
+                            terminal_status=LIVE_STATUS_CANCELED,
+                            matched_shares=Decimal(0),
+                            failure_reason="venue_terminal_no_fill",
+                        )
+                    updated += 1
+                continue
+            trade_evidence = await _trade_fill(live_trader, target)
+            trade_is_source = _trade_fill_matches(trade_evidence.fill, order_fill)
+            value = _reconcile_fill(trade_evidence.fill, order_fill, target)
+            async with sessions.begin() as session:
+                trade_observation_id: int | None = None
+                if (
+                    trade_evidence.normalized_payload is not None
+                    and trade_evidence.request_started_at is not None
+                    and trade_evidence.response_received_at is not None
+                ):
+                    trade_observation = await append_live_reconciliation_observation(
+                        session,
+                        target.order_id,
+                        observation_kind="trades",
+                        sdk_method="trades",
+                        parser_version="trade-aggregate-v1",
+                        request_started_at=trade_evidence.request_started_at,
+                        response_received_at=trade_evidence.response_received_at,
+                        normalized_payload=trade_evidence.normalized_payload,
+                    )
+                    trade_observation_id = trade_observation.id
+                if order_fill.terminal:
+                    intent_id = await session.scalar(
+                        select(ExecutionOrderIntent.id).where(
+                            ExecutionOrderIntent.order_id == target.order_id
+                        )
+                    )
+                    if intent_id is None:
+                        raise ExecutionCostIntegrityError(
+                            "terminal live order lacks its immutable intent"
+                        )
+                    await record_terminal_unverified_live_execution(
+                        session,
+                        intent_id,
+                        (
+                            trade_observation_id
+                            if trade_is_source and trade_observation_id is not None
+                            else order_observation_id
+                        ),
+                        terminal_status=(
+                            LIVE_STATUS_FILLED
+                            if order_fill.status == "matched"
+                            else LIVE_STATUS_CANCELED
+                        ),
+                        matched_shares=value.size_shares,
+                        avg_price=value.avg_price,
+                        cost_usd=value.cost_usd,
+                        fee_usd=value.fee_usd,
+                        failure_reason="live_schema_unverified",
+                    )
+                else:
+                    await upsert_live_position(session, value)
             updated += 1
 
         logged = 0
@@ -462,6 +815,10 @@ async def poll_live_fills(
         else:
             async with sessions.begin() as session:
                 logged = await record_live_bankroll(session, balance=balance, now=datetime.now(UTC))
+        async with sessions.begin() as session:
+            recorded = await capture_selection_policy_decisions(session)
+        if recorded:
+            logger.info("recorded %d prospective live selection-policy decisions", recorded)
     logger.info("live fill poll complete: positions=%d bankroll_logged=%d", updated, logged)
     return updated, logged
 
@@ -472,7 +829,12 @@ async def cancel_live_orders(
     *,
     trader: Trader | None = None,
 ) -> int:
-    """Cancel live orders the kill switch marked `cancel_requested`."""
+    """Cancel requested orders and reconcile their final cumulative fills.
+
+    A successful cancel request is not sufficient evidence that zero shares
+    filled.  The order remains ``cancel_requested`` until a terminal CLOB
+    snapshot is readable; this prevents a late partial fill from being erased.
+    """
     settings = settings or get_settings()
     if not live_executor_configured(settings.polygon_private_key):
         return 0
@@ -480,16 +842,135 @@ async def cancel_live_orders(
     async with session_factory_scope(settings, session_factory) as sessions:
         async with sessions.begin() as session:
             orders = await claim_cancellable_live_orders(session)
+            market_by_signal = {
+                signal_id: market_id
+                for signal_id, market_id in (
+                    await session.execute(
+                        select(Signal.id, Signal.market_id).where(
+                            Signal.id.in_([order.signal_id for order in orders])
+                        )
+                    )
+                ).all()
+            }
             targets = [
-                (order.id, order.clob_order_id) for order in orders if order.clob_order_id
+                OpenLiveOrder(
+                    order_id=order.id,
+                    clob_order_id=order.clob_order_id,
+                    market_id=market_by_signal[order.signal_id],
+                    side=order.side,
+                    token_id=order.token_id,
+                )
+                for order in orders
+                if order.clob_order_id and order.signal_id in market_by_signal
             ]
         if not targets:
             return 0
         cancel_trader: Trader = trader or await _connect_trader(settings)
-        await cancel_trader.cancel([clob_id for _, clob_id in targets])
+        cancel_request_started_at = datetime.now(UTC)
+        await cancel_trader.cancel([target.clob_order_id for target in targets])
+        cancel_response_received_at = datetime.now(UTC)
         async with sessions.begin() as session:
-            for order_id, _ in targets:
-                await mark_live_order(session, order_id, status=LIVE_STATUS_CANCELED)
+            for target in targets:
+                await append_live_reconciliation_observation(
+                    session,
+                    target.order_id,
+                    observation_kind="cancel",
+                    sdk_method="cancel",
+                    parser_version="cancel-ack-v1",
+                    request_started_at=cancel_request_started_at,
+                    response_received_at=cancel_response_received_at,
+                    normalized_payload={
+                        "order_id": target.clob_order_id,
+                        "result": "sdk_returned_without_error",
+                    },
+                )
+        for target in targets:
+            order_request_started_at = datetime.now(UTC)
+            try:
+                order_payload = await cancel_trader.order(target.clob_order_id)
+            except Exception as exc:  # noqa: BLE001 - retain cancel_requested for retry
+                logger.warning(
+                    "canceled order %s could not be reconciled: %s",
+                    target.clob_order_id,
+                    exc,
+                )
+                continue
+            order_response_received_at = datetime.now(UTC)
+            order_fill = parse_order_fill(order_payload)
+            if order_fill is None or not order_fill.terminal:
+                logger.warning(
+                    "canceled order %s has no terminal reconciliation yet",
+                    target.clob_order_id,
+                )
+                continue
+            trade_evidence = (
+                await _trade_fill(cancel_trader, target)
+                if order_fill.matched_shares > 0
+                else TradePollEvidence(None, None, None, None)
+            )
+            trade_is_source = _trade_fill_matches(trade_evidence.fill, order_fill)
+            value = (
+                _reconcile_fill(trade_evidence.fill, order_fill, target)
+                if order_fill.matched_shares > 0
+                else None
+            )
+            async with sessions.begin() as session:
+                order_observation = await append_live_reconciliation_observation(
+                    session,
+                    target.order_id,
+                    observation_kind="order",
+                    sdk_method="order",
+                    parser_version="order-fill-v1",
+                    request_started_at=order_request_started_at,
+                    response_received_at=order_response_received_at,
+                    normalized_payload=order_payload,
+                )
+                terminal_observation_id = order_observation.id
+                if (
+                    trade_evidence.normalized_payload is not None
+                    and trade_evidence.request_started_at is not None
+                    and trade_evidence.response_received_at is not None
+                ):
+                    trade_observation = await append_live_reconciliation_observation(
+                        session,
+                        target.order_id,
+                        observation_kind="trades",
+                        sdk_method="trades",
+                        parser_version="trade-aggregate-v1",
+                        request_started_at=trade_evidence.request_started_at,
+                        response_received_at=trade_evidence.response_received_at,
+                        normalized_payload=trade_evidence.normalized_payload,
+                    )
+                    if trade_is_source:
+                        terminal_observation_id = trade_observation.id
+                intent_id = await session.scalar(
+                    select(ExecutionOrderIntent.id).where(
+                        ExecutionOrderIntent.order_id == target.order_id
+                    )
+                )
+                if intent_id is None:
+                    raise ExecutionCostIntegrityError(
+                        "terminal live order lacks its immutable intent"
+                    )
+                await record_terminal_unverified_live_execution(
+                    session,
+                    intent_id,
+                    terminal_observation_id,
+                    terminal_status=(
+                        LIVE_STATUS_FILLED
+                        if order_fill.status == "matched"
+                        else LIVE_STATUS_CANCELED
+                    ),
+                    matched_shares=(value.size_shares if value is not None else Decimal(0)),
+                    avg_price=(value.avg_price if value is not None else None),
+                    cost_usd=(value.cost_usd if value is not None else None),
+                    fee_usd=(value.fee_usd if value is not None else None),
+                    failure_reason=(
+                        "live_schema_unverified"
+                        if value is not None
+                        else "venue_cancel_no_fill"
+                    ),
+                )
                 canceled += 1
     logger.info("live order cancellation complete: canceled=%d", canceled)
     return canceled

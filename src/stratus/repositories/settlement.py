@@ -4,11 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stratus.db.models import (
     BankrollLog,
+    ClobBookBatch,
+    ClobMarketSnapshot,
     ExecutionMode,
     Market,
     MarketPrice,
@@ -16,8 +18,11 @@ from stratus.db.models import (
     Position,
     PositionStatus,
     Station,
+    TradeSide,
 )
 from stratus.repositories.telegram import enqueue_notification
+from stratus.repositories.validation_ledger import seal_prospective_validation_outcomes
+from stratus.services.clob_evidence import CLOB_DUAL_PROTOCOL
 from stratus.services.settlement import closing_line_value, position_pnl
 
 
@@ -30,12 +35,70 @@ class SettlementResult:
     live_pnl: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class ClosingLine:
+    midpoint: Decimal
+    snapshot_id: int | None = None
+    snapshot_hash: str | None = None
+
+
+class SettlementIntegrityError(RuntimeError):
+    """Operational market projection conflicts with immutable resolution truth."""
+
+
+_BANKROLL_LOG_LOCK_SEED = 71_020_260_715
+
+
+async def _append_paper_bankroll_log(
+    session: AsyncSession,
+    *,
+    pnl: Decimal,
+    position_count: int,
+    settled_at: datetime,
+    initial_bankroll_usd: Decimal,
+) -> None:
+    """Append one cumulative paper balance without collisions or lost updates.
+
+    Multiple independent Gamma events commonly resolve in the same settlement
+    cycle and therefore share ``settled_at``.  ``bankroll_log`` is keyed by
+    ``(ts, mode)``, so the timestamp must be made monotonically unique while a
+    transaction-scoped lock serializes the read-modify-append operation across
+    concurrent workers.
+    """
+
+    await session.execute(
+        text(
+            f"SELECT pg_advisory_xact_lock(hashtextextended(:lock_name, {_BANKROLL_LOG_LOCK_SEED}))"
+        ),
+        {"lock_name": "bankroll-log:paper"},
+    )
+    latest = await session.scalar(
+        select(BankrollLog)
+        .where(BankrollLog.mode == ExecutionMode.PAPER)
+        .order_by(BankrollLog.ts.desc())
+        .limit(1)
+    )
+    balance = Decimal(latest.balance_usd if latest is not None else initial_bankroll_usd) + pnl
+    log_at = settled_at
+    if latest is not None and latest.ts >= log_at:
+        log_at = latest.ts + timedelta(microseconds=1)
+    session.add(
+        BankrollLog(
+            ts=log_at,
+            mode=ExecutionMode.PAPER,
+            balance_usd=balance.quantize(Decimal("0.0001")),
+            event=f"settled {position_count} paper position(s)",
+        )
+    )
+
+
 async def _close_position(
     session: AsyncSession,
     position: Position,
     *,
     resolved_yes: bool,
-    closed_at: datetime,
+    market_closed_at: datetime,
+    settled_at: datetime,
 ) -> Decimal:
     pnl = position_pnl(
         side=position.side,
@@ -45,21 +108,25 @@ async def _close_position(
     )
     position.pnl_usd = pnl
     if position.clv is None:
-        midpoint = await _closing_midpoint(session, position, closed_at=closed_at)
-        if midpoint is not None:
+        closing_line = await _closing_midpoint(session, position, closed_at=market_closed_at)
+        if closing_line is not None:
             position.clv = closing_line_value(
-                side=position.side,
-                yes_midpoint=midpoint,
+                traded_side_midpoint=closing_line.midpoint,
                 entry_price=position.avg_price,
             )
+            position.clv_snapshot_id = closing_line.snapshot_id
+            position.clv_snapshot_hash = closing_line.snapshot_hash
     position.status = PositionStatus.CLOSED
-    position.closed_at = closed_at
+    # Risk/accounting uses the time STRATUS actually recognized the P&L.
+    # Gamma's market close is retained separately as the non-leaking CLV cut-off.
+    position.closed_at = settled_at
+    position.market_closed_at = market_closed_at
     return pnl
 
 
 async def _closing_midpoint(
     session: AsyncSession, position: Position, *, closed_at: datetime
-) -> Decimal | None:
+) -> ClosingLine | None:
     """Return a non-leaking closing-line midpoint for a position.
 
     The previous implementation required a price snapshot inside a two-minute
@@ -73,6 +140,43 @@ async def _closing_midpoint(
     3. never use a price after close, because that would leak settlement info.
     """
     clv_target = closed_at - timedelta(minutes=15)
+    if position.benchmark_protocol == CLOB_DUAL_PROTOCOL:
+        side_midpoint = (
+            ClobMarketSnapshot.yes_midpoint
+            if position.side is TradeSide.BUY_YES
+            else ClobMarketSnapshot.no_midpoint
+        )
+        for cutoff in (clv_target, closed_at):
+            row = (
+                await session.execute(
+                    select(
+                        ClobMarketSnapshot.id,
+                        ClobMarketSnapshot.record_hash,
+                        side_midpoint,
+                    )
+                    .join(
+                        ClobBookBatch,
+                        ClobBookBatch.id == ClobMarketSnapshot.batch_id,
+                    )
+                    .where(
+                        ClobMarketSnapshot.market_id == position.market_id,
+                        ClobMarketSnapshot.eligible.is_(True),
+                        side_midpoint.is_not(None),
+                        ClobBookBatch.first_seen_at <= cutoff,
+                    )
+                    .order_by(ClobBookBatch.first_seen_at.desc())
+                    .limit(1)
+                )
+            ).one_or_none()
+            if row is not None:
+                snapshot_id, snapshot_hash, midpoint = row
+                return ClosingLine(
+                    midpoint=midpoint,
+                    snapshot_id=snapshot_id,
+                    snapshot_hash=snapshot_hash,
+                )
+        return None
+
     midpoint = await session.scalar(
         select(MarketPrice)
         .where(
@@ -83,7 +187,12 @@ async def _closing_midpoint(
         .limit(1)
     )
     if midpoint is not None:
-        return midpoint.midpoint
+        legacy_midpoint = (
+            midpoint.midpoint
+            if position.side is TradeSide.BUY_YES
+            else Decimal(1) - midpoint.midpoint
+        )
+        return ClosingLine(midpoint=legacy_midpoint)
     fallback = await session.scalar(
         select(MarketPrice)
         .where(
@@ -93,12 +202,15 @@ async def _closing_midpoint(
         .order_by(MarketPrice.ts.desc())
         .limit(1)
     )
-    return fallback.midpoint if fallback is not None else None
+    if fallback is None:
+        return None
+    legacy_midpoint = (
+        fallback.midpoint if position.side is TradeSide.BUY_YES else Decimal(1) - fallback.midpoint
+    )
+    return ClosingLine(midpoint=legacy_midpoint)
 
 
-async def backfill_missing_clv(
-    session: AsyncSession, *, batch_size: int = 500
-) -> int:
+async def backfill_missing_clv(session: AsyncSession, *, batch_size: int = 500) -> int:
     """Best-effort CLV repair for already-settled positions.
 
     Used by maintenance/backfills and safe to run repeatedly. It only fills
@@ -106,30 +218,36 @@ async def backfill_missing_clv(
     settlement.
     """
     positions = (
-        await session.execute(
-            select(Position)
-            .where(
-                Position.status == PositionStatus.CLOSED,
-                Position.closed_at.is_not(None),
-                Position.clv.is_(None),
+        (
+            await session.execute(
+                select(Position)
+                .where(
+                    Position.status == PositionStatus.CLOSED,
+                    Position.closed_at.is_not(None),
+                    Position.clv.is_(None),
+                )
+                .order_by(Position.id)
+                .limit(batch_size)
+                .with_for_update(skip_locked=True)
             )
-            .order_by(Position.id)
-            .limit(batch_size)
-            .with_for_update(skip_locked=True)
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     updated = 0
     for position in positions:
-        if position.closed_at is None:
+        clv_closed_at = position.market_closed_at or position.closed_at
+        if clv_closed_at is None:
             continue
-        midpoint = await _closing_midpoint(session, position, closed_at=position.closed_at)
-        if midpoint is None:
+        closing_line = await _closing_midpoint(session, position, closed_at=clv_closed_at)
+        if closing_line is None:
             continue
         position.clv = closing_line_value(
-            side=position.side,
-            yes_midpoint=midpoint,
+            traded_side_midpoint=closing_line.midpoint,
             entry_price=position.avg_price,
         )
+        position.clv_snapshot_id = closing_line.snapshot_id
+        position.clv_snapshot_hash = closing_line.snapshot_hash
         updated += 1
     if updated:
         await session.flush()
@@ -143,6 +261,7 @@ async def settle_resolved_markets(
     closing_times: dict[int, datetime],
     settled_at: datetime,
     initial_bankroll_usd: Decimal,
+    resolution_event_id: int | None = None,
 ) -> SettlementResult:
     """Resolve markets and close their open positions in both modes.
 
@@ -154,32 +273,56 @@ async def settle_resolved_markets(
     if not resolutions:
         return SettlementResult(0, 0, 0, Decimal(0), Decimal(0))
     markets = (
-        await session.execute(
-            select(Market)
-            .where(Market.id.in_(resolutions))
-            .with_for_update(skip_locked=True)
+        (
+            await session.execute(
+                select(Market)
+                .where(Market.id.in_(resolutions))
+                .order_by(Market.id)
+                .with_for_update()
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
+    if {market.id for market in markets} != set(resolutions):
+        raise SettlementIntegrityError("settlement market set changed while locking event")
     newly_resolved = []
     for market in markets:
+        outcome = resolutions[market.id]
         if market.status is MarketStatus.RESOLVED:
-            continue
-        market.status = MarketStatus.RESOLVED
-        market.resolved_outcome = resolutions[market.id]
-        newly_resolved.append(market.id)
-    if not newly_resolved:
-        return SettlementResult(0, 0, 0, Decimal(0), Decimal(0))
+            if market.resolved_outcome is None or bool(market.resolved_outcome) != outcome:
+                raise SettlementIntegrityError(
+                    f"resolved market {market.id} conflicts with immutable event outcome"
+                )
+        else:
+            market.status = MarketStatus.RESOLVED
+            market.resolved_outcome = outcome
+            newly_resolved.append(market.id)
+        if resolution_event_id is not None:
+            if (
+                market.resolution_event_id is not None
+                and market.resolution_event_id != resolution_event_id
+            ):
+                raise SettlementIntegrityError(
+                    f"market {market.id} references another resolution event"
+                )
+            market.resolution_event_id = resolution_event_id
 
     positions = (
-        await session.execute(
-            select(Position)
-            .where(
-                Position.market_id.in_(newly_resolved),
-                Position.status == PositionStatus.OPEN,
+        (
+            await session.execute(
+                select(Position)
+                .where(
+                    Position.market_id.in_(resolutions),
+                    Position.status == PositionStatus.OPEN,
+                )
+                .order_by(Position.id)
+                .with_for_update()
             )
-            .with_for_update(skip_locked=True)
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     paper_pnl = Decimal(0)
     live_pnl = Decimal(0)
@@ -188,9 +331,13 @@ async def settle_resolved_markets(
     live_winners: list[Position] = []
     for position in positions:
         resolved_yes = resolutions[position.market_id]
-        closed_at = closing_times.get(position.market_id, settled_at)
+        market_closed_at = closing_times.get(position.market_id, settled_at)
         pnl = await _close_position(
-            session, position, resolved_yes=resolved_yes, closed_at=closed_at
+            session,
+            position,
+            resolved_yes=resolved_yes,
+            market_closed_at=market_closed_at,
+            settled_at=settled_at,
         )
         if position.mode is ExecutionMode.LIVE:
             live_pnl += pnl
@@ -203,24 +350,28 @@ async def settle_resolved_markets(
             paper_count += 1
 
     if paper_count:
-        latest = await session.scalar(
-            select(BankrollLog.balance_usd)
-            .where(BankrollLog.mode == ExecutionMode.PAPER)
-            .order_by(BankrollLog.ts.desc())
-            .limit(1)
-        )
-        balance = Decimal(latest or initial_bankroll_usd) + paper_pnl
-        session.add(
-            BankrollLog(
-                ts=settled_at,
-                mode=ExecutionMode.PAPER,
-                balance_usd=balance.quantize(Decimal("0.0001")),
-                event=f"settled {paper_count} paper position(s)",
-            )
+        await _append_paper_bankroll_log(
+            session,
+            pnl=paper_pnl,
+            position_count=paper_count,
+            settled_at=settled_at,
+            initial_bankroll_usd=initial_bankroll_usd,
         )
 
     if live_winners:
-        await _enqueue_redemption_reminder(session, live_winners, settled_at)
+        await _enqueue_redemption_reminder(
+            session,
+            live_winners,
+            settled_at,
+            resolution_event_id=resolution_event_id,
+        )
+
+    if resolution_event_id is not None:
+        await session.flush()
+        await seal_prospective_validation_outcomes(
+            session,
+            resolution_event_id=resolution_event_id,
+        )
 
     await session.flush()
     return SettlementResult(
@@ -233,7 +384,11 @@ async def settle_resolved_markets(
 
 
 async def _enqueue_redemption_reminder(
-    session: AsyncSession, winners: list[Position], settled_at: datetime
+    session: AsyncSession,
+    winners: list[Position],
+    settled_at: datetime,
+    *,
+    resolution_event_id: int | None,
 ) -> None:
     market_ids = {position.market_id for position in winners}
     rows = (
@@ -251,7 +406,11 @@ async def _enqueue_redemption_reminder(
     ]
     await enqueue_notification(
         session,
-        f"live-redeem:{settled_at:%Y%m%dT%H%M}",
+        (
+            f"live-redeem:event:{resolution_event_id}"
+            if resolution_event_id is not None
+            else f"live-redeem:{settled_at:%Y%m%dT%H%M%S%f}"
+        ),
         "ACTION REQUIRED: redeem winning Polymarket positions manually via the "
         "UI. STRATUS does not redeem on-chain.\n" + "\n".join(lines),
     )

@@ -191,7 +191,9 @@ async def test_set_mode_paper_switches_and_live_is_gated(
         polygon_private_key="0xtestkey",
     )
 
-    async def passing_gate(session: object, bankroll: float) -> SimpleNamespace:
+    async def passing_gate(
+        session: object, bankroll: float, **_: object
+    ) -> SimpleNamespace:
         return SimpleNamespace(passed=True)
 
     monkeypatch.setattr(

@@ -1,11 +1,16 @@
 .env
+docker-compose.override.yml
 .venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest-*/
+.tmp/
 .ruff_cache/
+.stratus-cache/
 .coverage
 htmlcov/
 *.log
 backups/
 rclone.conf
+.secrets/

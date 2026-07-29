@@ -168,16 +168,22 @@ def ensemble_component(
     sigma_c = math.sqrt(
         sum((value - mean_c) ** 2 for value in corrected) / (len(corrected) - 1)
     )
-    hits = sum(
-        (bucket.low_c is None or value >= bucket.low_c)
-        and (bucket.high_c is None or value < bucket.high_c)
-        for value in corrected
+    # Kernel dressing turns the finite member cloud into a continuous
+    # predictive distribution. Raw hit counts are quantized at 1/N and are
+    # systematically overconfident when the ensemble is underdispersive.
+    bandwidth_c = max(0.25, calibration.sigma_c)
+    probability = sum(
+        gaussian_bucket_probability(value, bandwidth_c, bucket) for value in corrected
+    ) / len(corrected)
+    mixture_variance = (
+        sum((value - mean_c) ** 2 for value in corrected) / len(corrected)
+        + bandwidth_c**2
     )
     return ProbabilityComponent(
         name=name,
-        probability=hits / len(corrected),
+        probability=probability,
         mean_c=mean_c,
-        sigma_c=max(sigma_c, 0.25),
+        sigma_c=max(math.sqrt(mixture_variance), sigma_c, 0.25),
         weight=weight,
         is_ensemble=True,
         sample_n=len(corrected),

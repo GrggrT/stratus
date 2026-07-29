@@ -2,13 +2,18 @@ from decimal import Decimal
 
 import pytest
 
-from stratus.collectors.clob_trader import ClobTradeError, parse_place_response
+from stratus.collectors.clob_trader import (
+    ClobPlacementOutcomeUnknown,
+    ClobVenueRejected,
+    parse_place_response,
+)
 from stratus.collectors.geoblock import parse_geoblock
 from stratus.services.live_execution import (
     LiveOrderRejected,
     aggregate_order_trades,
     evaluate_live_readiness,
     parse_order_fill,
+    placed_order_status,
     plan_live_buy,
 )
 
@@ -125,6 +130,11 @@ def test_parse_order_fill_fails_closed() -> None:
     assert parse_order_fill({"size_matched": "x", "price": "0.5"}) is None
 
 
+def test_successful_placement_stays_pollable_until_fill_evidence_is_recorded() -> None:
+    assert placed_order_status("live") == "open"
+    assert placed_order_status("matched") == "open"
+
+
 def test_aggregate_order_trades_computes_vwap_across_taker_and_maker_legs() -> None:
     trades = [
         # We were the taker on this trade.
@@ -167,9 +177,19 @@ def test_place_response_parse_accepts_only_explicit_success() -> None:
     )
     assert (placed.order_id, placed.status) == ("0xabc", "live")
 
-    with pytest.raises(ClobTradeError, match="rejected"):
+    with pytest.raises(ClobVenueRejected, match="rejected"):
         parse_place_response({"success": False, "errorMsg": "not enough balance"})
-    with pytest.raises(ClobTradeError, match="missing orderID"):
+    with pytest.raises(ClobPlacementOutcomeUnknown, match="missing orderID"):
         parse_place_response({"success": True, "errorMsg": ""})
-    with pytest.raises(ClobTradeError, match="invalid order response"):
+    with pytest.raises(ClobPlacementOutcomeUnknown, match="invalid order response"):
         parse_place_response("nope")
+    with pytest.raises(ClobPlacementOutcomeUnknown, match="unambiguous placement result"):
+        parse_place_response({"orderID": "0xmaybe"})
+    with pytest.raises(ClobPlacementOutcomeUnknown, match="unambiguous placement result"):
+        parse_place_response(
+            {"success": True, "errorMsg": "contradictory", "orderID": "0xmaybe"}
+        )
+    with pytest.raises(ClobPlacementOutcomeUnknown, match="unambiguous placement result"):
+        parse_place_response(
+            {"success": False, "errorMsg": "rejected", "orderID": "0xmaybe"}
+        )

@@ -47,11 +47,7 @@ async def audit_gate(
                 logger.info("gate audit skipped: paper period has not started")
                 return None
             completed = set(
-                (
-                    await session.execute(
-                        select(ValidationCheckpoint.checkpoint_day)
-                    )
-                ).scalars()
+                (await session.execute(select(ValidationCheckpoint.checkpoint_day))).scalars()
             )
             elapsed_days = (now - paper_started_at).days
             checkpoint_day = due_checkpoint(elapsed_days, completed)
@@ -63,13 +59,15 @@ async def audit_gate(
                 )
                 return None
 
-            gate = await calculate_live_gate(session, settings.initial_bankroll_usd)
-            eligible = (
-                len(gate.station_scores) == 3
-                and all(score.count >= 100 for score in gate.station_scores)
-                and gate.resolved_positions >= 100
-                and gate.clv_samples >= 100
+            gate = await calculate_live_gate(
+                session,
+                settings.initial_bankroll_usd,
+                min_stations=settings.live_gate_min_stations,
+                station_samples=settings.live_gate_station_samples,
+                station_brier=settings.live_gate_station_brier,
+                independent_samples_min=settings.live_gate_independent_samples,
             )
+            eligible = gate.passed
             metrics = {
                 "station_scores": [
                     {
@@ -80,6 +78,7 @@ async def audit_gate(
                     for score in gate.station_scores
                 ],
                 "resolved_positions": gate.resolved_positions,
+                "independent_samples": gate.independent_samples,
                 "clv_samples": gate.clv_samples,
                 "average_clv": gate.average_clv,
                 "roi": gate.roi,

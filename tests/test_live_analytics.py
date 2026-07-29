@@ -1,11 +1,17 @@
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime
 
 import pytest
 
 from stratus.services.live_analytics import (
     PositionStat,
+    ProspectiveValidationTrade,
     cumulative_equity,
+    prospective_clv_outcomes,
+    prospective_position_stats,
+    prospective_trade_outcomes,
     summarize_live_performance,
+    summarize_prospective_validation,
 )
 
 
@@ -25,6 +31,196 @@ def test_cumulative_equity_runs_in_time_order() -> None:
 
 def test_cumulative_equity_empty() -> None:
     assert cumulative_equity([]) == []
+
+
+def test_prospective_validation_groups_blocks_and_tracks_drawdown() -> None:
+    times = [datetime(2026, 7, day, tzinfo=UTC) for day in (1, 2, 3)]
+    trades = [
+        ProspectiveValidationTrade(
+            enrollment_id=2,
+            order_id=102,
+            pipeline_cohort="cohort-a",
+            station_icao="KLGA",
+            market_date=date(2026, 7, 1),
+            kind="high",
+            recognized_at=times[0],
+            pnl_usd=20.0,
+            cost_usd=20.0,
+            skill_pnl_usd=2.0,
+            luck_pnl_usd=18.0,
+        ),
+        # Same independent block: counted as a second order, not a sample.
+        ProspectiveValidationTrade(
+            enrollment_id=1,
+            order_id=101,
+            pipeline_cohort="cohort-a",
+            station_icao="KLGA",
+            market_date=date(2026, 7, 1),
+            kind="high",
+            recognized_at=times[0],
+            pnl_usd=5.0,
+            cost_usd=10.0,
+            skill_pnl_usd=1.0,
+            luck_pnl_usd=4.0,
+        ),
+        ProspectiveValidationTrade(
+            enrollment_id=3,
+            order_id=103,
+            pipeline_cohort="cohort-a",
+            station_icao="EGLC",
+            market_date=date(2026, 7, 2),
+            kind="low",
+            recognized_at=times[1],
+            pnl_usd=-40.0,
+            cost_usd=30.0,
+            skill_pnl_usd=-3.0,
+            luck_pnl_usd=-37.0,
+        ),
+        ProspectiveValidationTrade(
+            enrollment_id=4,
+            order_id=104,
+            pipeline_cohort="cohort-a",
+            station_icao="LFPB",
+            market_date=date(2026, 7, 3),
+            kind="high",
+            recognized_at=times[2],
+            pnl_usd=10.0,
+            cost_usd=20.0,
+            skill_pnl_usd=None,
+            luck_pnl_usd=None,
+        ),
+    ]
+
+    summary = summarize_prospective_validation(trades, initial_bankroll_usd=100.0)
+
+    assert summary.closed_orders == 4
+    assert summary.independent_blocks == 3
+    assert summary.total_pnl_usd == -5.0
+    assert summary.roi == pytest.approx(-5 / 80)
+    assert summary.skill_pnl_usd == 0.0
+    assert summary.luck_pnl_usd == -15.0
+    assert summary.decomposed_orders == 3
+    assert summary.max_drawdown_usd == 40.0
+    assert summary.max_drawdown_fraction == 0.4
+    assert summary.largest_order_id == 103
+    assert summary.robust_pnl_usd == 35.0
+    assert summary.robust_roi == pytest.approx(0.7)
+    assert [point.station_icao for point in summary.points] == ["KLGA", "EGLC", "LFPB"]
+    assert [point.orders for point in summary.points] == [2, 1, 1]
+    assert [point.cumulative_pnl_usd for point in summary.points] == [25.0, -15.0, -5.0]
+
+
+def test_prospective_validation_empty_is_explicit() -> None:
+    summary = summarize_prospective_validation([], initial_bankroll_usd=1080.0)
+
+    assert summary.closed_orders == 0
+    assert summary.independent_blocks == 0
+    assert summary.roi is None
+    assert summary.largest_order_id is None
+    assert summary.points == ()
+
+
+def _formal_prospective_trade() -> ProspectiveValidationTrade:
+    signal_ts = datetime(2026, 7, 1, 8, tzinfo=UTC)
+    return ProspectiveValidationTrade(
+        enrollment_id=1,
+        order_id=101,
+        pipeline_cohort="accuracy-v4",
+        station_icao="KLGA",
+        market_date=date(2026, 7, 1),
+        kind="high",
+        recognized_at=datetime(2026, 7, 2, tzinfo=UTC),
+        pnl_usd=4.0,
+        cost_usd=6.0,
+        skill_pnl_usd=0.5,
+        luck_pnl_usd=3.5,
+        signal_id=11,
+        market_id=12,
+        polymarket_id="formal-market",
+        side="buy_yes",
+        signal_ts=signal_ts,
+        resolves_at=datetime(2026, 7, 1, 18, tzinfo=UTC),
+        confidence="A",
+        horizon_bucket="6-24h",
+        requested_limit_price=0.61,
+        fill_vwap=0.59,
+        filled_notional_usd=5.9,
+        fee_usd=0.1,
+        fee_complete=True,
+        size_shares=10.0,
+        yes_model_prob=0.72,
+        model_prob=0.72,
+        yes_market_prob=0.60,
+        market_prob=0.60,
+        raw_model_prob=0.80,
+        predicted_edge=0.12,
+        resolved_yes=True,
+        won=True,
+        market_closed_at=datetime(2026, 7, 1, 18, tzinfo=UTC),
+        close_price=0.64,
+        clv=0.05,
+        predictive_lane_id=21,
+        predictive_lane_identity_hash="a" * 64,
+        predictive_lane_boundary_at=signal_ts,
+        execution_lane_id=22,
+        execution_lane_identity_hash="b" * 64,
+        execution_lane_boundary_at=signal_ts,
+    )
+
+
+def test_prospective_adapters_share_one_formal_projection() -> None:
+    trade = _formal_prospective_trade()
+
+    positions = prospective_position_stats([trade])
+    brier = prospective_trade_outcomes([trade])
+    clv = prospective_clv_outcomes([trade])
+
+    assert positions == [
+        PositionStat(
+            closed=True,
+            pnl_usd=4.0,
+            clv=0.05,
+            cost_usd=6.0,
+            fee_usd=0.1,
+            size_shares=10.0,
+            avg_price=0.59,
+        )
+    ]
+    assert len(brier) == 1
+    assert brier[0].model_prob == 0.72
+    assert brier[0].market_prob == 0.60
+    assert brier[0].pipeline_version == "accuracy-v4"
+    assert brier[0].order_id == 101
+    assert len(clv) == 1
+    assert clv[0].entry_price == 0.59
+    assert clv[0].clv == 0.05
+    assert clv[0].fee_usd == 0.1
+
+
+def test_prospective_adapters_fail_closed_on_unknown_fee_or_lineage() -> None:
+    trade = _formal_prospective_trade()
+    unknown_fee = replace(trade, fee_usd=None, fee_complete=False)
+    missing_lineage = replace(trade, execution_lane_id=None)
+    inconsistent_side_probability = replace(trade, model_prob=0.28)
+    inconsistent_binary_outcome = replace(trade, won=False)
+
+    for invalid in (
+        unknown_fee,
+        missing_lineage,
+        inconsistent_side_probability,
+        inconsistent_binary_outcome,
+    ):
+        assert prospective_position_stats([invalid]) == []
+        assert prospective_trade_outcomes([invalid]) == []
+        assert prospective_clv_outcomes([invalid]) == []
+
+
+def test_prospective_clv_adapter_excludes_only_missing_close_line() -> None:
+    trade = replace(_formal_prospective_trade(), close_price=None, clv=None)
+
+    assert len(prospective_position_stats([trade])) == 1
+    assert len(prospective_trade_outcomes([trade])) == 1
+    assert prospective_clv_outcomes([trade]) == []
 
 
 def test_summary_over_mixed_open_and_closed_positions() -> None:
@@ -83,15 +279,9 @@ def test_open_only_positions_have_no_realised_stats() -> None:
 def test_robust_summary_exposes_single_trade_dependency() -> None:
     perf = summarize_live_performance(
         [
-            PositionStat(
-                closed=True, pnl_usd=100.0, clv=0.02, cost_usd=50.0, fee_usd=0.05
-            ),
-            PositionStat(
-                closed=True, pnl_usd=-10.0, clv=-0.01, cost_usd=25.0, fee_usd=0.02
-            ),
-            PositionStat(
-                closed=True, pnl_usd=-10.0, clv=-0.01, cost_usd=25.0, fee_usd=0.02
-            ),
+            PositionStat(closed=True, pnl_usd=100.0, clv=0.02, cost_usd=50.0, fee_usd=0.05),
+            PositionStat(closed=True, pnl_usd=-10.0, clv=-0.01, cost_usd=25.0, fee_usd=0.02),
+            PositionStat(closed=True, pnl_usd=-10.0, clv=-0.01, cost_usd=25.0, fee_usd=0.02),
         ]
     )
 
@@ -124,33 +314,59 @@ def test_decompose_pnl_invariant_and_semantics() -> None:
     assert skill + luck == pytest.approx(stat.pnl_usd)
 
     # Open, missing CLV or missing shares -> no decomposition.
-    assert decompose_pnl(
-        PositionStat(closed=False, pnl_usd=None, clv=None, cost_usd=1.0, fee_usd=None)
-    ) is None
-    assert decompose_pnl(
-        PositionStat(closed=True, pnl_usd=5.0, clv=None, cost_usd=1.0, fee_usd=None)
-    ) is None
-    assert decompose_pnl(
-        PositionStat(
-            closed=True, pnl_usd=5.0, clv=0.01, cost_usd=1.0, fee_usd=None,
-            size_shares=0.0,
+    assert (
+        decompose_pnl(
+            PositionStat(closed=False, pnl_usd=None, clv=None, cost_usd=1.0, fee_usd=None)
         )
-    ) is None
+        is None
+    )
+    assert (
+        decompose_pnl(PositionStat(closed=True, pnl_usd=5.0, clv=None, cost_usd=1.0, fee_usd=None))
+        is None
+    )
+    assert (
+        decompose_pnl(
+            PositionStat(
+                closed=True,
+                pnl_usd=5.0,
+                clv=0.01,
+                cost_usd=1.0,
+                fee_usd=None,
+                size_shares=0.0,
+            )
+        )
+        is None
+    )
 
 
 def test_summary_reports_skill_luck_and_deterministic_ci() -> None:
     positions = [
         PositionStat(
-            closed=True, pnl_usd=8.0, clv=0.04, cost_usd=20.0, fee_usd=None,
-            size_shares=40.0, avg_price=0.5,
+            closed=True,
+            pnl_usd=8.0,
+            clv=0.04,
+            cost_usd=20.0,
+            fee_usd=None,
+            size_shares=40.0,
+            avg_price=0.5,
         ),
         PositionStat(
-            closed=True, pnl_usd=-20.0, clv=0.01, cost_usd=20.0, fee_usd=None,
-            size_shares=40.0, avg_price=0.5,
+            closed=True,
+            pnl_usd=-20.0,
+            clv=0.01,
+            cost_usd=20.0,
+            fee_usd=None,
+            size_shares=40.0,
+            avg_price=0.5,
         ),
         PositionStat(
-            closed=True, pnl_usd=12.0, clv=-0.02, cost_usd=12.0, fee_usd=None,
-            size_shares=30.0, avg_price=0.4,
+            closed=True,
+            pnl_usd=12.0,
+            clv=-0.02,
+            cost_usd=12.0,
+            fee_usd=None,
+            size_shares=30.0,
+            avg_price=0.4,
         ),
     ]
     first = summarize_live_performance(positions)
@@ -196,22 +412,49 @@ def test_brier_comparison_and_edge_calibration() -> None:
     trades = [
         # Model was sharper than the market on both.
         TradeOutcome(
-            model_prob=0.8, market_prob=0.6, won=True,
-            pnl_usd=8.0, cost_usd=12.0, predicted_edge=0.20,
-            raw_model_prob=0.9, station_icao="KLGA", kind="high",
-            horizon_bucket="0-6h", confidence="A", side="buy_yes",
+            model_prob=0.8,
+            market_prob=0.6,
+            won=True,
+            pnl_usd=8.0,
+            cost_usd=12.0,
+            predicted_edge=0.20,
+            raw_model_prob=0.9,
+            station_icao="KLGA",
+            kind="high",
+            horizon_bucket="0-6h",
+            confidence="A",
+            side="buy_yes",
+            pipeline_version="accuracy-v4",
         ),
         TradeOutcome(
-            model_prob=0.2, market_prob=0.4, won=False,
-            pnl_usd=-4.0, cost_usd=8.0, predicted_edge=0.02,
-            raw_model_prob=0.1, station_icao="KLGA", kind="high",
-            horizon_bucket="0-6h", confidence="C", side="buy_no",
+            model_prob=0.2,
+            market_prob=0.4,
+            won=False,
+            pnl_usd=-4.0,
+            cost_usd=8.0,
+            predicted_edge=0.02,
+            raw_model_prob=0.1,
+            station_icao="KLGA",
+            kind="high",
+            horizon_bucket="0-6h",
+            confidence="C",
+            side="buy_no",
+            pipeline_version="accuracy-v4",
         ),
         TradeOutcome(
-            model_prob=0.7, market_prob=0.55, won=True,
-            pnl_usd=4.5, cost_usd=11.0, predicted_edge=0.08,
-            raw_model_prob=None, station_icao="EGLC", kind="low",
-            horizon_bucket="6-24h", confidence="B", side="buy_yes",
+            model_prob=0.7,
+            market_prob=0.55,
+            won=True,
+            pnl_usd=4.5,
+            cost_usd=11.0,
+            predicted_edge=0.08,
+            raw_model_prob=None,
+            station_icao="EGLC",
+            kind="low",
+            horizon_bucket="6-24h",
+            confidence="B",
+            side="buy_yes",
+            pipeline_version=None,
         ),
     ]
     briers = brier_comparison(trades)
@@ -233,17 +476,18 @@ def test_brier_comparison_and_edge_calibration() -> None:
     assert edge_slope(trades[:2]) is None
 
     slices = brier_root_cause(trades)
-    station_klga = next(
-        s for s in slices if s.dimension == "station" and s.value == "KLGA"
-    )
+    station_klga = next(s for s in slices if s.dimension == "station" and s.value == "KLGA")
     assert station_klga.count == 2
     assert station_klga.raw_count == 2
     assert station_klga.model_minus_market < 0
-    confidence_a = next(
-        s for s in slices if s.dimension == "confidence" and s.value == "A"
-    )
+    confidence_a = next(s for s in slices if s.dimension == "confidence" and s.value == "A")
     assert confidence_a.avg_predicted_edge == 0.2
-
+    version_v4 = next(
+        s for s in slices if s.dimension == "pipeline_version" and s.value == "accuracy-v4"
+    )
+    assert version_v4.count == 2
+    legacy = next(s for s in slices if s.dimension == "pipeline_version" and s.value == "unknown")
+    assert legacy.count == 1
 
 
 def test_price_band_labels() -> None:

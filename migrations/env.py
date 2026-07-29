@@ -5,9 +5,10 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import pool
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from stratus.config import get_settings
+from stratus.config import get_migration_settings
 from stratus.db import models  # noqa: F401
 from stratus.db.base import Base
 
@@ -15,7 +16,10 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+config.set_main_option(
+    "sqlalchemy.url",
+    get_migration_settings().migration_database_url,
+)
 target_metadata = Base.metadata
 
 
@@ -31,7 +35,7 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-def do_run_migrations(connection) -> None:
+def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
     with context.begin_transaction():
         context.run_migrations()
@@ -43,7 +47,11 @@ async def run_async_migrations() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
-    async with connectable.connect() as connection:
+    # Keep a multi-revision upgrade or downgrade inside one outer PostgreSQL
+    # transaction.  Without the external boundary Alembic can commit earlier
+    # revision steps before a later immutable-evidence guard refuses the
+    # operation, leaving the schema partially moved.
+    async with connectable.begin() as connection:
         await connection.run_sync(do_run_migrations)
     await connectable.dispose()
 

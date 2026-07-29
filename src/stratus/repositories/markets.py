@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -8,6 +9,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stratus.db.models import Market, MarketStatus, Station, WeatherKind
+from stratus.repositories.gamma_outcomes import lock_gamma_event
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +88,7 @@ async def upsert_market(
     survive), but is revoked when the parser disagrees AND the rules text or
     resolution source changed since the verification.
     """
+    await lock_gamma_event(session, value.event_id)
     market = (
         await session.execute(
             select(Market).where(Market.polymarket_id == value.polymarket_id).with_for_update()
@@ -93,6 +98,39 @@ async def upsert_market(
     if market is None:
         market = Market(polymarket_id=value.polymarket_id)
         session.add(market)
+
+    # Discovery is a mutable upstream view, while resolution is immutable
+    # evidence. Never let a later Gamma discovery response reactivate a
+    # settled market or rewrite its event/rules/bucket identity. The database
+    # trigger provides the final guard for ledger-backed rows; this early
+    # return also protects legacy resolved rows and keeps discovery healthy.
+    if not is_new and (
+        market.status is MarketStatus.RESOLVED
+        or getattr(market, "resolution_event_id", None) is not None
+    ):
+        identity_changed = any(
+            (
+                market.event_id != value.event_id,
+                market.condition_id != value.condition_id,
+                market.yes_token_id != value.yes_token_id,
+                market.no_token_id != value.no_token_id,
+                market.station_id != value.station_id,
+                market.market_date != value.market_date,
+                market.kind != value.kind,
+                market.bucket_low_c != value.bucket_low_c,
+                market.bucket_high_c != value.bucket_high_c,
+                (market.resolution_source or None) != (value.resolution_source or None),
+                market.rules_raw != value.rules_raw,
+                market.resolves_at != value.resolves_at,
+            )
+        )
+        if identity_changed:
+            logger.error(
+                "resolved market discovery conflict ignored market=%s event=%s",
+                market.id,
+                market.event_id,
+            )
+        return market, False
 
     was_verified = bool(market.station_verified) if not is_new else False
     station_changed = market.station_id is not None and market.station_id != value.station_id
