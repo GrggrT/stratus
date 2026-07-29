@@ -244,4 +244,3 @@ Rollback sequence:
 If the candidate worker cannot process the stop command, stop the worker first. The rollback
 remains API-only; no worker may start until a separately audited break-glass action has restored
 the database kill switches and the release record identifies that action.
-
