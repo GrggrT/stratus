@@ -32,3 +32,14 @@ def test_release_image_guard_binds_image_revision_environment_and_services() -> 
         assert f"'{service_name}'" in guard
     assert "$service.image -ne $Image" in guard
     assert "environment.RELEASE_IMAGE_DIGEST" in guard
+    assert "$resourceLimitedServices = @('worker', 'api')" in guard
+    assert "$memoryLimit -le 0" in guard
+
+
+def test_compose_bounds_worker_and_api_memory() -> None:
+    compose = (
+        Path(__file__).parents[1] / "docker-compose.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "mem_limit: ${STRATUS_WORKER_MEMORY_LIMIT:-3g}" in compose
+    assert "mem_limit: ${STRATUS_API_MEMORY_LIMIT:-1g}" in compose

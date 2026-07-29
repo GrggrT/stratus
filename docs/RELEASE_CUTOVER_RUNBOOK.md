@@ -43,8 +43,9 @@ Inspect the local image and record its 64-hex image ID without the `sha256:` pre
   -EnvFile .env
 ```
 
-The guard must return `verified:true`, `linux/amd64`, the exact revision and digest, and these
-Compose services: `migrate`, `worker`, `binance-market-stream`, `api`, and `telegram`.
+The guard must return `verified:true`, `linux/amd64`, the exact revision and digest, these Compose
+services: `migrate`, `worker`, `binance-market-stream`, `api`, and `telegram`, and positive
+resource limits for both `worker` and `api`.
 
 ## 3. Stage the candidate API while fail closed
 

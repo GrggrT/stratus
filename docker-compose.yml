@@ -281,6 +281,9 @@ services:
   api:
     image: ${STRATUS_IMAGE:-stratus:local}
     command: ["stratus-api"]
+    # A pathological analytical request must fail the local API container,
+    # not exhaust Docker Desktop and take PostgreSQL with it.
+    mem_limit: ${STRATUS_API_MEMORY_LIMIT:-1g}
     environment:
       <<: *stratus-environment
       MIGRATION_DATABASE_URL: ""

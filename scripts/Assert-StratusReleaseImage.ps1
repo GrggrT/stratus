@@ -108,11 +108,20 @@ foreach ($serviceName in $applicationServices) {
     }
 }
 
+$resourceLimitedServices = @('worker', 'api')
+foreach ($serviceName in $resourceLimitedServices) {
+    $memoryLimit = [int64] $compose.services.$serviceName.mem_limit
+    if ($memoryLimit -le 0) {
+        throw "Service $serviceName has no positive memory limit."
+    }
+}
+
 [pscustomobject]@{
     image = $Image
     image_id = $actualId
     revision = $actualRevision
     platform = "$actualOs/$actualArchitecture"
     compose_services = $applicationServices
+    resource_limited_services = $resourceLimitedServices
     verified = $true
 } | ConvertTo-Json -Compress
