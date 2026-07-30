@@ -227,13 +227,13 @@ Acceptance requires all items in `docs/PRODUCTION_READINESS_CHECKLIST.md`, inclu
 |---|---|---|
 | Incident recorded and P0 scope frozen | documented | this record |
 | Corrective implementation | implemented, not deployed | composite scheduler; disjoint claims; DB-enforced 3-read/1-write API pools; exact-cadence HTTP/runtime/composite acceptance gate |
-| Current local verification | passed; clean PostgreSQL CI pending | Ruff clean; strict mypy 174 modules; 926 tests passed, 296 PostgreSQL-dependent tests skipped locally; all four PowerShell release contracts passed |
+| Current local verification | passed; replacement clean PostgreSQL CI pending | Ruff clean; strict mypy 174 modules; 928 tests passed, 296 PostgreSQL-dependent tests skipped locally; exact PostgreSQL plan/semantics test passed; all four PowerShell release contracts passed |
 | Clean PostgreSQL verification | passed | clean PostgreSQL 16 CI-equivalent: 1169 passed, 3 skipped in 1052.21s; Release x64 Cockpit build: 0 warnings/errors |
 | Predecessor incident reconciliation | passed | 2026-07-29 20:18:14Z; epoch 21 has 403/403 sealed obligations, zero open rows, zero projection/duplicate/premature-seal violations, zero LIVE |
-| Candidate image/build identity | two staged attempts rejected | first revision `09945edfd4920df8c6102503accfd24c36c000d6`, image `sha256:3d793e5b64788a37fd0d37635449bf1deeab3cfad4d152c172dd130433951cef`; second exact revision `7059993ed6b90dc0671b670ecd219c2de877465a`, image `sha256:9f9f253d73ff348f91d067ad6021e66fbab46249dfca4b14e18cb870ffc0426f`; neither is an accepted release |
+| Candidate image/build identity | three staged attempts rejected | first revision `09945edfd4920df8c6102503accfd24c36c000d6`, image `sha256:3d793e5b64788a37fd0d37635449bf1deeab3cfad4d152c172dd130433951cef`; second exact revision `7059993ed6b90dc0671b670ecd219c2de877465a`, image `sha256:9f9f253d73ff348f91d067ad6021e66fbab46249dfca4b14e18cb870ffc0426f`; third exact revision `dadad3bfbcd1228cf07c17ef5284086401df9fb5`, image `sha256:dd2ef2859852bd2d43f8183ba5649dd858d2e58fdb66795c0638e1920e0b9fcc`; none is an accepted release |
 | Backup and restore proof | passed | marker-bound post-stop backup `stratus_20260729T203148Z_3241d8921b44_1.backup`; independent hashes and full isolated restore accepted |
 | Schema migration | applied under fail-closed controls | database advanced from `20260728_0045` to `20260730_0046`; all three new indexes are valid and ready; no worker or PAPER execution was started |
-| Deployment under fail-closed controls | second staged API load gate failed; API stopped | both candidate attempts were rejected; API and worker are stopped; only PostgreSQL and backup services remain running; Binance remains killed |
+| Deployment under fail-closed controls | third staged API load gate failed; API stopped | all three candidate attempts were rejected; API and worker are stopped; only PostgreSQL and backup services remain running; Binance remains killed |
 | Successor continuity plan/epoch | pending | pending plan, hashes, and DB timestamp |
 | PAPER canary | pending | pending canary record |
 | Incident closure | pending | requires every acceptance item |
@@ -435,6 +435,42 @@ The stale Cockpit must be stopped for the synthetic gate, and the current Cockpi
 before later end-to-end validation. A replacement exact candidate must pass both the isolated HTTP
 gate and the simultaneous runtime observer before successor-epoch activation or any bounded
 Polymarket PAPER canary.
+
+### Third rejected exact-candidate load gate — 2026-07-30
+
+Revision `dadad3bfbcd1228cf07c17ef5284086401df9fb5` passed GitHub CI run 53 and was
+built from a clean detached worktree as
+`stratus:candidate-dadad3bfbcd1`, exact image
+`sha256:dd2ef2859852bd2d43f8183ba5649dd858d2e58fdb66795c0638e1920e0b9fcc`.
+The release-image guard verified the revision label, `linux/amd64` platform, Compose service
+identity, and resource limits. Schema `20260730_0046`, all three operational indexes, kill
+switches, zero pending commands, zero LIVE state, and epoch 21 were re-proved before the API
+started. The worker, Telegram, Binance stream, and Cockpit remained stopped.
+
+The isolated HTTP subgate issued 339 GET requests. It accepted 338, recorded no timeout, no
+foreign or untagged request, no counter mismatch, and exactly one expected 5xx. The cold
+`accuracy_overview` request returned retryable HTTP 503 after 2,793 ms; the same recomputation at
+the 300-second boundary returned HTTP 200 after 2,618 ms. Its route-local 2.75-second budget
+expired; neither the API admission semaphore nor the database read-session pool was exhausted.
+Because the HTTP subgate failed, the runtime observer was terminated and no composite acceptance
+artifact was produced. The candidate API was stopped immediately. The rejected HTTP evidence is:
+
+- `.stratus-cache/load-gates/dadad3bfbcd1-563617fb17cc40f7b251218c2ced0e00-http.json`.
+
+Production profiling found the dominant cold-path defect in latest-expert discovery. The previous
+`GROUP BY expert / max(ts)` plan scanned 306,097 historical eligible predictions and performed
+306,097 heap fetches. The replacement statement materializes nine fixed expert keys, performs one
+backward partial-index probe per expert with `LATERAL ORDER BY ts DESC LIMIT 1`, and then joins
+only the latest batches. It also projects only the fields rendered by the overview from both
+`accuracy_predictions` and `model_skill_reports`. No timeout, pool limit, cache TTL, or release
+threshold was relaxed.
+
+Read-only profiling against the production-size database reduced the uncached response from about
+1.38 seconds to 0.70 seconds; a concurrent three-request reproduction completed
+`accuracy_overview` in about 1.00 second. The exact PostgreSQL plan test requires `Values Scan`,
+`Limit`, and `ix_accuracy_predictions_eligible_expert_ts`, while rejecting `GroupAggregate` and
+sequential scan. A new exact revision, immutable image, unchanged 390-second gate, and complete
+composite artifact are still required before this incident can advance.
 
 ### Current fail-closed safety state
 

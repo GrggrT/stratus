@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from time import monotonic
@@ -12,8 +12,9 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, column, func, select, true, values
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql import Select
 
 from stratus.collectors.clob import ClobClient
 from stratus.config import Settings
@@ -1768,10 +1769,7 @@ class AccuracyOverviewResponseCache:
                 return cached
 
             task = self._inflight
-            if (
-                task is None
-                or (task.done() and self._clock() >= self._failure_expires_at)
-            ):
+            if task is None or (task.done() and self._clock() >= self._failure_expires_at):
                 task = asyncio.create_task(self._populate(factory))
                 task.add_done_callback(self._consume_task_result)
                 self._inflight = task
@@ -1797,9 +1795,7 @@ class AccuracyOverviewResponseCache:
         except Exception:
             async with self._lock:
                 if self._inflight is task:
-                    self._failure_expires_at = (
-                        self._clock() + self._failure_backoff_seconds
-                    )
+                    self._failure_expires_at = self._clock() + self._failure_backoff_seconds
             raise
 
         async with self._lock:
@@ -2210,7 +2206,7 @@ def _json_number(value: object) -> float | None:
 
 def _nonlinear_expert_summary(
     expert: str,
-    reports: list[ModelSkillReport],
+    reports: list[_AccuracyOverviewSkillReport],
     coverage: tuple[int, int],
     *,
     applied: bool,
@@ -3023,9 +3019,7 @@ async def station_lifecycle(request: Request) -> StationLifecycleResponse:
                 reliability_evaluated_at=(
                     reliability.evaluated_at if reliability is not None else None
                 ),
-                reliability_reasons=(
-                    list(reliability.reasons) if reliability is not None else []
-                ),
+                reliability_reasons=(list(reliability.reasons) if reliability is not None else []),
                 latest_conflict_at=(
                     reliability.latest_conflict_at if reliability is not None else None
                 ),
@@ -3052,9 +3046,7 @@ async def station_lifecycle(request: Request) -> StationLifecycleResponse:
                 reliability_record_hash=(
                     reliability.record_hash if reliability is not None else None
                 ),
-                selection_evaluated_for_date=generated_at.astimezone(
-                    ZoneInfo(station.tz)
-                ).date(),
+                selection_evaluated_for_date=generated_at.astimezone(ZoneInfo(station.tz)).date(),
                 selection_blocked=bool(
                     station.active
                     and station.stage in {StationStage.PAPER, StationStage.APPROVED}
@@ -4121,43 +4113,156 @@ _ACCURACY_OVERVIEW_LATEST_EXPERTS = (
 _ACCURACY_OVERVIEW_TIMEOUT_SECONDS = 2.75
 
 
-async def _latest_accuracy_prediction_batches(
-    session: AsyncSession,
-) -> dict[str, list[AccuracyPrediction]]:
-    """Load every expert's latest eligible timestamp in one bounded query."""
+@dataclass(frozen=True, slots=True)
+class _AccuracyOverviewPrediction:
+    id: int
+    ts: datetime
+    expert: str
+    training_sample_n: int
+    evidence_eligible: bool
+    distribution: dict[str, Any]
 
-    latest_by_expert = (
-        select(
-            AccuracyPrediction.expert.label("expert"),
-            func.max(AccuracyPrediction.ts).label("latest_ts"),
-        )
+
+@dataclass(frozen=True, slots=True)
+class _AccuracyOverviewSkillReport:
+    sample_n: int
+    brier: Decimal | None
+    delta_brier: Decimal | None
+    ci_low: Decimal | None
+    ci_high: Decimal | None
+    eligible: bool
+    details: dict[str, Any]
+
+
+def _latest_accuracy_prediction_batches_statement() -> Select[
+    tuple[int, datetime, str, int, bool, dict[str, Any]]
+]:
+    """Read only each expert's latest eligible batch.
+
+    A grouped ``max(ts)`` scan grows with the complete prediction history.
+    Probe the existing partial index once per fixed expert instead, materialize
+    those nine timestamps, and then fetch only the columns used by Cockpit.
+    """
+
+    expert_values = values(
+        column("expert", AccuracyPrediction.expert.type),
+        name="accuracy_overview_experts",
+    ).data([(expert,) for expert in _ACCURACY_OVERVIEW_LATEST_EXPERTS])
+    latest_probe = (
+        select(AccuracyPrediction.ts.label("latest_ts"))
         .where(
-            AccuracyPrediction.expert.in_(_ACCURACY_OVERVIEW_LATEST_EXPERTS),
+            AccuracyPrediction.expert == expert_values.c.expert,
             AccuracyPrediction.evidence_eligible.is_(True),
         )
-        .group_by(AccuracyPrediction.expert)
-        .subquery()
+        .order_by(AccuracyPrediction.ts.desc())
+        .limit(1)
+        .lateral("latest_accuracy_prediction")
     )
-    rows = (
-        (
-            await session.execute(
-                select(AccuracyPrediction).join(
-                    latest_by_expert,
-                    and_(
-                        AccuracyPrediction.expert == latest_by_expert.c.expert,
-                        AccuracyPrediction.ts == latest_by_expert.c.latest_ts,
-                    ),
-                ).where(AccuracyPrediction.evidence_eligible.is_(True))
-            )
+    latest_by_expert = (
+        select(
+            expert_values.c.expert,
+            latest_probe.c.latest_ts,
         )
-        .scalars()
-        .all()
+        .select_from(expert_values.join(latest_probe, true()))
+        .cte("latest_accuracy_prediction_timestamps")
+        .prefix_with("MATERIALIZED")
     )
-    batches: dict[str, list[AccuracyPrediction]] = {
+    return (
+        select(
+            AccuracyPrediction.id,
+            AccuracyPrediction.ts,
+            AccuracyPrediction.expert,
+            AccuracyPrediction.training_sample_n,
+            AccuracyPrediction.evidence_eligible,
+            AccuracyPrediction.distribution,
+        )
+        .join(
+            latest_by_expert,
+            and_(
+                AccuracyPrediction.expert == latest_by_expert.c.expert,
+                AccuracyPrediction.ts == latest_by_expert.c.latest_ts,
+            ),
+        )
+        .where(AccuracyPrediction.evidence_eligible.is_(True))
+    )
+
+
+def _recent_accuracy_skill_reports_statement(
+    now: datetime,
+) -> Select[
+    tuple[
+        int,
+        Decimal | None,
+        Decimal | None,
+        Decimal | None,
+        Decimal | None,
+        bool,
+        dict[str, Any],
+    ]
+]:
+    """Project only fields rendered by the overview's challenger cards."""
+
+    return select(
+        ModelSkillReport.sample_n,
+        ModelSkillReport.brier,
+        ModelSkillReport.delta_brier,
+        ModelSkillReport.ci_low,
+        ModelSkillReport.ci_high,
+        ModelSkillReport.eligible,
+        ModelSkillReport.details,
+    ).where(
+        ModelSkillReport.window_days == 60,
+        ModelSkillReport.evaluated_at >= now - timedelta(days=2),
+    )
+
+
+async def _recent_accuracy_skill_reports(
+    session: AsyncSession,
+    *,
+    now: datetime,
+) -> list[_AccuracyOverviewSkillReport]:
+    rows = (await session.execute(_recent_accuracy_skill_reports_statement(now))).all()
+    return [
+        _AccuracyOverviewSkillReport(
+            sample_n=sample_n,
+            brier=brier,
+            delta_brier=delta_brier,
+            ci_low=ci_low,
+            ci_high=ci_high,
+            eligible=eligible,
+            details=details,
+        )
+        for sample_n, brier, delta_brier, ci_low, ci_high, eligible, details in rows
+    ]
+
+
+async def _latest_accuracy_prediction_batches(
+    session: AsyncSession,
+) -> dict[str, list[_AccuracyOverviewPrediction]]:
+    """Load every expert's latest eligible timestamp in one bounded query."""
+
+    rows = (await session.execute(_latest_accuracy_prediction_batches_statement())).all()
+    batches: dict[str, list[_AccuracyOverviewPrediction]] = {
         expert: [] for expert in _ACCURACY_OVERVIEW_LATEST_EXPERTS
     }
-    for row in rows:
-        batches[row.expert].append(row)
+    for (
+        prediction_id,
+        prediction_ts,
+        expert,
+        training_sample_n,
+        evidence_eligible,
+        distribution,
+    ) in rows:
+        batches[expert].append(
+            _AccuracyOverviewPrediction(
+                id=prediction_id,
+                ts=prediction_ts,
+                expert=expert,
+                training_sample_n=training_sample_n,
+                evidence_eligible=evidence_eligible,
+                distribution=distribution,
+            )
+        )
     return batches
 
 
@@ -4309,17 +4414,9 @@ async def _uncached_accuracy_overview_response(
         ).one()
         evaluation_count = int(evaluation_count or 0)
         independent_count = int(independent_count or 0)
-        recent_60_day_reports = list(
-            (
-                await session.execute(
-                    select(ModelSkillReport).where(
-                        ModelSkillReport.window_days == 60,
-                        ModelSkillReport.evaluated_at >= now - timedelta(days=2)
-                    )
-                )
-            )
-            .scalars()
-            .all()
+        recent_60_day_reports = await _recent_accuracy_skill_reports(
+            session,
+            now=now,
         )
         settlement_calibrator = await session.scalar(
             select(SettlementProbabilityCalibrator).where(

@@ -117,10 +117,7 @@ async def test_accuracy_overview_timeout_is_single_flight_and_backed_off(
     )
 
     assert calls == 1
-    assert all(
-        isinstance(error, HTTPException) and error.status_code == 503
-        for error in failures
-    )
+    assert all(isinstance(error, HTTPException) and error.status_code == 503 for error in failures)
 
     with pytest.raises(HTTPException) as backoff_error:
         await operator_api.accuracy_overview(request)
@@ -255,18 +252,15 @@ async def test_failed_read_session_factory_always_returns_capacity() -> None:
 
 
 async def test_latest_expert_batches_use_one_sql_round_trip() -> None:
+    now = datetime(2026, 7, 30, 12, tzinfo=UTC)
     rows = [
-        SimpleNamespace(expert="censored_gaussian"),
-        SimpleNamespace(expert="regime_emos"),
+        (1, now, "censored_gaussian", 100, True, {"scale": 1.1}),
+        (2, now, "regime_emos", 200, True, {"strongest_adjustment_c": 0.3}),
     ]
 
-    class ScalarRows:
+    class Result:
         def all(self) -> list[Any]:
             return rows
-
-    class Result:
-        def scalars(self) -> ScalarRows:
-            return ScalarRows()
 
     class Session:
         def __init__(self) -> None:
@@ -280,19 +274,47 @@ async def test_latest_expert_batches_use_one_sql_round_trip() -> None:
     batches = await operator_api._latest_accuracy_prediction_batches(cast(Any, session))
 
     assert len(session.statements) == 1
-    assert batches["censored_gaussian"] == [rows[0]]
-    assert batches["regime_emos"] == [rows[1]]
+    assert batches["censored_gaussian"][0].id == 1
+    assert batches["censored_gaussian"][0].training_sample_n == 100
+    assert batches["censored_gaussian"][0].distribution == {"scale": 1.1}
+    assert batches["regime_emos"][0].id == 2
     assert batches["qrf"] == []
-    source = inspect.getsource(operator_api._latest_accuracy_prediction_batches)
+    source = inspect.getsource(operator_api._latest_accuracy_prediction_batches_statement)
     assert source.count("AccuracyPrediction.evidence_eligible.is_(True)") == 2
+
+
+def test_latest_expert_batches_use_materialized_bounded_index_probes() -> None:
+    sql = str(operator_api._latest_accuracy_prediction_batches_statement())
+
+    assert "MATERIALIZED" in sql
+    assert "JOIN LATERAL" in sql
+    assert "VALUES" in sql
+    assert "GROUP BY" not in sql
+    assert "max(" not in sql
 
 
 def test_accuracy_overview_cold_path_keeps_expensive_aggregates_single_pass() -> None:
     source = inspect.getsource(operator_api._uncached_accuracy_overview_response)
 
-    assert source.count("select(ModelSkillReport)") == 1
+    assert source.count("_recent_accuracy_skill_reports(") == 1
     assert source.count(".select_from(attested_evaluations)") == 1
     assert source.count("_latest_accuracy_prediction_batches(session)") == 1
+
+
+def test_recent_accuracy_skill_reports_use_a_narrow_projection() -> None:
+    statement = operator_api._recent_accuracy_skill_reports_statement(
+        datetime(2026, 7, 30, 12, tzinfo=UTC)
+    )
+
+    assert [column.name for column in statement.selected_columns] == [
+        "sample_n",
+        "brier",
+        "delta_brier",
+        "ci_low",
+        "ci_high",
+        "eligible",
+        "details",
+    ]
 
 
 def test_accuracy_overview_cache_rejects_nonpositive_ttl() -> None:

@@ -7,6 +7,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.db.models import (
@@ -16,7 +17,10 @@ from stratus.db.models import (
     Station,
     WeatherKind,
 )
-from stratus.operator_api import _latest_accuracy_prediction_batches
+from stratus.operator_api import (
+    _latest_accuracy_prediction_batches,
+    _latest_accuracy_prediction_batches_statement,
+)
 from stratus.repositories.accuracy import (
     AccuracyPredictionValue,
     upsert_accuracy_predictions,
@@ -92,19 +96,15 @@ async def test_accuracy_overview_indexes_match_the_bounded_read_queries(
                 )
             )
         ).scalar_one()
-        latest_plan = (
-            await session.execute(
-                text(
-                    """
-                    EXPLAIN (FORMAT JSON)
-                    SELECT expert, max(ts)
-                    FROM accuracy_predictions
-                    WHERE expert IN ('censored_gaussian', 'regime_emos')
-                      AND evidence_eligible IS TRUE
-                    GROUP BY expert
-                    """
-                )
+        latest_statement = _latest_accuracy_prediction_batches_statement()
+        latest_sql = str(
+            latest_statement.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
             )
+        )
+        latest_plan = (
+            await session.execute(text(f"EXPLAIN (FORMAT JSON) {latest_sql}"))
         ).scalar_one()
         weighted_plan = (
             await session.execute(
@@ -124,13 +124,11 @@ async def test_accuracy_overview_indexes_match_the_bounded_read_queries(
 
     assert "ix_model_skill_window_evaluated" in _serialized_plan(skill_plan)
     serialized_latest_plan = _serialized_plan(latest_plan)
-    assert any(
-        name in serialized_latest_plan
-        for name in (
-            "ix_accuracy_predictions_eligible_expert_ts",
-            "ix_accuracy_predictions_eligible_expert_version_market_ts",
-        )
-    )
+    assert "Values Scan" in serialized_latest_plan
+    assert "Limit" in serialized_latest_plan
+    assert "ix_accuracy_predictions_eligible_expert_ts" in serialized_latest_plan
+    assert "GroupAggregate" not in serialized_latest_plan
+    assert "Seq Scan" not in serialized_latest_plan
     assert "ix_accuracy_predictions_eligible_expert_version_market_ts" in _serialized_plan(
         weighted_plan
     )
@@ -222,5 +220,5 @@ async def test_latest_expert_batch_excludes_ineligible_same_timestamp(
         batches = await _latest_accuracy_prediction_batches(session)
 
     assert len(batches["censored_gaussian"]) == 1
-    assert batches["censored_gaussian"][0].expert_version == "eligible-v1"
+    assert batches["censored_gaussian"][0].training_sample_n == 100
     assert batches["censored_gaussian"][0].evidence_eligible is True
