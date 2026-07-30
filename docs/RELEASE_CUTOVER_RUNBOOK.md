@@ -55,16 +55,22 @@ pre-migration production head is exactly `20260728_0045`; a different value stop
 
 Revision `20260730_0046` is an index-only operational migration for bounded Cockpit/API reads.
 Apply it from the exact verified candidate while global/Polymarket kill and Binance kill are both
-engaged and both the worker and API are stopped:
+engaged and every application writer is stopped. In addition to the API and worker, this includes
+the Telegram service and Binance market stream. Before the DDL starts, require zero
+`stratus-api`/`stratus-runtime` database sessions, zero idle-in-transaction sessions, zero lock
+waiters, and no active `pg_dump`. Retain a hash-bound, successfully restored backup of the exact
+pre-migration `20260728_0045` database:
 
 ```powershell
-docker compose stop worker api
+docker compose stop worker api telegram binance-market-stream
 $unexpectedRunning = @(
   docker compose ps --status running --services |
-    Where-Object { $_ -in @("worker", "api") }
+    Where-Object {
+      $_ -in @("worker", "api", "telegram", "binance-market-stream")
+    }
 )
 if ($unexpectedRunning.Count -ne 0) {
-  throw "API/worker must be stopped before migration: $($unexpectedRunning -join ', ')"
+  throw "Application writers must be stopped before migration: $($unexpectedRunning -join ', ')"
 }
 
 # Create without starting so the image can be proved before any DDL executes.
@@ -80,7 +86,21 @@ if ($migrateImageId -ne "sha256:$digest") {
 }
 
 docker start $migrateContainer | Out-Null
-$migrateExitCode = [int](docker wait $migrateContainer)
+$migrationDeadline = (Get-Date).AddMinutes(15)
+do {
+  Start-Sleep -Seconds 2
+  $migrateState = @(
+    docker inspect $migrateContainer | ConvertFrom-Json
+  )[0].State
+} while ($migrateState.Running -and (Get-Date) -lt $migrationDeadline)
+
+if ($migrateState.Running) {
+  docker stop --time 30 $migrateContainer | Out-Null
+  docker logs $migrateContainer
+  throw "Exact-candidate migration exceeded the 15-minute deadline."
+}
+
+$migrateExitCode = [int]$migrateState.ExitCode
 docker logs $migrateContainer
 docker rm $migrateContainer | Out-Null
 if ($migrateExitCode -ne 0) {
@@ -123,10 +143,38 @@ exactly three rows and six `true` flags.
 
 Any migration error, unexpected head, missing index, invalid index, or not-ready index stops the
 cutover with the API and worker still off. Only after these checks pass may the verified candidate
-API be staged:
+API be staged. Create it stopped and prove its image/revision/digest before the first application
+process starts:
 
 ```powershell
-docker compose up -d --no-build --pull never --no-deps --force-recreate api
+docker compose up --no-start --no-build --pull never --no-deps --force-recreate api
+$apiContainer = @(docker compose ps --all -q api)
+if ($apiContainer.Count -ne 1) {
+  throw "Expected exactly one stopped API container."
+}
+$apiInspect = @(
+  docker inspect $apiContainer[0] | ConvertFrom-Json
+)[0]
+if ($apiInspect.State.Running) {
+  throw "API started before candidate identity was proved."
+}
+if ($apiInspect.Image -ne "sha256:$digest") {
+  throw "API container image mismatch: $($apiInspect.Image)"
+}
+if (
+  $apiInspect.Config.Labels.'org.opencontainers.image.revision' -ne $revision
+) {
+  throw "API revision label mismatch."
+}
+if (
+  @(
+    $apiInspect.Config.Env |
+      Where-Object { $_ -eq "RELEASE_IMAGE_DIGEST=$digest" }
+  ).Count -ne 1
+) {
+  throw "API release digest environment mismatch."
+}
+docker start $apiContainer[0] | Out-Null
 ```
 
 Verify the running container image ID, `RELEASE_IMAGE_DIGEST`, revision label, schema
@@ -206,12 +254,14 @@ HTTP-subgate thresholds:
 
 External runtime-observation thresholds:
 
+- API database sessions never exceed the configured pool bound of four;
 - PostgreSQL `idle in transaction` sessions remain zero;
 - PostgreSQL lock waiters remain zero;
 - all active Dashboard queries drain within five seconds after load stops;
 - API and PostgreSQL containers have zero new restarts and are not OOM-killed;
-- no recurrence of predecessor-scale sustained PostgreSQL CPU; any sustained approach to
-  150% is a release failure;
+- API memory remains below 90% of its 1 GiB limit;
+- PostgreSQL CPU fails the gate if any 30-second rolling average is at least 140%, two consecutive
+  five-second samples are at least 150%, or any single sample is at least 200%;
 - global/venue controls and all zero-LIVE invariants remain unchanged.
 
 Record per-endpoint count, maximum latency, error count, PostgreSQL session/lock samples, container
@@ -251,6 +301,39 @@ The endpoint persists a plan when activation is required. It does not activate i
 
 ## 6. Activate exactly the reviewed plan
 
+Before activation, create the candidate worker without starting it and prove its exact identity.
+This prevents any scheduler process from starting before the successor epoch exists:
+
+```powershell
+docker compose up --no-start --no-build --pull never --no-deps --force-recreate worker
+$workerContainer = @(docker compose ps --all -q worker)
+if ($workerContainer.Count -ne 1) {
+  throw "Expected exactly one stopped worker container."
+}
+$workerInspect = @(
+  docker inspect $workerContainer[0] | ConvertFrom-Json
+)[0]
+if ($workerInspect.State.Running) {
+  throw "Worker started before successor activation."
+}
+if ($workerInspect.Image -ne "sha256:$digest") {
+  throw "Worker container image mismatch: $($workerInspect.Image)"
+}
+if (
+  $workerInspect.Config.Labels.'org.opencontainers.image.revision' -ne $revision
+) {
+  throw "Worker revision label mismatch."
+}
+if (
+  @(
+    $workerInspect.Config.Env |
+      Where-Object { $_ -eq "RELEASE_IMAGE_DIGEST=$digest" }
+  ).Count -ne 1
+) {
+  throw "Worker release digest environment mismatch."
+}
+```
+
 Recompute the plan immediately before activation and require the plan hash to be unchanged. Then:
 
 ```powershell
@@ -274,7 +357,7 @@ backfilled, or relabelled into a forked lane.
 Start only the verified candidate worker:
 
 ```powershell
-docker compose up -d --no-build --pull never --no-deps --force-recreate worker
+docker start $workerContainer[0] | Out-Null
 ```
 
 Keep both venue kill switches on. Observe at least four consecutive successful
@@ -365,7 +448,17 @@ Rollback sequence:
 5. Recreate **only** the API:
 
    ```powershell
-   docker compose up -d --no-build --pull never --no-deps --force-recreate api
+   docker compose up --no-start --no-build --pull never --no-deps --force-recreate api
+   $rollbackApi = @(docker compose ps --all -q api)
+   if (
+     $rollbackApi.Count -ne 1 -or
+     (docker inspect $rollbackApi[0] --format "{{.State.Running}}") -ne "false" -or
+     (docker inspect $rollbackApi[0] --format "{{.Image}}") -ne
+       "sha256:f487b5a8bfa21d70e264032ba28e248f79e92928acd2158f544f0bc465f0fad4"
+   ) {
+     throw "Predecessor API stopped-container identity check failed."
+   }
+   docker start $rollbackApi[0] | Out-Null
    ```
 
 6. Verify the API reports the predecessor digest and a continuity mismatch/fail-closed state.
