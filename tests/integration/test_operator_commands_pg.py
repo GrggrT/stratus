@@ -224,6 +224,7 @@ async def test_http_submit_and_audit_roundtrip(
     settings = _settings(migrated_database_url)
     app = create_app(settings)
     app.state.sessions = db_sessions  # lifespan does not run under ASGITransport
+    app.state.read_sessions = app.state.sessions
     headers = {"X-API-Key": "secret-key"}
     body = {
         "request_id": "req-http-00001",

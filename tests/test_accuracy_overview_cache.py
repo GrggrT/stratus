@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 
 from stratus import operator_api
 from stratus.api import create_app
 from stratus.config import Settings
 from stratus.db.models import AccuracyPrediction, ModelSkillReport
+from stratus.db.session import BoundedReadSessionFactory, RuntimeReadCapacityError
 from stratus.operator_api import (
     AccuracyOverviewResponse,
     AccuracyOverviewResponseCache,
@@ -159,6 +163,95 @@ async def test_accuracy_overview_follower_cancellation_does_not_cancel_shared_ta
     assert calls == 1
     assert await cache.get_or_create(factory) is response
     assert calls == 1
+
+
+async def test_accuracy_overview_cache_shutdown_cancels_and_drains_inflight_task() -> None:
+    cache = AccuracyOverviewResponseCache()
+    entered = asyncio.Event()
+    drained = asyncio.Event()
+
+    async def factory() -> AccuracyOverviewResponse:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            drained.set()
+        raise AssertionError("cancelled cache work must not return")
+
+    follower = asyncio.create_task(cache.get_or_create(factory))
+    await entered.wait()
+
+    await cache.shutdown()
+
+    with pytest.raises(asyncio.CancelledError):
+        await follower
+    assert drained.is_set()
+
+
+async def test_cancelled_followers_cannot_release_shared_read_session_capacity() -> None:
+    active_sessions = 0
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    response = _response(datetime(2026, 7, 30, 12, tzinfo=UTC))
+
+    @asynccontextmanager
+    async def fake_sessions() -> AsyncIterator[AsyncSession]:
+        nonlocal active_sessions
+        active_sessions += 1
+        try:
+            yield cast(AsyncSession, object())
+        finally:
+            active_sessions -= 1
+
+    bounded_sessions = BoundedReadSessionFactory(
+        cast(async_sessionmaker[AsyncSession], fake_sessions),
+        max_concurrent=1,
+        queue_timeout_seconds=0.01,
+    )
+    cache = AccuracyOverviewResponseCache()
+
+    async def factory() -> AccuracyOverviewResponse:
+        async with bounded_sessions():
+            entered.set()
+            await release.wait()
+            return response
+
+    followers = [asyncio.create_task(cache.get_or_create(factory)) for _ in range(2)]
+    await entered.wait()
+    for follower in followers:
+        follower.cancel()
+    cancelled = await asyncio.gather(*followers, return_exceptions=True)
+
+    assert all(isinstance(error, asyncio.CancelledError) for error in cancelled)
+    assert active_sessions == 1
+    with pytest.raises(RuntimeReadCapacityError):
+        async with bounded_sessions():
+            pytest.fail("the application-owned cache task must retain its read permit")
+
+    release.set()
+    assert await cache.get_or_create(factory) is response
+    assert active_sessions == 0
+
+
+async def test_failed_read_session_factory_always_returns_capacity() -> None:
+    @asynccontextmanager
+    async def failing_sessions() -> AsyncIterator[AsyncSession]:
+        raise RuntimeError("synthetic session failure")
+        yield cast(AsyncSession, object())
+
+    bounded_sessions = BoundedReadSessionFactory(
+        cast(async_sessionmaker[AsyncSession], failing_sessions),
+        max_concurrent=1,
+        queue_timeout_seconds=0.01,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic session failure"):
+        async with bounded_sessions():
+            pytest.fail("the failing session factory must not yield")
+
+    with pytest.raises(RuntimeError, match="synthetic session failure"):
+        async with bounded_sessions():
+            pytest.fail("capacity must be available for a second attempt")
 
 
 async def test_latest_expert_batches_use_one_sql_round_trip() -> None:

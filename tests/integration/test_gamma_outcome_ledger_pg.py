@@ -1092,6 +1092,7 @@ async def test_durable_reconciliation_and_settlement_lifecycle_are_attested_and_
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         reconciliation_response = await client.get(
             "/api/v1/resolution-reconciliation",
@@ -1158,6 +1159,7 @@ async def test_empirical_ops_empty_ledger_contract_is_explicit(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         reconciliation_response = await client.get("/api/v1/resolution-reconciliation")
         settlement_response = await client.get("/api/v1/settlement-cases")
@@ -1237,6 +1239,7 @@ async def test_exact_coverage_counts_only_attested_official_evidence(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/resolution-reconciliation")
 
@@ -1796,6 +1799,7 @@ async def test_prospective_validation_is_zero_backfill_and_gamma_sealed(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     pending_app.state.sessions = db_sessions
+    pending_app.state.read_sessions = pending_app.state.sessions
     async with AsyncClient(
         transport=ASGITransport(app=pending_app), base_url="http://test"
     ) as client:
@@ -1971,6 +1975,7 @@ async def test_prospective_validation_is_zero_backfill_and_gamma_sealed(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(
             "/api/v1/validation-ledger",

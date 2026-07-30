@@ -331,6 +331,7 @@ async def test_evidence_continuity_api_requires_reviewed_epoch_activation(
     )
     app = create_app(settings)
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     reason = "Freeze the first reviewed prospective evidence cohort"
 
     async with db_sessions.begin() as session:
@@ -557,6 +558,7 @@ async def test_evidence_continuity_api_uses_only_due_complete_scheduler_days(
         await _seed_manifest_requirements(session)
     setup_app = create_app(settings)
     setup_app.state.sessions = db_sessions
+    setup_app.state.read_sessions = setup_app.state.sessions
     setup_reason = "Activate the scheduler liveness integration cohort."
     async with AsyncClient(
         transport=ASGITransport(app=setup_app),
@@ -660,6 +662,7 @@ async def test_evidence_continuity_api_uses_only_due_complete_scheduler_days(
     monkeypatch.setattr(operator_api_module, "datetime", FrozenDateTime)
     app = create_app(settings)
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     headers = {"X-API-Key": "continuity-liveness-secret"}
     async with AsyncClient(
         transport=ASGITransport(app=app),
@@ -774,6 +777,7 @@ async def test_evidence_continuity_api_uses_only_due_complete_scheduler_days(
     )
     maintenance_app = create_app(maintenance_settings)
     maintenance_app.state.sessions = db_sessions
+    maintenance_app.state.read_sessions = maintenance_app.state.sessions
     async with AsyncClient(
         transport=ASGITransport(app=maintenance_app),
         base_url="http://test",

@@ -94,6 +94,7 @@ async def test_capacity_audit_persists_append_only_database_measurement(
         )
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/storage-capacity")
     assert response.status_code == 200

@@ -2904,6 +2904,7 @@ async def test_prospective_operator_reports_reset_with_predictive_lane_fork(
 
     app = create_app(Settings(_env_file=None, database_url=migrated_database_url))
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
 
     async def assert_formal_counts(expected: int) -> None:
         async with AsyncClient(

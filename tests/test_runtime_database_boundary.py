@@ -151,6 +151,13 @@ def test_runtime_database_defaults_preserve_long_worker_queries() -> None:
         "lock_timeout": "0ms",
         "idle_in_transaction_session_timeout": "0ms",
     }
+    assert _runtime_server_settings(settings, read_only=True) == {
+        "application_name": "stratus-runtime",
+        "statement_timeout": "0ms",
+        "lock_timeout": "0ms",
+        "idle_in_transaction_session_timeout": "0ms",
+        "default_transaction_read_only": "on",
+    }
 
 
 @pytest.mark.parametrize(
@@ -236,6 +243,20 @@ def test_runtime_engine_installs_server_side_timeout_settings(
         "connect",
         _assert_runtime_connection,
     )
+
+    captured.clear()
+    read_engine = create_engine(
+        settings,
+        pool_size=3,
+        max_overflow=0,
+        read_only=True,
+    )
+    assert read_engine is fake_engine
+    assert captured["pool_size"] == 3
+    assert captured["max_overflow"] == 0
+    assert captured["connect_args"]["server_settings"][
+        "default_transaction_read_only"
+    ] == "on"
 
 
 def test_migration_settings_remain_separate_from_runtime_timeouts(

@@ -177,6 +177,7 @@ async def test_venues_endpoint_exposes_isolated_controls(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/venues")
 

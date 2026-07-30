@@ -53,7 +53,7 @@ if (-not $validation.validated) {
     throw 'Load-gate validation contract did not report validated=true.'
 }
 if (
-    $validation.schema_version -ne 2 -or
+    $validation.schema_version -ne 3 -or
     $validation.gate -ne 'stratus_dashboard_http_load' -or
     -not $validation.http_subgate_only -or
     $null -ne $validation.http_passed -or
@@ -61,6 +61,24 @@ if (
     $null -ne $validation.production_gate_passed
 ) {
     throw 'Load-gate validation contract does not identify an HTTP-only subgate.'
+}
+if (
+    $validation.contamination_policy -notmatch 'fail on any foreign or in-flight' -or
+    $validation.telemetry_endpoint -ne 'api/v1/runtime-http-counters' -or
+    -not $validation.accepts_external_run_id
+) {
+    throw 'Load-gate validation contract does not reject foreign API traffic.'
+}
+$source = Get-Content -LiteralPath $scriptPath -Raw
+if (
+    $source -notmatch "\[string\]\`$_.path -like 'api/v1/\*'" -or
+    $source -notmatch '\$expectedTaggedRequests = \$apiRows\.Count \+ 1' -or
+    $source -notmatch '\$expectedTagged5xx = @\(\s*\$apiRows' -or
+    $source -notmatch '\$totalStarted -ne \$runStarted' -or
+    $source -notmatch '\$telemetryAfter\.active_requests -ne 1' -or
+    $source -notmatch 'Test-JsonResponseBody -Body \$body'
+) {
+    throw 'Load-gate telemetry or response-body reconciliation is incomplete.'
 }
 if ($validation.request_method -ne 'GET' -or $validation.mutation_requests -ne 0) {
     throw 'Load-gate validation contract is not read-only.'

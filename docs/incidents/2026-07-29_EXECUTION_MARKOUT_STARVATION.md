@@ -226,13 +226,14 @@ Acceptance requires all items in `docs/PRODUCTION_READINESS_CHECKLIST.md`, inclu
 | Milestone | Status | Evidence |
 |---|---|---|
 | Incident recorded and P0 scope frozen | documented | this record |
-| Corrective implementation | implemented, not deployed | composite scheduler, disjoint claims, immediate grace retry, durable overlap events, bounded liveness query |
-| Static/unit verification | passed | Ruff clean; strict mypy 173 modules; 880 tests passed, 3 skipped |
+| Corrective implementation | implemented, not deployed | composite scheduler; disjoint claims; DB-enforced 3-read/1-write API pools; exact-cadence HTTP/runtime/composite acceptance gate |
+| Current local verification | passed; clean PostgreSQL CI pending | Ruff clean; strict mypy 174 modules; 926 tests passed, 296 PostgreSQL-dependent tests skipped locally; all four PowerShell release contracts passed |
 | Clean PostgreSQL verification | passed | clean PostgreSQL 16 CI-equivalent: 1169 passed, 3 skipped in 1052.21s; Release x64 Cockpit build: 0 warnings/errors |
 | Predecessor incident reconciliation | passed | 2026-07-29 20:18:14Z; epoch 21 has 403/403 sealed obligations, zero open rows, zero projection/duplicate/premature-seal violations, zero LIVE |
-| Candidate image/build identity | staged attempt rejected | revision `09945edfd4920df8c6102503accfd24c36c000d6`; image `sha256:3d793e5b64788a37fd0d37635449bf1deeab3cfad4d152c172dd130433951cef`; not an accepted release |
+| Candidate image/build identity | two staged attempts rejected | first revision `09945edfd4920df8c6102503accfd24c36c000d6`, image `sha256:3d793e5b64788a37fd0d37635449bf1deeab3cfad4d152c172dd130433951cef`; second exact revision `7059993ed6b90dc0671b670ecd219c2de877465a`, image `sha256:9f9f253d73ff348f91d067ad6021e66fbab46249dfca4b14e18cb870ffc0426f`; neither is an accepted release |
 | Backup and restore proof | passed | marker-bound post-stop backup `stratus_20260729T203148Z_3241d8921b44_1.backup`; independent hashes and full isolated restore accepted |
-| Deployment under fail-closed controls | staged API load gate failed; stopped/drained | audited Polymarket-only stop succeeded 20:16:15Z; worker remained stopped; candidate API load gate failed and API was stopped cleanly at 22:39:44Z; Binance remains killed |
+| Schema migration | applied under fail-closed controls | database advanced from `20260728_0045` to `20260730_0046`; all three new indexes are valid and ready; no worker or PAPER execution was started |
+| Deployment under fail-closed controls | second staged API load gate failed; API stopped | both candidate attempts were rejected; API and worker are stopped; only PostgreSQL and backup services remain running; Binance remains killed |
 | Successor continuity plan/epoch | pending | pending plan, hashes, and DB timestamp |
 | PAPER canary | pending | pending canary record |
 | Incident closure | pending | requires every acceptance item |
@@ -339,3 +340,117 @@ sessions and severe database/API CPU demand. It is evidence for rejection, not a
 Successor-epoch activation and PAPER canary remain blocked while query shape, refresh cadence,
 transaction lifetime, and database resource budgets are remediated and a new exact candidate
 passes the gate.
+
+### Compose migration staging incident and schema 0046
+
+During preparation of the next exact candidate, the command used to create the one-shot Compose
+`migrate` service omitted `--no-deps`. Compose therefore attempted to recreate its PostgreSQL
+dependency and stopped the running database even though the intended operation was only to stage
+the migration container. Migration DDL had not started. PostgreSQL was recovered, and the
+fail-closed runtime state and immutable evidence were reverified before any migration work
+continued.
+
+The operational rule is now explicit: stage the migration service with
+`docker compose up --no-start --no-deps`, together with the reviewed exact image and the other
+no-build/no-pull controls. Installed Compose v2.38 cannot combine `compose create` with
+`--no-deps`, so `compose create` is prohibited for this cutover. Dependency recreation is not an
+acceptable side effect of migration staging.
+
+After recovery, the exact candidate migration from `20260728_0045` to `20260730_0046` completed
+successfully. PostgreSQL reports all three new indexes as valid and ready:
+
+- `ix_accuracy_predictions_eligible_expert_ts`;
+- `ix_accuracy_predictions_eligible_expert_version_market_ts`; and
+- `ix_model_skill_window_evaluated`.
+
+This accepted schema migration does not accept an application candidate, activate a successor
+evidence epoch, resume PAPER, or authorize LIVE.
+
+### Second rejected exact-candidate load gate
+
+The next bounded staging attempt used exact revision
+`7059993ed6b90dc0671b670ecd219c2de877465a`, tag
+`stratus:candidate-7059993ed6b9`, and image
+`sha256:9f9f253d73ff348f91d067ad6021e66fbab46249dfca4b14e18cb870ffc0426f`.
+Its CI passed, but the runtime load gate did not.
+
+The synthetic HTTP harness issued 339 requests: 338 were accepted and one failed. The failure was
+the cold `accuracy_overview` request, which returned HTTP 500 after 6.46 ms. The simultaneous
+runtime observation captured 66 samples, with maximums of four application sessions and three
+`idle in transaction` sessions. Five of the 66 samples contained `idle in transaction` activity.
+There were no lock waiters, and CPU, memory, restart, OOM, schema, kill-switch, and zero-LIVE
+invariants remained within their safety boundaries. The gate failed on transaction hygiene, not
+resource exhaustion in PostgreSQL.
+
+The HTTP test was also contaminated by a stale running Cockpit binary. That binary was not the
+current bounded client and continued to fan out its full set of approximately 23 API endpoints
+every ten seconds. API access evidence recorded 1,062 GET requests during a harness that issued
+only 339. The additional traffic produced many HTTP 500 responses and makes the mixed request
+population unsuitable as acceptance evidence.
+
+The cold `accuracy_overview` failure had a specific propagation path: pool exhaustion caused the
+shared cached analytics task to fail, and the synthetic harness then joined that already-failed
+cache task. Independently of the stale-client contamination, ordinary multi-query read sessions
+kept transactions open between statements and were observed as `idle in transaction`. Removing
+the foreign Cockpit traffic alone would therefore not have made the candidate acceptable.
+
+The API was stopped after evidence capture. The worker was never started, epoch 21 remained
+active, no successor epoch was activated, and Polymarket PAPER was not resumed. The JSON evidence
+is retained locally at:
+
+- `.stratus-cache/load-gates/7059993ed6b9-dashboard.json`; and
+- `.stratus-cache/load-gates/7059993ed6b9-runtime.json`.
+
+### Load-gate corrective design
+
+The successor implementation separates short write transactions from bounded, statement-scoped
+read work:
+
+- operator reads use a physically separate three-connection AUTOCOMMIT pool, so a multi-query
+  response cannot sit `idle in transaction` between statements;
+- PostgreSQL enforces `default_transaction_read_only=on` on every read-pool connection, while a
+  separate one-connection write pool remains available for audited control mutations; the
+  application guard additionally rejects ORM/text DML and mutating CTEs;
+- the HTTP API independently bounds concurrent GET processing to three requests;
+- read-capacity and pool-timeout failures are retryable HTTP 503 responses with `Retry-After`,
+  rather than unclassified HTTP 500 responses;
+- a shared cached analytics task retains its read-capacity permit for the task's real lifetime,
+  even if an awaiting request is cancelled, and releases capacity on success or failure;
+- every synthetic load run carries a strict run identifier in
+  `X-Stratus-Load-Gate-Run`, while in-process global and per-run counters reconcile request
+  starts, completions, active requests, and 5xx responses, including traffic with another valid
+  run ID;
+- any foreign API request, counter mismatch, timeout, error, `idle in transaction` sample, lock
+  waiter, identity drift, or safety-invariant drift rejects the gate; and
+- the committed, non-relaxable runtime observer samples PostgreSQL every second and container
+  resources every five seconds for 390 seconds, then verifies a five-second post-load drain,
+  publishes a safe first-sample marker, and verifies exact image identity, zero Compose or
+  host/external runtime writers, raw sample density, controls, and zero-LIVE state; and
+- a third composite assertion binds both artifacts by run ID, hashes, full time overlap, and exact
+  candidate/loopback identity; it independently reconciles every raw request, exact 10/60/300
+  second cadence, every database/resource sample, thresholds, summary, and drain before the
+  production load gate can pass.
+
+The stale Cockpit must be stopped for the synthetic gate, and the current Cockpit must be rebuilt
+before later end-to-end validation. A replacement exact candidate must pass both the isolated HTTP
+gate and the simultaneous runtime observer before successor-epoch activation or any bounded
+Polymarket PAPER canary.
+
+### Current fail-closed safety state
+
+At the post-gate 2026-07-29 incident-record update:
+
+- only the PostgreSQL and backup Compose services are running;
+- API and worker are stopped;
+- the database is at Alembic revision `20260730_0046`;
+- global runtime is `paper + kill=true`;
+- Polymarket is `enabled + paper + kill=true`;
+- Binance is `enabled + backtest + kill=true`;
+- pending operator commands are zero;
+- LIVE orders, positions, execution intents, fill legs, and prospective enrollments are all zero;
+  and
+- epoch 21 remains active.
+
+This is a safe maintenance state, not production acceptance. LIVE remains prohibited, Binance's
+kill switch must remain engaged, and Polymarket PAPER may resume only after the replacement exact
+candidate passes the release/load gates and the reviewed successor evidence epoch is activated.

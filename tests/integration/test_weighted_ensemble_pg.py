@@ -240,6 +240,7 @@ async def test_weighted_ensemble_writes_only_shadow_predictions(
 
     app = create_app(settings)
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/accuracy-overview")
     assert response.status_code == 200, response.text

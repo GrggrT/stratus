@@ -75,6 +75,8 @@ edge is positive. `P6 blocked` and `P7 blocked` are intentional fail-closed stat
 | Now | Close the 2026-07-29 execution-markout starvation incident | none | `docs/PRODUCTION_READINESS_CHECKLIST.md` fully evidenced |
 | Now | Freeze, build, and stage the exact candidate while both venue kill switches remain engaged | verified source + restore | clean commit, green CI, immutable image digest, staged identity |
 | Next | Replace heartbeat-only detection with durable execution-obligation SLO metrics and alerts | P0 code | oldest-due/finalizable/late-pickup metrics, tests, operator surface |
+| Completed | Replace the application-only API read lane with a separate PostgreSQL-enforced read pool | P0 load acceptance | physically separate 3-read/1-write pools; `default_transaction_read_only=on`; application DML/CTE guard; integration proof |
+| Next | Give the read pool a dedicated least-privilege database credential | P1 security review | separate login; SELECT-only grants; mutable-function EXECUTE review/revoke; credential rotation and rollback drill |
 | Completed | Prove the current backup by isolated restore and retain a hash-bound release artifact | P0 candidate | marker-bound archive, independent hashes, PostgreSQL 16.13 full restore, ACL/runtime and ledger reconciliation |
 | Runtime acceptance | Bound Cockpit/API refresh cost and cancel superseded refreshes — implementation complete, acceptance pending | P0 candidate API | tiered/coalesced refresh, bounded indexed queries, database timeouts, and a passing production-size load test on a new exact candidate |
 | Next | Automate disaster-recovery role/database-ACL bootstrap | verified restore drill | marker-bound restore command, role provenance, PUBLIC TEMP revoke, restricted-login assertion |
@@ -123,13 +125,13 @@ must include bounded endpoint/load verification before PAPER resume.
 The Cockpit/API bounding work is implemented in source: core reads remain on the 10-second tier,
 evidence/execution reads move to 60 seconds, diagnostics move to 5 minutes, superseded refreshes
 are cancelled/coalesced, database statements and transaction lifetimes are bounded, and the
-accuracy overview has purpose-built indexes under source head `20260730_0046`. That migration is
-index-only and follows the still-current pre-cutover production head `20260728_0045`.
+accuracy overview has purpose-built indexes under source head `20260730_0046`. That index-only
+migration was applied while every application writer was stopped; the database is now at `0046`.
 
 Runtime acceptance remains pending. The first staged gate on revision `09945edfd492` failed with
 13 observed `idle in transaction` sessions and peak PostgreSQL CPU of `308.43%`; the candidate was
 stopped and not accepted. The implemented remediation must pass a new exact-candidate load gate
-after the controlled `0045 -> 0046` migration before epoch activation or PAPER resume.
+against the already migrated `0046` database before epoch activation or PAPER resume.
 
 ## Definition of quality
 
@@ -187,7 +189,7 @@ the lane manifest is
 and the immutable epoch record is
 `c12fa85a9b3e6598700d5fc31d0ae40c24cabb85b2e67dbd369a1112784734ac`.
 
-Revision `20260728_0045` is the production schema head. It preserves the 8-decimal source
+Revision `20260728_0045` was the predecessor production schema head. It preserves the 8-decimal source
 close probability while requiring the stored 6-decimal evaluation value to equal the explicitly
 rounded source value. The predictive boundary was opened once in epoch 20 for this material
 evaluation change; epoch 21 continues that exact predictive identity.

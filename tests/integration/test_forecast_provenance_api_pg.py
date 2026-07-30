@@ -34,6 +34,7 @@ async def test_forecast_provenance_endpoint_reports_zero_backfill_then_live_inge
     settings = Settings(database_url=migrated_database_url, operator_api_key=None)
     app = create_app(settings)
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:

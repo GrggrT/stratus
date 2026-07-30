@@ -13,6 +13,9 @@ param(
     [ValidateRange(1, 3)]
     [int] $MaxConcurrentGet = 3,
 
+    [ValidatePattern('^[0-9a-fA-F]{32}$')]
+    [string] $LoadGateRunId,
+
     [string] $OutputPath,
 
     [switch] $ValidateOnly
@@ -216,6 +219,64 @@ function Test-ReadyHttpResponse {
     )
 }
 
+
+function Test-JsonResponseBody {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Body
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Body)) {
+        return $false
+    }
+    try {
+        return $null -ne ($Body | ConvertFrom-Json)
+    }
+    catch {
+        return $false
+    }
+}
+
+
+function Get-HttpTelemetrySnapshot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Net.Http.HttpClient] $Client,
+
+        [Parameter(Mandatory = $true)]
+        [string] $RunId,
+
+        [Parameter(Mandatory = $true)]
+        [int] $RequestTimeoutSeconds
+    )
+
+    $cancellation = [Threading.CancellationTokenSource]::new()
+    $response = $null
+    try {
+        $cancellation.CancelAfter([TimeSpan]::FromSeconds($RequestTimeoutSeconds))
+        $response = $Client.GetAsync(
+            'api/v1/runtime-http-counters',
+            $cancellation.Token
+        ).GetAwaiter().GetResult()
+        if (-not $response.IsSuccessStatusCode) {
+            throw "Runtime HTTP counters returned status $([int]$response.StatusCode)."
+        }
+        $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        $snapshot = $body | ConvertFrom-Json
+        if ([string]$snapshot.run_id -ne $RunId) {
+            throw 'Runtime HTTP counters returned a different load-gate run ID.'
+        }
+        return $snapshot
+    }
+    finally {
+        if ($null -ne $response) {
+            $response.Dispose()
+        }
+        $cancellation.Dispose()
+    }
+}
+
+
 function New-RequestResult {
     param(
         [Parameter(Mandatory = $true)]
@@ -374,8 +435,26 @@ function Complete-GetRequest {
                 }
             }
         }
+        elseif ($Item.Endpoint.Name -eq 'healthz') {
+            if (
+                $statusCode -ge 200 -and
+                $statusCode -lt 300 -and
+                (Test-JsonResponseBody -Body $body) -and
+                [string](($body | ConvertFrom-Json).status) -eq 'ok'
+            ) {
+                $accepted = $true
+            }
+            else {
+                $errorMessage = 'healthz did not return the expected JSON liveness contract'
+            }
+        }
         elseif ($statusCode -ge 200 -and $statusCode -lt 300) {
-            $accepted = $true
+            if (Test-JsonResponseBody -Body $body) {
+                $accepted = $true
+            }
+            else {
+                $errorMessage = 'successful response body is not valid JSON'
+            }
         }
         else {
             $errorMessage = "unexpected HTTP status $statusCode"
@@ -570,7 +649,7 @@ function Write-ResultJson {
 }
 
 $validation = [pscustomobject]@{
-    schema_version = 2
+    schema_version = 3
     gate = 'stratus_dashboard_http_load'
     validated = $true
     http_subgate_only = $true
@@ -579,6 +658,9 @@ $validation = [pscustomobject]@{
     production_gate_passed = $null
     request_method = 'GET'
     mutation_requests = 0
+    contamination_policy = 'fail on any foreign or in-flight /api/v1 request or telemetry mismatch'
+    telemetry_endpoint = 'api/v1/runtime-http-counters'
+    accepts_external_run_id = $true
     base_uri_restricted_to_loopback = $true
     cold_refresh = [pscustomobject]@{
         core_requests = $CoreEndpoints.Count
@@ -604,10 +686,21 @@ if ($ValidateOnly) {
 }
 
 $startedAt = [DateTimeOffset]::UtcNow
+$runId = if ([string]::IsNullOrWhiteSpace($LoadGateRunId)) {
+    [guid]::NewGuid().ToString('N')
+}
+else {
+    $LoadGateRunId.ToLowerInvariant()
+}
 $allResults = [Collections.Generic.List[object]]::new()
 $httpClient = $null
 $handler = $null
 $exitCode = 2
+if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+    $staleOutput = [IO.Path]::GetFullPath($OutputPath)
+    Remove-Item -LiteralPath $staleOutput -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$staleOutput.tmp" -Force -ErrorAction SilentlyContinue
+}
 try {
     Assert-BaseUri -Uri $BaseUri
     $handler = [Net.Http.HttpClientHandler]::new()
@@ -620,6 +713,10 @@ try {
     [void]$httpClient.DefaultRequestHeaders.TryAddWithoutValidation(
         'User-Agent',
         'STRATUS-Dashboard-Load-Gate/1'
+    )
+    [void]$httpClient.DefaultRequestHeaders.TryAddWithoutValidation(
+        'X-Stratus-Load-Gate-Run',
+        $runId
     )
 
     $plainApiKey = if ($null -ne $ApiKey) {
@@ -635,6 +732,10 @@ try {
         )
     }
     $plainApiKey = $null
+    $telemetryBefore = Get-HttpTelemetrySnapshot `
+        -Client $httpClient `
+        -RunId $runId `
+        -RequestTimeoutSeconds $TimeoutSeconds
 
     $iteration = 1
     Invoke-EndpointTier `
@@ -737,13 +838,95 @@ try {
     }
     $steadyClock.Stop()
 
+    $telemetryAfter = Get-HttpTelemetrySnapshot `
+        -Client $httpClient `
+        -RunId $runId `
+        -RequestTimeoutSeconds $TimeoutSeconds
     $rows = @($allResults)
     $failures = @($rows | Where-Object { -not $_.accepted })
-    $exitCode = if ($failures.Count -eq 0) { 0 } else { 1 }
+    $runStarted = (
+        [int]$telemetryAfter.run_started -
+        [int]$telemetryBefore.run_started
+    )
+    $runCompleted = (
+        [int]$telemetryAfter.run_completed -
+        [int]$telemetryBefore.run_completed
+    )
+    $runAborted = (
+        [int]$telemetryAfter.run_aborted -
+        [int]$telemetryBefore.run_aborted
+    )
+    $run5xx = (
+        [int]$telemetryAfter.run_5xx -
+        [int]$telemetryBefore.run_5xx
+    )
+    $totalStarted = (
+        [int]$telemetryAfter.total_started -
+        [int]$telemetryBefore.total_started
+    )
+    $totalCompleted = (
+        [int]$telemetryAfter.total_completed -
+        [int]$telemetryBefore.total_completed
+    )
+    $totalAborted = (
+        [int]$telemetryAfter.total_aborted -
+        [int]$telemetryBefore.total_aborted
+    )
+    $total5xx = (
+        [int]$telemetryAfter.total_5xx -
+        [int]$telemetryBefore.total_5xx
+    )
+    $foreignStarted = $totalStarted - $runStarted
+    $foreignCompleted = $totalCompleted - $runCompleted
+    $foreign5xx = $total5xx - $run5xx
+    $untaggedStarted = (
+        [int]$telemetryAfter.untagged_api_started -
+        [int]$telemetryBefore.untagged_api_started
+    )
+    $untaggedCompleted = (
+        [int]$telemetryAfter.untagged_api_completed -
+        [int]$telemetryBefore.untagged_api_completed
+    )
+    # Runtime telemetry intentionally covers only /api/v1. Health liveness and
+    # fail-closed readiness are validated by their response contracts above,
+    # but they must not be included in the API-counter reconciliation.
+    # The baseline telemetry response is recorded after its response body was
+    # captured. The closing telemetry response is recorded after this snapshot.
+    $apiRows = @(
+        $rows | Where-Object { [string]$_.path -like 'api/v1/*' }
+    )
+    $expectedTaggedRequests = $apiRows.Count + 1
+    $expectedTagged5xx = @(
+        $apiRows | Where-Object {
+            $null -ne $_.status_code -and [int]$_.status_code -ge 500
+        }
+    ).Count
+    $telemetryMismatch = (
+        $runStarted -ne $expectedTaggedRequests -or
+        $runCompleted -ne $expectedTaggedRequests -or
+        $runAborted -ne 0 -or
+        $run5xx -ne $expectedTagged5xx -or
+        $totalStarted -ne $runStarted -or
+        $totalCompleted -ne $runCompleted -or
+        $totalAborted -ne 0 -or
+        $total5xx -ne $run5xx -or
+        [int]$telemetryBefore.active_requests -ne 1 -or
+        [int]$telemetryAfter.active_requests -ne 1
+    )
+    $contaminated = (
+        $foreignStarted -ne 0 -or
+        $foreignCompleted -ne 0 -or
+        $foreign5xx -ne 0 -or
+        $untaggedStarted -ne 0 -or
+        $untaggedCompleted -ne 0 -or
+        $telemetryMismatch
+    )
+    $exitCode = if ($failures.Count -eq 0 -and -not $contaminated) { 0 } else { 1 }
     $result = [pscustomobject]@{
-        schema_version = 2
+        schema_version = 3
         gate = 'stratus_dashboard_http_load'
         http_passed = $exitCode -eq 0
+        contaminated = $contaminated
         requires_external_runtime_observation = $true
         production_gate_passed = $null
         exit_code = $exitCode
@@ -752,6 +935,27 @@ try {
         base_uri = $BaseUri.GetLeftPart([UriPartial]::Authority)
         request_method = 'GET'
         mutation_requests = 0
+        load_gate_run_id = $runId
+        telemetry = [pscustomobject]@{
+            foreign_started = $foreignStarted
+            foreign_completed = $foreignCompleted
+            foreign_5xx = $foreign5xx
+            untagged_started = $untaggedStarted
+            untagged_completed = $untaggedCompleted
+            run_started = $runStarted
+            run_completed = $runCompleted
+            run_aborted = $runAborted
+            expected_run_requests = $expectedTaggedRequests
+            run_5xx = $run5xx
+            expected_run_5xx = $expectedTagged5xx
+            total_started = $totalStarted
+            total_completed = $totalCompleted
+            total_aborted = $totalAborted
+            total_5xx = $total5xx
+            counter_mismatch = $telemetryMismatch
+            before = $telemetryBefore
+            after = $telemetryAfter
+        }
         configuration = [pscustomobject]@{
             cold_full_refreshes = 1
             steady_state_seconds = $SteadyStateSeconds
@@ -778,9 +982,10 @@ try {
 }
 catch {
     $fatalResult = [pscustomobject]@{
-        schema_version = 2
+        schema_version = 3
         gate = 'stratus_dashboard_http_load'
         http_passed = $false
+        contaminated = $null
         requires_external_runtime_observation = $true
         production_gate_passed = $null
         exit_code = 2
@@ -794,6 +999,7 @@ catch {
         }
         request_method = 'GET'
         mutation_requests = 0
+        load_gate_run_id = $runId
         fatal_error = $_.Exception.GetBaseException().Message
         requests = @($allResults)
     }

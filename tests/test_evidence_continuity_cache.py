@@ -66,6 +66,7 @@ async def test_evidence_continuity_read_gate_is_non_authoritative(
     monkeypatch.setattr(operator_api, "probability_release_gate", fake_gate)
     app = create_app(Settings())
     app.state.sessions = _FakeSessions()
+    app.state.read_sessions = app.state.sessions
 
     with pytest.raises(ReadStopped):
         await operator_api._uncached_evidence_continuity_response(_request(app))
@@ -135,6 +136,7 @@ async def test_successful_activation_invalidates_the_app_response_cache(
 ) -> None:
     app = create_app(Settings(release_image_digest="1" * 64))
     app.state.sessions = _FakeSessions()
+    app.state.read_sessions = app.state.sessions
     request = _request(app)
     cache = cast(
         EvidenceContinuityResponseCache,

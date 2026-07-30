@@ -48,6 +48,18 @@ jobs:
         shell: pwsh
         run: ./scripts/tests/Test-StratusDashboardLoadGate.ps1
 
+      - name: Validate read-only runtime load observer
+        shell: pwsh
+        run: ./scripts/tests/Test-StratusRuntimeLoadObserver.ps1
+
+      - name: Validate composite load-gate evidence assertion
+        shell: pwsh
+        run: ./scripts/tests/Test-StratusLoadGateArtifacts.ps1
+
+      - name: Validate release runbook commands
+        shell: pwsh
+        run: ./scripts/tests/Test-StratusReleaseRunbook.ps1
+
       - name: Test (unit + Postgres integration)
         env:
           STRATUS_TEST_DATABASE_URL: postgresql+asyncpg://stratus:stratus@localhost:5432/stratus_test

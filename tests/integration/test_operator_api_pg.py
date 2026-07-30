@@ -185,6 +185,7 @@ async def test_official_resolution_operator_workflow_is_source_derived(
         )
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     headers = {"X-API-Key": "secret-key"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         mismatched_window = await client.post(
@@ -333,6 +334,7 @@ async def test_accuracy_overview_excludes_legacy_unattested_evaluations(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     engine = db_sessions.kw["bind"]
     statement_count = 0
 
@@ -427,6 +429,7 @@ async def test_station_lifecycle_reports_stage_and_readiness(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/stations")
 
@@ -500,6 +503,7 @@ async def test_orders_endpoint_joins_order_signal_market_station(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/orders")
 
@@ -579,6 +583,7 @@ async def test_positions_endpoint_reports_mark_to_market(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/positions")
 
@@ -644,6 +649,7 @@ async def test_equity_endpoint_filters_by_mode(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         paper = await client.get("/api/v1/equity?mode=paper")
         live = await client.get("/api/v1/equity?mode=live")
@@ -728,6 +734,7 @@ async def test_market_drilldown_endpoints_return_series_and_fail_soft_orderbook(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         prices = await client.get(f"/api/v1/market-timeseries?market_id={market.id}")
         prospective_probability = await client.get(
@@ -811,6 +818,7 @@ async def test_live_equity_endpoint_returns_cumulative_series(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/live-equity")
 
@@ -865,6 +873,7 @@ async def test_performance_summary_endpoint_supports_paper_robust_metrics(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/performance-summary?mode=paper")
 
@@ -1008,6 +1017,7 @@ async def test_benchmark_reports_exclude_legacy_protocol_rows(
         Settings(database_url=migrated_database_url, operator_api_key=None)
     )
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/edge-report?mode=paper")
 

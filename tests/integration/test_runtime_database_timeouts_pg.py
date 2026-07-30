@@ -5,14 +5,20 @@ import os
 from time import perf_counter
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.config import Settings, runtime_database_role_name
-from stratus.db.session import create_engine
+from stratus.db.models import RuntimeControl
+from stratus.db.session import (
+    RuntimeReadCapacityError,
+    RuntimeReadOnlyError,
+    create_engine,
+    create_read_session_factory,
+)
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("STRATUS_TEST_DATABASE_URL"),
@@ -52,6 +58,12 @@ async def test_api_runtime_engine_enforces_postgres_time_and_pool_budgets(
         stratus_database_pool_timeout_seconds=0.25,
     )
     api_engine = create_engine(api_settings)
+    api_read_engine = create_engine(
+        api_settings,
+        pool_size=3,
+        max_overflow=0,
+        read_only=True,
+    )
     worker_engine = create_engine(
         Settings(
             _env_file=None,
@@ -84,6 +96,75 @@ async def test_api_runtime_engine_enforces_postgres_time_and_pool_budgets(
                 await connection.execute(text("SELECT pg_sleep(3)"))
             assert perf_counter() - started < 3.0
             await connection.rollback()
+
+        async with api_read_engine.connect() as connection:
+            assert (
+                await connection.scalar(
+                    text("SELECT current_setting('default_transaction_read_only')")
+                )
+            ) == "on"
+            with pytest.raises(DBAPIError, match="read-only transaction"):
+                await connection.execute(
+                    text(
+                        "UPDATE runtime_control "
+                        "SET kill_switch = false WHERE id = -1"
+                    )
+                )
+            await connection.rollback()
+
+        read_sessions = create_read_session_factory(api_read_engine)
+        async with read_sessions() as read_session:
+            assert await read_session.scalar(text("SELECT 1")) == 1
+            backend_pid = await read_session.scalar(select(func.pg_backend_pid()))
+            assert isinstance(backend_pid, int)
+            async with db_sessions() as observer:
+                backend_state = await observer.scalar(
+                    text("SELECT state FROM pg_stat_activity WHERE pid = :pid"),
+                    {"pid": backend_pid},
+                )
+            assert backend_state == "idle"
+            with pytest.raises(RuntimeReadOnlyError):
+                await read_session.execute(
+                    update(RuntimeControl).values(kill_switch=False)
+                )
+            with pytest.raises(RuntimeReadOnlyError):
+                await read_session.execute(
+                    text("UPDATE runtime_control SET kill_switch = false WHERE id = 1")
+                )
+            with pytest.raises(RuntimeReadOnlyError):
+                await read_session.execute(
+                    text(
+                        "EXPLAIN ANALYZE DELETE FROM runtime_control WHERE id = -1"
+                    )
+                )
+            attempted_delete = (
+                delete(RuntimeControl)
+                .where(RuntimeControl.id == -1)
+                .returning(RuntimeControl.id)
+                .cte("attempted_delete")
+            )
+            with pytest.raises(RuntimeReadOnlyError):
+                await read_session.execute(
+                    select(attempted_delete.c.id).add_cte(attempted_delete)
+                )
+
+        bounded_read_sessions = create_read_session_factory(
+            api_read_engine,
+            max_concurrent=3,
+            queue_timeout_seconds=0.05,
+        )
+        checked_out_reads = [bounded_read_sessions() for _ in range(3)]
+        try:
+            await asyncio.gather(
+                *(context.__aenter__() for context in checked_out_reads)
+            )
+            with pytest.raises(RuntimeReadCapacityError):
+                async with bounded_read_sessions():
+                    pytest.fail("the fourth read session must not acquire capacity")
+        finally:
+            await asyncio.gather(
+                *(context.__aexit__(None, None, None) for context in checked_out_reads)
+            )
 
         abandoned = await api_engine.connect()
         try:
@@ -119,6 +200,7 @@ async def test_api_runtime_engine_enforces_postgres_time_and_pool_budgets(
             ).one()
             assert worker_profile == ("stratus-worker-test", "0", "0", "0")
     finally:
+        await api_read_engine.dispose()
         await api_engine.dispose()
         await worker_engine.dispose()
         async with db_sessions.begin() as owner:

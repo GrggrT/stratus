@@ -277,6 +277,7 @@ async def test_point_in_time_run_and_exact_settlement_roundtrip(
     )
     app = create_app(settings)
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         preview = await client.post(
             "/api/v1/official-resolution-sources/license-policy-hash",

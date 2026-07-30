@@ -2,15 +2,17 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 from pytest import MonkeyPatch
+from starlette.requests import Request
 
 from stratus import operator_api
 from stratus.api import create_app
 from stratus.config import Settings
 from stratus.db.models import ExecutionMode
-from stratus.operator_api import _summary_response
+from stratus.operator_api import _sessions, _summary_response
 from stratus.operator_api import router as operator_router
 from stratus.repositories.execution_cost_reporting import (
     ExecutionCostMetrics,
@@ -58,6 +60,15 @@ def test_operator_monitoring_routes_are_registered() -> None:
     }
     assert mutations <= routes.keys()
     assert all(routes[path].methods == {"POST"} for path in mutations)
+
+
+def test_operator_reads_require_an_explicit_read_session_factory() -> None:
+    app = create_app(Settings(_env_file=None))
+    app.state.sessions = _fake_sessions
+    request = Request({"type": "http", "app": app})
+
+    with pytest.raises(RuntimeError, match="read-session factory"):
+        _sessions(request)
 
 
 def test_summary_keeps_history_but_uses_only_dual_benchmark_sample() -> None:
@@ -220,6 +231,7 @@ async def test_execution_cost_report_preserves_unknowns_and_mode(
     monkeypatch.setattr(operator_api, "load_execution_cost_report", fake_report)
     app = create_app(Settings(_env_file=None))
     app.state.sessions = _fake_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/execution-cost-report?mode=live")
 
@@ -247,6 +259,7 @@ async def test_execution_cost_report_preserves_unknowns_and_mode(
 async def test_execution_cost_report_requires_explicit_mode() -> None:
     app = create_app(Settings(_env_file=None))
     app.state.sessions = _fake_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/execution-cost-report")
 
@@ -309,6 +322,7 @@ async def test_execution_cost_order_drilldown_forwards_explicit_filters(
     monkeypatch.setattr(operator_api, "load_execution_cost_orders", fake_orders)
     app = create_app(Settings(_env_file=None))
     app.state.sessions = _fake_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(
             "/api/v1/execution-cost-report/orders"

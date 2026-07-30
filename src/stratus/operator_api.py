@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from time import monotonic
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -252,6 +253,10 @@ _PROSPECTIVE_SAMPLE_SCOPE = "prospective"
 _HISTORICAL_SAMPLE_SCOPE = "historical"
 _ALL_PROTOCOL_HISTORY_SCOPE = "all-protocol-history"
 SessionFactory = async_sessionmaker[AsyncSession]
+
+
+class ReadSessionFactory(Protocol):
+    def __call__(self) -> AbstractAsyncContextManager[AsyncSession]: ...
 
 
 def require_configured_operator_key(request: Request) -> None:
@@ -1768,12 +1773,19 @@ class AccuracyOverviewResponseCache:
                 or (task.done() and self._clock() >= self._failure_expires_at)
             ):
                 task = asyncio.create_task(self._populate(factory))
+                task.add_done_callback(self._consume_task_result)
                 self._inflight = task
 
         # The computation belongs to the application cache, not to any one
         # HTTP request. Cancelling a disconnected follower must not cancel the
         # shared SQL work for all remaining waiters.
         return await asyncio.shield(task)
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Task[AccuracyOverviewResponse]) -> None:
+        """Retrieve detached failures without changing later await semantics."""
+        if not task.cancelled():
+            task.exception()
 
     async def _populate(
         self,
@@ -1797,6 +1809,19 @@ class AccuracyOverviewResponseCache:
                 self._inflight = None
                 self._failure_expires_at = 0.0
         return response
+
+    async def shutdown(self) -> None:
+        """Cancel and drain the application-owned computation before DB disposal."""
+        async with self._lock:
+            task = self._inflight
+            self._inflight = None
+            self._response = None
+            self._expires_at = 0.0
+            self._failure_expires_at = 0.0
+            if task is not None and not task.done():
+                task.cancel()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
 
     def invalidate(self) -> None:
         self._response = None
@@ -2022,7 +2047,14 @@ class StackChallengerItem(BaseModel):
     applied: bool
 
 
-def _sessions(request: Request) -> SessionFactory:
+def _sessions(request: Request) -> ReadSessionFactory:
+    read_sessions = getattr(request.app.state, "read_sessions", None)
+    if read_sessions is None:
+        raise RuntimeError("operator read-session factory is not initialized")
+    return cast(ReadSessionFactory, read_sessions)
+
+
+def _write_sessions(request: Request) -> SessionFactory:
     return cast(SessionFactory, request.app.state.sessions)
 
 
@@ -3162,7 +3194,7 @@ async def acknowledge_alerts_through(
     request: Request,
     body: AlertAckThroughRequest,
 ) -> AlertAcknowledgementResponse:
-    async with _sessions(request).begin() as session:
+    async with _write_sessions(request).begin() as session:
         acknowledged = await acknowledge_deliveries_through(
             session,
             body.through_id,
@@ -3184,7 +3216,7 @@ async def acknowledge_alert(
 ) -> AlertAcknowledgementResponse:
     if delivery_id < 1:
         raise HTTPException(status_code=422, detail="delivery id must be positive")
-    async with _sessions(request).begin() as session:
+    async with _write_sessions(request).begin() as session:
         acknowledged = await acknowledge_delivery(session, delivery_id)
     if not acknowledged:
         raise HTTPException(status_code=404, detail="alert not found")
@@ -3201,7 +3233,7 @@ async def submit_command(request: Request, body: CommandRequest) -> CommandAccep
     error = validate_command(body.command, body.payload)
     if error is not None:
         raise HTTPException(status_code=422, detail=error)
-    async with _sessions(request).begin() as session:
+    async with _write_sessions(request).begin() as session:
         row, created = await enqueue_command(
             session,
             request_id=body.request_id,
@@ -3303,7 +3335,7 @@ async def official_resolution_license_attestation(
     body: OfficialResolutionLicenseAttestationRequest,
 ) -> OfficialResolutionLicenseAttestationResponse:
     try:
-        async with _sessions(request).begin() as session:
+        async with _write_sessions(request).begin() as session:
             contract = await _active_resolution_contract(
                 session,
                 contract_id=body.contract_id,
@@ -3354,7 +3386,7 @@ async def import_official_resolution_source(
     settings = _settings(request)
     now = datetime.now(UTC)
     try:
-        async with _sessions(request).begin() as session:
+        async with _write_sessions(request).begin() as session:
             contract = await _active_resolution_contract(
                 session,
                 contract_id=body.contract_id,
@@ -5645,7 +5677,7 @@ async def evidence_continuity_release_plan(
 ) -> EvidenceReleasePlanResponse:
     settings = _settings(request)
     try:
-        async with _sessions(request).begin() as session:
+        async with _write_sessions(request).begin() as session:
             plan, active, active_plan, candidate = await _evidence_release_plan(
                 session,
                 settings,
@@ -5705,7 +5737,7 @@ async def activate_evidence_continuity_release(
 ) -> EvidenceReleaseActivationResponse:
     settings = _settings(request)
     try:
-        async with _sessions(request).begin() as session:
+        async with _write_sessions(request).begin() as session:
             plan, active, active_plan, candidate = await _evidence_release_plan(
                 session,
                 settings,

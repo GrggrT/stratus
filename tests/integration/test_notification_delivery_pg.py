@@ -329,6 +329,7 @@ async def test_operator_alert_inbox_and_bounded_acknowledgement(
     )
     app = create_app(settings)
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     headers = {"X-API-Key": "notification-api-test-key"}
 
     async with AsyncClient(

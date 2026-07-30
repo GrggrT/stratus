@@ -320,6 +320,7 @@ async def test_trajectory_challenger_is_persisted_but_fail_closed(
 
     app = create_app(settings)
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/accuracy-overview")
 
@@ -690,6 +691,7 @@ async def test_conformal_guardrail_is_fitted_but_shadow_only(
 
     app = create_app(settings)
     app.state.sessions = db_sessions
+    app.state.read_sessions = app.state.sessions
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/accuracy-overview")
 
