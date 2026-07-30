@@ -6,9 +6,10 @@ import json
 import logging
 import math
 from collections import defaultdict
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from multiprocessing import get_context
 from typing import Any
 
@@ -57,9 +58,9 @@ from stratus.services.temperature_ensemble import (
 
 logger = logging.getLogger(__name__)
 EXPERT = "historical_weighted"
-EXPERT_VERSION = "convex-affine-temperature-canonical-exact-sealed-v4"
+EXPERT_VERSION = "convex-affine-temperature-canonical-exact-sealed-v5"
 SHRUNK_EXPERT = "historical_weighted_shrunk"
-SHRUNK_EXPERT_VERSION = "convex-affine-empirical-shrink25-canonical-exact-sealed-v4"
+SHRUNK_EXPERT_VERSION = "convex-affine-empirical-shrink25-canonical-exact-sealed-v5"
 SHRUNK_EMPIRICAL_WEIGHT = 0.25
 MODELS = ("ecmwf", "gfs", "icon", "gem")
 PRIOR_WEIGHTS = {"ecmwf": 0.35, "gfs": 0.40, "icon": 0.15, "gem": 0.10}
@@ -72,6 +73,8 @@ MAX_BASELINE_AGE = timedelta(minutes=5)
 BUCKET_ORDER = ("0-6h", "6-24h", "24-48h", "48h+")
 HORIZON_ANCHORS = {"0-6h": 3.0, "6-24h": 12.0, "24-48h": 36.0, "48h+": 72.0}
 BASELINE_TOTAL_TOLERANCE = Decimal("0.01")
+PROBABILITY_QUANTUM = Decimal("0.000001")
+PROBABILITY_UNITS = 1_000_000
 
 HistoricalRow = tuple[HistoricalForecast, Decimal]
 CurrentRow = tuple[ModelProb, Market]
@@ -85,6 +88,64 @@ def _baseline_total_is_valid(total: float) -> bool:
         and total > 0
         and abs(Decimal(str(total)) - Decimal("1")) <= BASELINE_TOTAL_TOLERANCE
     )
+
+
+def _quantize_probability_partition(
+    values: Sequence[tuple[int, Decimal | float]],
+) -> dict[int, Decimal]:
+    """Normalize an event partition to an exact six-decimal simplex.
+
+    Independent half-even quantization can lose or gain a few millionths.
+    Hamilton apportionment floors every bucket and assigns the remaining
+    millionth units by descending fractional remainder.  The market ID is the
+    stable tie-breaker, so output is independent of query/input ordering.
+    """
+
+    if not values:
+        raise ValueError("probability partition is empty")
+
+    ordered: list[tuple[int, Decimal]] = []
+    seen_market_ids: set[int] = set()
+    for market_id, raw_value in sorted(values, key=lambda item: item[0]):
+        if market_id in seen_market_ids:
+            raise ValueError(f"duplicate market ID in probability partition: {market_id}")
+        seen_market_ids.add(market_id)
+        value = raw_value if isinstance(raw_value, Decimal) else Decimal(str(raw_value))
+        if not value.is_finite() or value < 0:
+            raise ValueError("probability partition contains an invalid value")
+        ordered.append((market_id, value))
+
+    total = sum((value for _market_id, value in ordered), start=Decimal("0"))
+    if total <= 0:
+        raise ValueError("probability partition has no positive mass")
+
+    floors: dict[int, int] = {}
+    remainders: list[tuple[Decimal, int]] = []
+    for market_id, value in ordered:
+        exact_units = value / total * PROBABILITY_UNITS
+        floor_units = int(exact_units.to_integral_value(rounding=ROUND_FLOOR))
+        floors[market_id] = floor_units
+        remainders.append((exact_units - floor_units, market_id))
+
+    remaining_units = PROBABILITY_UNITS - sum(floors.values())
+    if not 0 <= remaining_units <= len(ordered):
+        raise ArithmeticError("probability apportionment escaped its unit budget")
+    for _remainder, market_id in sorted(
+        remainders,
+        key=lambda item: (-item[0], item[1]),
+    )[:remaining_units]:
+        floors[market_id] += 1
+
+    result = {
+        market_id: (Decimal(floors[market_id]) * PROBABILITY_QUANTUM)
+        for market_id, _value in ordered
+    }
+    if (
+        sum(result.values(), start=Decimal("0")) != Decimal("1.000000")
+        or any(value < 0 or value > 1 for value in result.values())
+    ):
+        raise ArithmeticError("quantized probability partition is not a simplex")
+    return result
 
 
 def _historical_training_statement(
@@ -692,21 +753,33 @@ def _prediction_values(
                 },
             }
         )
+        candidate_partition = _quantize_probability_partition(
+            [(row[1].id, row[2]) for row in event_rows]
+        )
+        baseline_partition = _quantize_probability_partition(
+            [(row[1].id, row[0].prob) for row in event_rows]
+        )
+        shrunk_raw = [
+            (
+                row[1].id,
+                (1 - SHRUNK_EMPIRICAL_WEIGHT)
+                * (float(row[0].prob) / baseline_total)
+                + SHRUNK_EMPIRICAL_WEIGHT * (row[3] / empirical_total),
+            )
+            for row in event_rows
+        ]
+        shrunk_partition = _quantize_probability_partition(shrunk_raw)
         for (
             model_prob,
             market,
-            probability,
+            _probability,
             empirical_probability,
             mean_c,
             sigma_c,
             details,
         ) in event_rows:
-            normalized = probability / total
             normalized_empirical = empirical_probability / empirical_total
-            normalized_baseline = float(model_prob.prob) / baseline_total
-            shrunk_probability = (
-                1 - SHRUNK_EMPIRICAL_WEIGHT
-            ) * normalized_baseline + SHRUNK_EMPIRICAL_WEIGHT * normalized_empirical
+            normalized_baseline = baseline_partition[market.id]
             sealed_details = {
                 **details,
                 "baseline_probability": float(model_prob.prob),
@@ -714,7 +787,7 @@ def _prediction_values(
                 # score event distributions against a normalized baseline.
                 # Decimal quantization can otherwise make an otherwise complete
                 # event sum to 1.0015 and silently discard prospective evidence.
-                "normalized_baseline_probability": normalized_baseline,
+                "normalized_baseline_probability": float(normalized_baseline),
                 "bucket_input_hash": details["input_hash"],
                 "input_hash": event_input_hash,
                 "event_cohort": {
@@ -735,7 +808,7 @@ def _prediction_values(
                     ts=model_prob.ts,
                     expert=EXPERT,
                     expert_version=EXPERT_VERSION,
-                    probability=Decimal(str(normalized)).quantize(Decimal("0.000001")),
+                    probability=candidate_partition[market.id],
                     mean_c=Decimal(str(mean_c)).quantize(Decimal("0.0001")),
                     sigma_c=Decimal(str(sigma_c)).quantize(Decimal("0.0001")),
                     training_sample_n=int(details.get("training_samples", 0)),
@@ -758,7 +831,7 @@ def _prediction_values(
                     ts=model_prob.ts,
                     expert=SHRUNK_EXPERT,
                     expert_version=SHRUNK_EXPERT_VERSION,
-                    probability=Decimal(str(shrunk_probability)).quantize(Decimal("0.000001")),
+                    probability=shrunk_partition[market.id],
                     mean_c=Decimal(str(mean_c)).quantize(Decimal("0.0001")),
                     sigma_c=Decimal(str(sigma_c)).quantize(Decimal("0.0001")),
                     training_sample_n=int(details.get("training_samples", 0)),

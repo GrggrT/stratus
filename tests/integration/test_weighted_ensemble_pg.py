@@ -166,6 +166,20 @@ async def test_weighted_ensemble_writes_only_shadow_predictions(
 
     settings = Settings(database_url=migrated_database_url, operator_api_key=None)
     assert await generate_weighted_ensemble(settings, db_sessions) == 6
+    async with db_sessions() as session:
+        first_record_hashes = dict(
+            (
+                (
+                    row.market_id,
+                    row.expert,
+                    row.expert_version,
+                ),
+                row.record_hash,
+            )
+            for row in (
+                await session.execute(select(AccuracyPrediction))
+            ).scalars()
+        )
     # A worker restart over the same fresh baseline cohort must be an
     # idempotent replay, not a sealed-evidence conflict.
     assert await generate_weighted_ensemble(settings, db_sessions) == 6
@@ -177,18 +191,31 @@ async def test_weighted_ensemble_writes_only_shadow_predictions(
             )
         ).scalars().all()
     assert len(predictions) == 6
+    assert {
+        (row.market_id, row.expert, row.expert_version): row.record_hash
+        for row in predictions
+    } == first_record_hashes
     baseline_predictions = [row for row in predictions if row.expert == EXPERT]
     shrunk_predictions = [row for row in predictions if row.expert == SHRUNK_EXPERT]
     assert len(baseline_predictions) == 3
     assert len(shrunk_predictions) == 3
     assert all(row.expert_version == EXPERT_VERSION for row in baseline_predictions)
     assert all(row.expert_version == SHRUNK_EXPERT_VERSION for row in shrunk_predictions)
-    assert sum(float(row.probability) for row in baseline_predictions) == pytest.approx(
-        1.0, abs=1e-6
-    )
-    assert sum(float(row.probability) for row in shrunk_predictions) == pytest.approx(
-        1.0, abs=1e-6
-    )
+    assert sum(
+        (row.probability for row in baseline_predictions),
+        start=Decimal("0"),
+    ) == Decimal("1.000000")
+    assert sum(
+        (row.probability for row in shrunk_predictions),
+        start=Decimal("0"),
+    ) == Decimal("1.000000")
+    assert sum(
+        (
+            Decimal(str(row.distribution["normalized_baseline_probability"]))
+            for row in baseline_predictions
+        ),
+        start=Decimal("0"),
+    ) == Decimal("1.000000")
     assert all(row.point_in_time_valid for row in predictions)
     assert all(row.evidence_eligible for row in predictions)
     assert all(row.input_hash is not None and len(row.input_hash) == 64 for row in predictions)
