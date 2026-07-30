@@ -87,6 +87,28 @@ edge is positive. `P6 blocked` and `P7 blocked` are intentional fail-closed stat
 | Continuous | Accumulate unmodified PAPER outcomes and execution evidence | P0 safety | live gate dashboard, independent station-days, skill/luck and cost attribution |
 | Gate | Re-review Austria/KYC/tax/geographic access and executor security | positive P5 | current primary-source record and explicit operator decisions |
 
+### Active release sprint: successor PAPER candidate
+
+This is the executable order for the current P0 release. A later step may be prepared in
+parallel, but it cannot mutate production state until every preceding exit condition is recorded.
+
+| Order | Task | Current state | Exit condition |
+|---|---|---|---|
+| R0 | Qualify replacement source | in progress | final SHA is clean/pushed; complete Linux CI, PostgreSQL integration, Compose validation, and Docker build pass |
+| R1 | Build immutable candidate | blocked by R0 | clean detached worktree; exact revision label; `linux/amd64`; recorded tag, image ID, and digest |
+| R2 | Re-run production-size read-only load gate | blocked by R1 | HTTP v3 + runtime v2 + composite artifacts share run/image/overlap and all unrelaxed thresholds pass |
+| R3 | Close pre-activation evidence | blocked by R2 | P0-only scope attested; schema/indexes and controls re-proved; immediate reconciliation and API-only rollback proof accepted |
+| R4 | Activate successor continuity epoch | blocked by R3 | complete reviewed lane plan; zero-backfill execution-evidence fork; exact hashes/image; continuity match |
+| R5 | Cold-worker canary under kills | blocked by R4 | four consecutive composite runs, <=20-second gaps, separate phase commits, no legacy jobs/contention/errors/restarts/LIVE |
+| R6 | Resume only Polymarket PAPER | blocked by R5 | fresh non-critical audit and required jobs; audited venue-scoped command; Binance remains backtest+kill |
+| R7 | Sixty-minute PAPER canary | blocked by R6 | immutable T+0/5/15/30/45/60 evidence; cost obligations progress; no safety, identity, health, or load divergence |
+| R8 | Close incident and enter P1 | blocked by R7 | independent review, append-only acceptance record, durable alerts, DR/security/capacity work scheduled |
+
+Automatic rollback is deliberately narrow: a failed gate stops the candidate API/worker and
+preserves both kills; it never enables LIVE, changes Binance, rewrites evidence, or starts the
+predecessor worker. A stopped or unprofitable strategy is a valid product outcome when the
+measured edge fails.
+
 ### Change-control rule
 
 Every implementation batch must update this board only from verified evidence. A task is

@@ -510,6 +510,13 @@ CPU/memory samples, and the five-second drain result. If this gate fails, stop t
 and fix query bounds, server/database timeouts, or Cockpit cancellation/coalescing before
 continuing.
 
+Immediately before continuity planning, re-run
+`scripts/sql/execution_cost_incident_reconciliation.sql` through a read-only production session.
+Bind the SQL hash, output hash, PostgreSQL clock, exact candidate image, schema/index state,
+runtime controls, and zero-LIVE counts into one release record. This second reconciliation is
+required even when all application writers have remained stopped; predecessor or restore-time
+artifacts cannot substitute for the pre-activation observation.
+
 ## 5. Persist and review the continuity plan
 
 With the candidate API running and the worker stopped, authenticate using the configured
@@ -615,6 +622,13 @@ rows, and a PostgreSQL activation timestamp. `GET /api/v1/evidence-continuity` m
 identity match for the candidate. Direct SQL must prove no predecessor evidence row was copied,
 backfilled, or relabelled into a forked lane.
 
+Before invoking activation, inspect the retained rollback tag and exact image ID from Section 10.
+With the candidate still killed and the worker stopped, the predecessor API-only image must report
+continuity mismatch/fail-closed against the prospective successor identity and must have no path
+that relabels successor evidence. Never run the predecessor migration or worker. Stop that
+diagnostic API and restore the exact candidate API before activation; record both image
+identities, responses, and zero-writer/zero-LIVE snapshots.
+
 ## 7. Cold scheduler canary
 
 Start only the verified candidate worker:
@@ -642,7 +656,21 @@ If there is no naturally due obligation, the scheduler topology and liveness can
 invent production fills. Evidence-specific cases remain pending until naturally observed or
 proved with an isolated non-production fixture.
 
+Do not remove a kill switch merely because the four scheduler runs passed. The long maintenance
+stop makes the predecessor health audit stale, and worker startup does not itself guarantee that
+`audit_health` has completed. Wait for a new non-critical audit whose database timestamp is later
+than the candidate worker start. Directly require every health-required job to be present and
+fresh, stable `stalled_days`, exact continuity match, zero pending commands, and every zero-LIVE
+invariant. `/readyz` may remain the expected 503 solely because the kill switch is still engaged;
+any unrelated readiness reason blocks resume.
+
 ## 8. Resume Polymarket PAPER only
+
+Before enqueueing resume, prepare the immutable T+0/T+5/T+15/T+30/T+45/T+60 collector and a
+separate authenticated idempotent `stop` request whose payload is exactly
+`@{ venue = "polymarket" }`. Validate both payloads and the exact API-key source without printing
+the key. The monitor must be able to submit that venue-scoped stop and wait for its request ID;
+the read-only heartbeat is supplementary and cannot satisfy the emergency-stop requirement.
 
 Enqueue one authenticated, idempotent command:
 

@@ -74,8 +74,10 @@ Evidence: composite maintenance unit tests and clean-PostgreSQL rollback/lock te
       interval `[target_at, target_at + mark_grace]`.
 - [x] Before grace expiry, absence of a snapshot sets the stored next-due clock to the captured
       clock, making the mark immediately eligible for the next composite invocation.
-- [ ] Consecutive successful scans of within-grace work meet the nominal 15-second cadence and are
-      no more than 20 seconds apart.
+- [ ] **Canary acceptance item:** consecutive successful scans of within-grace work meet the
+      nominal 15-second cadence and are no more than 20 seconds apart. This runtime observation
+      is evaluated in Section 9 and is not a prerequisite for starting that canary after every
+      other pre-canary item in Sections 1-8 has passed.
 - [x] At or after grace expiry, absence of an eligible snapshot appends exactly one immutable
       `missing` mark with the stable reason.
 - [x] Boundary tests cover snapshots exactly at target, inside grace, exactly at grace end, and
@@ -93,7 +95,7 @@ Evidence: execution-cost planner/repository unit and PostgreSQL integration test
 - [x] Focused unit tests pass.
 - [x] Full non-PostgreSQL suite passes.
 - [x] Focused clean-PostgreSQL execution-cost tests pass.
-- [x] Full clean-PostgreSQL integration suite passes.
+- [ ] Final exact-candidate clean-PostgreSQL integration suite passes in CI.
 - [x] Scheduler registry/restart tests pass.
 - [x] A real-PostgreSQL regression proves repeated `EVENT_JOB_MAX_INSTANCES` persistence is
       idempotent and remains non-success in evidence-continuity uptime.
@@ -104,11 +106,14 @@ Evidence: execution-cost planner/repository unit and PostgreSQL integration test
 - [x] Existing append-only/hash/trigger tests pass.
 - [x] Compose/config validation passes.
 
-Record exact commands, counts, skips, and timestamps: Ruff clean; strict mypy clean over 173 source
-files; non-PostgreSQL `880 passed, 3 skipped`; CI-equivalent clean PostgreSQL run
+Historical baseline evidence: Ruff clean; strict mypy clean over 173 source files;
+non-PostgreSQL `880 passed, 3 skipped`; CI-equivalent clean PostgreSQL run
 `1169 passed, 3 skipped in 1052.21s`; Cockpit locked restore and Release x64 build completed with
 0 warnings and 0 errors; backup-sidecar focused test `7 passed, 3 skipped`; rendered Compose
-configuration valid. Candidate Docker build remains part of Section 1.
+configuration valid. The replacement source passed local Ruff, strict mypy over 174 source files,
+928 non-PostgreSQL tests with 296 expected skips, exact PostgreSQL query-plan/semantics coverage,
+and all four release-contract suites. Final clean-PostgreSQL CI and candidate Docker build remain
+pending and must be bound to the final candidate revision.
 
 ## 6. Incident reconciliation
 
@@ -125,6 +130,9 @@ Do not repair rows as part of the query.
 - [x] Recompute immutable record hashes and report zero invalid rows.
 - [x] Report PAPER and LIVE separately.
 - [x] Preserve a hash-bound reconciliation artifact and query text.
+- [ ] Re-run the same read-only reconciliation immediately before successor activation and bind
+      its query hash, output hash, PostgreSQL clock, exact candidate image, and zero-LIVE/control
+      snapshot into the release record.
 
 Production reconciliation result: predecessor at `2026-07-29T20:18:14.093844Z` and the exact
 restored post-stop backup both passed. Restored copy: 857 sealed obligations, 192 valid mark
@@ -140,18 +148,20 @@ missing, premature seal, duplicate, nonsealed, or LIVE findings. Query:
 - [x] Restore that exact backup into an isolated database and run integrity checks.
 - [x] Record the exact rollback image and operator command sequence.
 - [ ] Prove rollback cannot relabel candidate evidence into the predecessor epoch.
-- [ ] With global/Polymarket kill and Binance kill engaged and worker/API stopped, run the exact
+- [x] With global/Polymarket kill and Binance kill engaged and worker/API stopped, run the exact
       candidate `migrate` service from production head `20260728_0045`.
-- [ ] Before API staging, prove the database is at exactly `20260730_0046` and all three bounded
+- [x] Before API staging, prove the database is at exactly `20260730_0046` and all three bounded
       accuracy-overview indexes exist with `indisvalid=true` and `indisready=true`.
 - [ ] Stage/deploy the exact candidate artifact while candidate scheduler writes remain blocked
       under the predecessor execution-evidence identity.
 - [ ] Verify API/worker identity, schema, configuration, memory limit, and restart count before
       epoch activation.
-- [ ] Pass the five-minute production-size Dashboard API load gate: zero errors/timeouts,
-      endpoint maximum below 3 seconds, zero idle-in-transaction sessions and lock waiters,
-      active queries drained within 5 seconds, no restart/OOM, and no recurrence of predecessor
-      150-160% sustained PostgreSQL CPU.
+- [ ] Pass the production-size Dashboard API load gate with all three hash-bound artifacts:
+      HTTP schema v3, runtime schema v2, and composite accepted result. They must share one run
+      ID, exact candidate image, full observation overlap, raw cadence/sample reconciliation, and
+      the final five-second drain; require zero errors/timeouts, endpoint maximum below 3 seconds,
+      zero idle-in-transaction sessions and lock waiters, no restart/OOM, and no recurrence of
+      predecessor 150-160% sustained PostgreSQL CPU.
 - [x] Confirm zero nonterminal LIVE orders and zero LIVE positions before any PAPER resume.
 
 Backup evidence: marker-bound
@@ -185,9 +195,13 @@ maintenance topology can write execution evidence even while trading is killed. 
 fail-closed checks, and forward-fix requirements are in
 `docs/RELEASE_CUTOVER_RUNBOOK.md`.
 
-Schema cutover evidence: `pending`. Revision `20260730_0046` is an index-only operational
-migration. Production remains at `20260728_0045` until the exact-candidate migration and index
-validity checks above are recorded; this statement does not accept deployment or migration.
+Schema cutover evidence: **migration accepted, application candidate not accepted**. Under stopped
+API/worker and engaged global, Polymarket, and Binance kill switches, production advanced once
+from `20260728_0045` to `20260730_0046`. Direct SQL proved exactly one Alembic head and
+`indisvalid=true` plus `indisready=true` for all three bounded accuracy-overview indexes. The
+incident record contains the migration-staging command correction and evidence. This accepted
+schema state does not accept any staged application image, activate a successor epoch, resume
+PAPER, or authorize LIVE.
 
 ## 8. Continuity plan and successor epoch
 
@@ -214,9 +228,16 @@ Plan/epoch evidence: `pending`.
 
 ## 9. PAPER canary
 
-Canary may begin only after Sections 1–8 pass. It does not authorize LIVE.
+Canary may begin only after Sections 1-8 pass, except for the explicitly deferred runtime-cadence
+acceptance observation in Section 4, which can only be measured during this section. It does not
+authorize LIVE.
 
+- [ ] Prepare and dry-verify the immutable T+0/T+5/T+15/T+30/T+45/T+60 snapshot collector and an
+      authenticated, idempotent Polymarket-only stop command before any resume request.
 - [ ] Start the candidate worker on the activated successor epoch.
+- [ ] Keep global and both venue kill switches engaged until a fresh non-critical health audit
+      exists, every required job is present and fresh, `stalled_days` is stable, continuity
+      matches the exact candidate, pending commands are zero, and LIVE state is zero.
 - [ ] Observe at least four consecutive 15-second
       `execution-cost-maintenance` runs without a legacy scheduled run.
 - [ ] Verify each run reports the captured clock and separate Phase-A/Phase-B outcomes.
@@ -233,6 +254,8 @@ Canary may begin only after Sections 1–8 pass. It does not authorize LIVE.
       `max_instances` event, or scheduler overlap.
 - [ ] Verify `/healthz`, `/readyz`, execution-cost reporting, and continuity state against direct
       PostgreSQL counts.
+- [ ] Resume through one audited command whose payload names only `venue=polymarket`; wait for
+      that exact request ID to succeed and reject any all-venue or payload-mismatched command.
 - [ ] Verify Polymarket remains PAPER-only and Binance/LIVE controls remain fail closed.
 
 Canary start: `pending`.

@@ -472,6 +472,23 @@ Read-only profiling against the production-size database reduced the uncached re
 sequential scan. A new exact revision, immutable image, unchanged 390-second gate, and complete
 composite artifact are still required before this incident can advance.
 
+### Replacement-source CI qualification
+
+GitHub CI run 54 for revision `6a44f80c04e0475fda78e76a42f64e41360bd581` completed every
+lint, strict-type, release-contract, and accuracy-query check successfully. Its PostgreSQL suite
+reported `1223 passed, 1 failed`; the sole failure was unrelated to the candidate query. The LIVE
+TTL test advanced its clock by 30 minutes while running at 23:33 in the KLGA timezone, crossed
+local midnight, and correctly hit the earlier fail-closed
+`station_reliability_snapshot_local_date_stale` guard instead of its intended
+`live_execution_timeout` branch.
+
+The test fixture now appends a valid current station-reliability snapshot at the simulated clock
+while retaining the signal's original decision-time snapshot. This preserves production gate
+ordering and makes the TTL assertion independent of wall-clock time; widening the expected reason
+or reordering production checks was rejected. The focused PostgreSQL test, accuracy-cache unit
+tests, Ruff, and diff validation pass locally. A complete green CI run on the final documentation
+and test revision remains required before any image is built.
+
 ### Current fail-closed safety state
 
 At the post-gate 2026-07-29 incident-record update:
