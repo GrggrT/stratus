@@ -474,6 +474,28 @@ async def _append_station_reliability_snapshot(
     )
 
 
+async def _refresh_current_reliability_for_signal(
+    sessions: SessionFactory,
+    *,
+    signal_id: int,
+    evaluated_at: datetime,
+) -> None:
+    """Keep current evidence valid while tests advance the executor clock."""
+
+    async with sessions.begin() as session:
+        signal = await session.get(Signal, signal_id)
+        assert signal is not None
+        market = await session.get(Market, signal.market_id)
+        assert market is not None and market.station_id is not None
+        station = await session.get(Station, market.station_id)
+        assert station is not None
+        await _append_station_reliability_snapshot(
+            session,
+            station=station,
+            evaluated_at=evaluated_at,
+        )
+
+
 async def _append_conflicting_snapshot_for_signal(
     sessions: SessionFactory,
     signal_id: int,
@@ -1298,6 +1320,12 @@ async def test_paper_without_qualifying_book_stays_pending_until_ttl(
         )
         future = signal.ts + timedelta(minutes=2)
 
+    await _refresh_current_reliability_for_signal(
+        db_sessions,
+        signal_id=signal_id,
+        evaluated_at=future,
+    )
+
     class FutureDateTime(datetime):
         @classmethod
         def now(cls, tz: object = None) -> FutureDateTime:
@@ -1876,20 +1904,13 @@ async def test_stale_live_signals_are_expired_not_left_pending(
     assert seeded_signal is not None
     future_now = seeded_signal.ts + timedelta(minutes=30)
 
-    # Keep the current station evidence valid at the simulated clock.  The
-    # test can run close enough to KLGA midnight that +30 minutes crosses the
-    # local-date boundary; without a refreshed current snapshot, the
-    # reliability gate correctly expires the signal before the TTL branch.
-    async with db_sessions.begin() as session:
-        market = await session.get(Market, seeded_signal.market_id)
-        assert market is not None and market.station_id is not None
-        station = await session.get(Station, market.station_id)
-        assert station is not None
-        await _append_station_reliability_snapshot(
-            session,
-            station=station,
-            evaluated_at=future_now,
-        )
+    # Keep current evidence valid if the simulated clock crosses KLGA
+    # midnight; the attested decision-time snapshot remains unchanged.
+    await _refresh_current_reliability_for_signal(
+        db_sessions,
+        signal_id=signal_id,
+        evaluated_at=future_now,
+    )
 
     class FutureDateTime(datetime):
         @classmethod

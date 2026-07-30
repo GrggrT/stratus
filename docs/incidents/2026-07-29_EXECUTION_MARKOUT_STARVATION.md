@@ -486,8 +486,13 @@ The test fixture now appends a valid current station-reliability snapshot at the
 while retaining the signal's original decision-time snapshot. This preserves production gate
 ordering and makes the TTL assertion independent of wall-clock time; widening the expected reason
 or reordering production checks was rejected. The focused PostgreSQL test, accuracy-cache unit
-tests, Ruff, and diff validation pass locally. A complete green CI run on the final documentation
-and test revision remains required before any image is built.
+tests, Ruff, and diff validation pass locally. CI run 55 then passed all 1,224 tests, Compose, and
+the Docker build. Run 56 exposed the same midnight dependency in the paper maker-TTL case:
+advancing two minutes across KLGA midnight legitimately terminalized the order as reliability
+`rejected` before `unfilled_maker`. Both executor clock-shift tests now use one helper that
+refreshes only the current snapshot. The two focused PostgreSQL cases pass together. A complete
+green CI run on the final documentation and test revision remains required before any image is
+built.
 
 ### Current fail-closed safety state
 
