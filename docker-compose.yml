@@ -1,5 +1,8 @@
 services:
   validate-owner-password:
+    # Every service is profile-gated: plain `docker compose up` must be a
+    # no-op during the fail-closed release-hardening phase.
+    profiles: ["release", "infrastructure", "binance", "telegram", "offsite"]
     image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set to a strong non-default owner password}
@@ -18,7 +21,62 @@ services:
         esac
     restart: "no"
 
+  validate-safety-credentials:
+    profiles: ["release"]
+    # This one-shot validator is the only non-control-plane process allowed to
+    # observe both API credentials. It never receives a database credential.
+    image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
+    environment:
+      OPERATOR_API_KEY: ${OPERATOR_API_KEY:-}
+      SAFETY_API_KEY: ${SAFETY_API_KEY:-}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ -z "$$OPERATOR_API_KEY" ]; then
+          echo "OPERATOR_API_KEY is required when safety-control is staged" >&2
+          exit 1
+        fi
+        if [ -z "$$SAFETY_API_KEY" ]; then
+          echo "SAFETY_API_KEY is required by safety-control" >&2
+          exit 1
+        fi
+        validate_control_key() {
+          key_name="$$1"
+          key_value="$$2"
+          if [ "$${#key_value}" -lt 43 ] || [ "$${#key_value}" -gt 256 ]; then
+            echo "$$key_name must contain 43 to 256 URL-safe random characters" >&2
+            return 1
+          fi
+          case "$$key_value" in
+            *[!A-Za-z0-9._~-]*)
+              echo "$$key_name must use URL-safe unreserved characters" >&2
+              return 1
+              ;;
+          esac
+          case "$$key_value" in
+            change-me*|changeme*|replace-me*|example*|placeholder*|test-secret*)
+              echo "$$key_name must not use a placeholder value" >&2
+              return 1
+              ;;
+          esac
+          distinct_characters="$$(printf '%s' "$$key_value" \
+            | fold -w 1 | sort -u | wc -l | tr -d '[:space:]')"
+          if [ "$$distinct_characters" -lt 8 ]; then
+            echo "$$key_name must not use a low-diversity repeated value" >&2
+            return 1
+          fi
+        }
+        validate_control_key OPERATOR_API_KEY "$$OPERATOR_API_KEY"
+        validate_control_key SAFETY_API_KEY "$$SAFETY_API_KEY"
+        if [ "$$SAFETY_API_KEY" = "$$OPERATOR_API_KEY" ]; then
+          echo "SAFETY_API_KEY must be distinct from OPERATOR_API_KEY" >&2
+          exit 1
+        fi
+        unset OPERATOR_API_KEY SAFETY_API_KEY
+    restart: "no"
+
   postgres:
+    profiles: ["release", "infrastructure", "binance", "telegram", "offsite"]
     image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
     # Docker Desktop may restore containers before the WSL-backed volume is
     # fully ready.  A transient startup exit must retry automatically instead
@@ -45,6 +103,9 @@ services:
     volumes:
       - stratus-postgres:/var/lib/postgresql/data
       - ./ops/postgres/stratus-pg_hba.conf:/etc/postgresql/stratus-pg_hba.conf:ro
+    networks:
+      - default
+      - safety-plane
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U stratus -d stratus"]
       interval: 5s
@@ -55,12 +116,15 @@ services:
         condition: service_completed_successfully
 
   migrate:
+    # Release-mutating services are deliberately absent from the default
+    # Compose model. Operators must select an explicit application profile or
+    # target the service through the guarded release runbook.
+    profiles: ["release", "binance", "telegram"]
     image: ${STRATUS_IMAGE:-stratus:local}
     command: ["alembic", "upgrade", "head"]
     environment: &stratus-environment
       MIGRATION_DATABASE_URL: postgresql+asyncpg://stratus:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set to a strong non-default owner password}@postgres:5432/stratus
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      OPERATOR_API_KEY: ${OPERATOR_API_KEY:-}
       IEM_ASOS_URL: ${IEM_ASOS_URL:-https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py}
       IEM_REQUEST_DELAY_SECONDS: ${IEM_REQUEST_DELAY_SECONDS:-12}
       IEM_RECOVERY_TERMS_POLICY_HASH: ${IEM_RECOVERY_TERMS_POLICY_HASH:-bdd514125aeb91bbde8a4728063b8862010c821d05427572954b239085cc7535}
@@ -152,6 +216,7 @@ services:
     restart: "no"
 
   provision-runtime-role:
+    profiles: ["release", "binance", "telegram"]
     image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
     environment:
       PGHOST: postgres
@@ -181,6 +246,10 @@ services:
             exit 1
             ;;
         esac
+        if [ "$$runtime_password" = "$$PGPASSWORD" ]; then
+          echo "STRATUS_RUNTIME_PASSWORD must differ from POSTGRES_PASSWORD" >&2
+          exit 1
+        fi
         role_is_safe="$$(psql -XAtq --set=ON_ERROR_STOP=1 \
           --command='SELECT public.assert_stratus_runtime_boundary(false)')"
         if [ "$$role_is_safe" != "t" ]; then
@@ -224,7 +293,105 @@ services:
         condition: service_completed_successfully
     restart: "no"
 
+  provision-safety-role:
+    profiles: ["release"]
+    # Owner-scoped, one-shot activator for the independent emergency-control
+    # login. Migrations own roles/ACL/RLS/triggers; this service only proves
+    # that boundary, rotates the dedicated password, enables LOGIN, and proves
+    # the same boundary again as the resulting principal.
+    image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: stratus
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set to a strong non-default owner password}
+      PGDATABASE: stratus
+    secrets:
+      - source: stratus-safety-password
+        target: stratus_safety_password
+      - source: stratus-runtime-password
+        target: stratus_runtime_password
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        password_file=/run/secrets/stratus_safety_password
+        runtime_password_file=/run/secrets/stratus_runtime_password
+        if [ ! -r "$$password_file" ]; then
+          echo "STRATUS_SAFETY_PASSWORD is required; refusing safety role activation" >&2
+          exit 1
+        fi
+        if [ ! -r "$$runtime_password_file" ]; then
+          echo "STRATUS_RUNTIME_PASSWORD is required for credential separation" >&2
+          exit 1
+        fi
+        safety_password="$$(cat "$$password_file")"
+        runtime_password="$$(cat "$$runtime_password_file")"
+        if [ "$${#safety_password}" -lt 24 ]; then
+          echo "STRATUS_SAFETY_PASSWORD must contain at least 24 characters" >&2
+          exit 1
+        fi
+        case "$$safety_password" in
+          *[!A-Za-z0-9._~-]*)
+            echo "STRATUS_SAFETY_PASSWORD must use URL-safe unreserved characters" >&2
+            exit 1
+            ;;
+        esac
+        if [ "$$safety_password" = "$$runtime_password" ]; then
+          echo "STRATUS_SAFETY_PASSWORD must differ from STRATUS_RUNTIME_PASSWORD" >&2
+          exit 1
+        fi
+        if [ "$$safety_password" = "$$PGPASSWORD" ]; then
+          echo "STRATUS_SAFETY_PASSWORD must differ from POSTGRES_PASSWORD" >&2
+          exit 1
+        fi
+        if [ "$$runtime_password" = "$$PGPASSWORD" ]; then
+          echo "STRATUS_RUNTIME_PASSWORD must differ from POSTGRES_PASSWORD" >&2
+          exit 1
+        fi
+        unset runtime_password
+        group_role="$$(psql -XAtq --set=ON_ERROR_STOP=1 \
+          --command="SELECT 'stratus_safety_' || md5(current_database())")"
+        app_role="$$(psql -XAtq --set=ON_ERROR_STOP=1 \
+          --command="SELECT 'stratus_safety_app_' || md5(current_database())")"
+        case "$$group_role:$$app_role" in
+          stratus_safety_[0-9a-f]*:stratus_safety_app_[0-9a-f]*) ;;
+          *)
+            echo "database-scoped STRATUS safety roles are malformed" >&2
+            exit 1
+            ;;
+        esac
+        if [ "$${#group_role}" -ne 47 ] || [ "$${#app_role}" -ne 51 ]; then
+          echo "database-scoped STRATUS safety roles are malformed" >&2
+          exit 1
+        fi
+        owner_boundary_is_safe="$$(psql -XAtq --set=ON_ERROR_STOP=1 \
+          --command='SELECT public.assert_stratus_safety_boundary(false)')"
+        if [ "$$owner_boundary_is_safe" != "t" ]; then
+          echo "database-scoped STRATUS safety role boundary is unsafe" >&2
+          exit 1
+        fi
+        psql -Xq --set=ON_ERROR_STOP=1 \
+          --command="ALTER ROLE \"$$app_role\" NOLOGIN"
+        printf '%s\n%s\n' "$$safety_password" "$$safety_password" \
+          | psql -Xq --set=ON_ERROR_STOP=1 \
+              --command="\password $$app_role"
+        psql -Xq --set=ON_ERROR_STOP=1 \
+          --command="ALTER ROLE \"$$app_role\" LOGIN"
+        boundary_is_safe="$$(PGPASSWORD="$$safety_password" \
+          psql -XAtq --set=ON_ERROR_STOP=1 --username="$$app_role" \
+          --command='SELECT public.assert_stratus_safety_boundary(true)')"
+        unset safety_password
+        if [ "$$boundary_is_safe" != "t" ]; then
+          echo "stratus_safety_app boundary failed after activation" >&2
+          exit 1
+        fi
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
   worker:
+    profiles: ["release"]
     image: ${STRATUS_IMAGE:-stratus:local}
     build: .
     command: ["stratus-run"]
@@ -232,7 +399,8 @@ services:
     # and taking PostgreSQL/API down with it. Normal bounded runtime stays
     # comfortably below this ceiling; an unexpected regression fails the
     # worker container instead of the whole host.
-    mem_limit: ${STRATUS_WORKER_MEMORY_LIMIT:-3g}
+    # Release admission asserts this exact non-host-overridable 3 GiB ceiling.
+    mem_limit: 3g
     environment:
       <<: *stratus-environment
       MIGRATION_DATABASE_URL: ""
@@ -255,6 +423,8 @@ services:
     depends_on:
       provision-runtime-role:
         condition: service_completed_successfully
+      safety-control:
+        condition: service_healthy
     restart: unless-stopped
 
   binance-market-stream:
@@ -279,13 +449,18 @@ services:
     profiles: ["binance"]
 
   api:
+    profiles: ["release"]
     image: ${STRATUS_IMAGE:-stratus:local}
     command: ["stratus-api"]
     # A pathological analytical request must fail the local API container,
     # not exhaust Docker Desktop and take PostgreSQL with it.
-    mem_limit: ${STRATUS_API_MEMORY_LIMIT:-1g}
+    # Release admission asserts this exact non-host-overridable 1 GiB ceiling.
+    mem_limit: 1g
     environment:
       <<: *stratus-environment
+      # Operator mutation authority is confined to the API and the one-shot
+      # validate-safety-credentials service; no other application service gets it.
+      OPERATOR_API_KEY: ${OPERATOR_API_KEY:-}
       MIGRATION_DATABASE_URL: ""
       DATABASE_URL: ""
       STRATUS_RUNTIME_DATABASE_URL: ""
@@ -322,7 +497,62 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  safety-control:
+    profiles: ["release"]
+    # Independent, worker-free Polymarket emergency-stop control plane. It
+    # runs the exact release image but owns a separate process, port, memory
+    # budget, plus isolated one-connection control and emergency-STOP DB pools.
+    image: ${STRATUS_IMAGE:-stratus:local}
+    command: ["stratus-safety-api"]
+    # Release admission asserts this exact non-host-overridable 256 MiB ceiling.
+    mem_limit: 256m
+    environment:
+      <<: *stratus-environment
+      MIGRATION_DATABASE_URL: ""
+      DATABASE_URL: ""
+      STRATUS_RUNTIME_DATABASE_URL: ""
+      STRATUS_SAFETY_PASSWORD_FILE: /run/secrets/stratus_safety_password
+      STRATUS_DATABASE_HOST: postgres
+      STRATUS_DATABASE_NAME: stratus
+      STRATUS_DATABASE_APPLICATION_NAME: stratus-safety-control
+      STRATUS_DATABASE_STATEMENT_TIMEOUT_MS: "5000"
+      STRATUS_DATABASE_LOCK_TIMEOUT_MS: "3000"
+      STRATUS_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS: "5000"
+      STRATUS_DATABASE_POOL_SIZE: "1"
+      STRATUS_DATABASE_MAX_OVERFLOW: "0"
+      STRATUS_DATABASE_POOL_TIMEOUT_SECONDS: "0.25"
+      SAFETY_API_HOST: "0.0.0.0"
+      SAFETY_API_PORT: "8001"
+      SAFETY_CANARY_LEASE_TTL_SECONDS: "15"
+      SAFETY_WATCHDOG_POLL_SECONDS: "3"
+      SAFETY_API_KEY: ${SAFETY_API_KEY:-}
+    entrypoint: ["/usr/local/bin/stratus-runtime-entrypoint"]
+    secrets:
+      - source: stratus-safety-password
+        target: stratus_safety_password
+    ports:
+      - "127.0.0.1:${STRATUS_SAFETY_API_PORT:-8001}:8001"
+    # The worker/API remain on Compose's default network.  Only PostgreSQL is
+    # dual-homed, so a compromised runtime container cannot resolve or reach
+    # the independent safety HTTP control plane directly.
+    networks:
+      - safety-plane
+    healthcheck:
+      # Worker admission depends on this healthcheck. Readiness, not mere
+      # process liveness—proves the DB boundary and watchdog are fresh.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/readyz', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      provision-safety-role:
+        condition: service_completed_successfully
+      validate-safety-credentials:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   backup:
+    profiles: ["release", "infrastructure", "offsite"]
     image: postgres:16-alpine@sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416
     environment:
       PGHOST: postgres
@@ -923,6 +1153,12 @@ volumes:
   stratus-offsite-state:
     driver: local
 
+networks:
+  safety-plane:
+    driver: bridge
+
 secrets:
   stratus-runtime-password:
     file: ${STRATUS_RUNTIME_PASSWORD_FILE:-./.secrets/stratus_runtime_password}
+  stratus-safety-password:
+    file: ${STRATUS_SAFETY_PASSWORD_FILE:-./.secrets/stratus_safety_password}

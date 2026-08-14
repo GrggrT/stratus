@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stratus.api import create_app
@@ -53,23 +54,29 @@ async def test_seeded_venue_controls_are_safe(
     polymarket, binance = controls
     assert polymarket.enabled is True
     assert polymarket.mode is VenueMode.PAPER
-    assert polymarket.kill_switch is False
-    assert binance.enabled is False
-    assert binance.mode is VenueMode.DISABLED
+    assert polymarket.kill_switch is True
+    assert binance.enabled is True
+    assert binance.mode is VenueMode.BACKTEST
     assert binance.kill_switch is True
     assert binance.risk_config_version == "v1-conservative"
 
 
 async def test_binance_control_changes_do_not_touch_polymarket(
     db_sessions: SessionFactory,
+    canary_role_sessions: object,
 ) -> None:
+    roles = canary_role_sessions
     async with db_sessions.begin() as session:
         legacy_before = await session.get(RuntimeControl, 1)
         assert legacy_before is not None
         legacy_state = (legacy_before.mode, legacy_before.kill_switch)
-        await set_venue_enabled(session, TradingVenue.BINANCE_SPOT, True)
-        await set_venue_mode(session, TradingVenue.BINANCE_SPOT, VenueMode.SHADOW)
-        await set_venue_kill_switch(session, TradingVenue.BINANCE_SPOT, False)
+    with pytest.raises(DBAPIError, match="sealed"):
+        async with roles.runtime.begin() as session:
+            await set_venue_mode(
+                session,
+                TradingVenue.BINANCE_SPOT,
+                VenueMode.SHADOW,
+            )
 
     async with db_sessions() as session:
         binance = await get_venue_runtime_control(session, TradingVenue.BINANCE_SPOT)
@@ -78,12 +85,12 @@ async def test_binance_control_changes_do_not_touch_polymarket(
 
     assert (binance.enabled, binance.kill_switch, binance.mode) == (
         True,
-        False,
-        VenueMode.SHADOW,
+        True,
+        VenueMode.BACKTEST,
     )
     assert (polymarket.enabled, polymarket.kill_switch, polymarket.mode) == (
         True,
-        False,
+        True,
         VenueMode.PAPER,
     )
     assert legacy_after is not None
@@ -184,11 +191,11 @@ async def test_venues_endpoint_exposes_isolated_controls(
     assert response.status_code == 200
     items = response.json()["items"]
     assert [item["venue"] for item in items] == ["polymarket", "binance_spot"]
-    assert items[1]["mode"] == "disabled"
+    assert items[1]["mode"] == "backtest"
     assert items[1]["kill_switch"] is True
 
 
-async def test_binance_operator_commands_are_scoped_and_live_locked(
+async def test_binance_operator_commands_preserve_sealed_backtest_state(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
     settings = Settings(
@@ -212,25 +219,39 @@ async def test_binance_operator_commands_are_scoped_and_live_locked(
         return await process_operator_commands(settings, db_sessions)
 
     assert await run_command(
-        "req-binance-mode-shadow", "set_mode", {"venue": "binance_spot", "mode": "shadow"}
+        "req-binance-mode-backtest",
+        "set_mode",
+        {"venue": "binance_spot", "mode": "backtest"},
     ) == (1, 1)
     async with db_sessions() as session:
         control = await get_venue_runtime_control(session, TradingVenue.BINANCE_SPOT)
     assert (control.enabled, control.mode, control.kill_switch) == (
         True,
-        VenueMode.SHADOW,
+        VenueMode.BACKTEST,
         True,
     )
-
-    assert await run_command("req-binance-resume", "resume", {"venue": "binance_spot"}) == (1, 1)
+    assert await run_command(
+        "req-binance-mode-shadow",
+        "set_mode",
+        {"venue": "binance_spot", "mode": "shadow"},
+    ) == (0, 1)
+    assert await run_command(
+        "req-binance-resume",
+        "resume",
+        {"venue": "binance_spot"},
+    ) == (0, 1)
     assert await run_command("req-binance-stop", "stop", {"venue": "binance_spot"}) == (1, 1)
 
     async with db_sessions() as session:
         legacy = await session.get(RuntimeControl, 1)
         binance = await get_venue_runtime_control(session, TradingVenue.BINANCE_SPOT)
     assert legacy is not None
-    assert legacy.kill_switch is False
-    assert binance.kill_switch is True
+    assert legacy.kill_switch is True
+    assert (binance.enabled, binance.mode, binance.kill_switch) == (
+        True,
+        VenueMode.BACKTEST,
+        True,
+    )
 
     assert await run_command(
         "req-binance-mode-live", "set_mode", {"venue": "binance_spot", "mode": "live"}
@@ -240,20 +261,27 @@ async def test_binance_operator_commands_are_scoped_and_live_locked(
         rejected = await session.scalar(
             select(OperatorCommand).where(OperatorCommand.request_id == "req-binance-mode-live")
         )
-    assert binance.mode is VenueMode.SHADOW
+    assert (binance.enabled, binance.mode, binance.kill_switch) == (
+        True,
+        VenueMode.BACKTEST,
+        True,
+    )
     assert rejected is not None
     assert rejected.status == "rejected"
-    assert "locked" in (rejected.detail or "")
+    assert any(
+        marker in (rejected.detail or "")
+        for marker in ("sealed", "frozen")
+    )
 
 
-async def test_global_stop_and_resume_cover_both_venues(
+async def test_global_stop_is_allowed_but_global_resume_is_fail_closed(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
     settings = Settings(database_url=migrated_database_url, operator_api_key="secret-key")
     async with db_sessions.begin() as session:
         await set_venue_enabled(session, TradingVenue.BINANCE_SPOT, True)
-        await set_venue_mode(session, TradingVenue.BINANCE_SPOT, VenueMode.SHADOW)
-        await set_venue_kill_switch(session, TradingVenue.BINANCE_SPOT, False)
+        await set_venue_mode(session, TradingVenue.BINANCE_SPOT, VenueMode.BACKTEST)
+        await set_venue_kill_switch(session, TradingVenue.BINANCE_SPOT, True)
         await enqueue_command(
             session,
             request_id="req-global-stop",
@@ -281,10 +309,10 @@ async def test_global_stop_and_resume_cover_both_venues(
             reason="global stop drill complete",
         )
 
-    assert await process_operator_commands(settings, db_sessions) == (1, 1)
+    assert await process_operator_commands(settings, db_sessions) == (0, 1)
     async with db_sessions() as session:
         legacy = await session.get(RuntimeControl, 1)
         controls = await list_venue_runtime_controls(session)
     assert legacy is not None
-    assert legacy.kill_switch is False
-    assert all(not control.kill_switch for control in controls)
+    assert legacy.kill_switch is True
+    assert all(control.kill_switch for control in controls)

@@ -13,18 +13,40 @@ import pytest
 
 _ROOT = Path(__file__).parents[1]
 _HBA_CONTAINER_PATH = "/etc/postgresql/stratus-pg_hba.conf"
-_POSTGRES_IMAGE = "postgres:16-alpine"
+_POSTGRES_IMAGE = (
+    "postgres:16-alpine@sha256:"
+    "20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416"
+)
 _DATABASE = "stratus"
 _OWNER = "stratus"
 _OWNER_PASSWORD = "isolated-owner-password-000000000000"
 _APP_PASSWORD = "isolated-runtime-password-0000000000"
-_APP_ROLE = "stratus_app_" + hashlib.md5(  # noqa: S324 - PostgreSQL role scheme
-    _DATABASE.encode()
-).hexdigest()
+_SAFETY_PASSWORD = "isolated-safety-password-00000000000"
+_APP_ROLE = (
+    "stratus_app_"
+    + hashlib.md5(  # noqa: S324 - PostgreSQL role scheme
+        _DATABASE.encode()
+    ).hexdigest()
+)
+_SAFETY_APP_ROLE = (
+    "stratus_safety_app_"
+    + hashlib.md5(  # noqa: S324
+        _DATABASE.encode()
+    ).hexdigest()
+)
 _SIBLING_DATABASE = "stratus_sibling"
-_SIBLING_ROLE = "stratus_app_" + hashlib.md5(  # noqa: S324 - PostgreSQL role scheme
-    _SIBLING_DATABASE.encode()
-).hexdigest()
+_SIBLING_ROLE = (
+    "stratus_app_"
+    + hashlib.md5(  # noqa: S324 - PostgreSQL role scheme
+        _SIBLING_DATABASE.encode()
+    ).hexdigest()
+)
+_SIBLING_SAFETY_ROLE = (
+    "stratus_safety_app_"
+    + hashlib.md5(  # noqa: S324
+        _SIBLING_DATABASE.encode()
+    ).hexdigest()
+)
 
 
 def _run(
@@ -223,8 +245,19 @@ def test_release_hba_enforces_database_scoped_runtime_logins() -> None:
                 f"CREATE ROLE \"{_SIBLING_ROLE}\" LOGIN PASSWORD '{_APP_PASSWORD}' "
                 "NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION "
                 "NOBYPASSRLS; "
+                f'CREATE ROLE "{_SAFETY_APP_ROLE}" LOGIN '
+                f"PASSWORD '{_SAFETY_PASSWORD}' "
+                "NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION "
+                "NOBYPASSRLS; "
+                f'CREATE ROLE "{_SIBLING_SAFETY_ROLE}" LOGIN '
+                f"PASSWORD '{_SAFETY_PASSWORD}' "
+                "NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION "
+                "NOBYPASSRLS; "
                 f'GRANT CONNECT ON DATABASE "{_DATABASE}" TO "{_APP_ROLE}"; '
                 f'GRANT CONNECT ON DATABASE "{_SIBLING_DATABASE}" TO "{_SIBLING_ROLE}"; '
+                f'GRANT CONNECT ON DATABASE "{_DATABASE}" TO "{_SAFETY_APP_ROLE}"; '
+                f'GRANT CONNECT ON DATABASE "{_SIBLING_DATABASE}" '
+                f'TO "{_SIBLING_SAFETY_ROLE}"; '
                 f'REVOKE TEMPORARY ON DATABASE "{_DATABASE}" FROM PUBLIC'
             ),
         )
@@ -275,6 +308,15 @@ def test_release_hba_enforces_database_scoped_runtime_logins() -> None:
             sql="SELECT current_database()",
         )
         assert app_target.stdout.strip() == _DATABASE
+        safety_target = _client_psql(
+            network,
+            server,
+            user=_SAFETY_APP_ROLE,
+            password=_SAFETY_PASSWORD,
+            database=_DATABASE,
+            sql="SELECT current_database()",
+        )
+        assert safety_target.stdout.strip() == _DATABASE
 
         # Both cross-database directions are rejected before PUBLIC CONNECT or
         # the general owner SCRAM rule can admit them.
@@ -285,6 +327,39 @@ def test_release_hba_enforces_database_scoped_runtime_logins() -> None:
                 user=_APP_ROLE,
                 password=_APP_PASSWORD,
                 database="postgres",
+                sql="SELECT 1",
+                check=False,
+            )
+        )
+        _assert_hba_rejection(
+            _client_psql(
+                network,
+                server,
+                user=_SAFETY_APP_ROLE,
+                password=_SAFETY_PASSWORD,
+                database="postgres",
+                sql="SELECT 1",
+                check=False,
+            )
+        )
+        _assert_hba_rejection(
+            _client_psql(
+                network,
+                server,
+                user=_SAFETY_APP_ROLE,
+                password=_SAFETY_PASSWORD,
+                database=_SIBLING_DATABASE,
+                sql="SELECT 1",
+                check=False,
+            )
+        )
+        _assert_hba_rejection(
+            _client_psql(
+                network,
+                server,
+                user=_SIBLING_SAFETY_ROLE,
+                password=_SAFETY_PASSWORD,
+                database=_DATABASE,
                 sql="SELECT 1",
                 check=False,
             )
@@ -334,12 +409,32 @@ def test_release_hba_enforces_database_scoped_runtime_logins() -> None:
             sql="SELECT current_database()",
         )
         assert local_target.stdout.strip() == _DATABASE
+        local_safety_target = _server_psql(
+            server,
+            host=None,
+            user=_SAFETY_APP_ROLE,
+            password=_SAFETY_PASSWORD,
+            database=_DATABASE,
+            sql="SELECT current_database()",
+        )
+        assert local_safety_target.stdout.strip() == _DATABASE
         _assert_hba_rejection(
             _server_psql(
                 server,
                 host=None,
                 user=_APP_ROLE,
                 password=_APP_PASSWORD,
+                database="postgres",
+                sql="SELECT 1",
+                check=False,
+            )
+        )
+        _assert_hba_rejection(
+            _server_psql(
+                server,
+                host=None,
+                user=_SAFETY_APP_ROLE,
+                password=_SAFETY_PASSWORD,
                 database="postgres",
                 sql="SELECT 1",
                 check=False,
@@ -354,12 +449,32 @@ def test_release_hba_enforces_database_scoped_runtime_logins() -> None:
             sql="SELECT current_database()",
         )
         assert ipv6_target.stdout.strip() == _DATABASE
+        ipv6_safety_target = _server_psql(
+            server,
+            host="::1",
+            user=_SAFETY_APP_ROLE,
+            password=_SAFETY_PASSWORD,
+            database=_DATABASE,
+            sql="SELECT current_database()",
+        )
+        assert ipv6_safety_target.stdout.strip() == _DATABASE
         _assert_hba_rejection(
             _server_psql(
                 server,
                 host="::1",
                 user=_APP_ROLE,
                 password=_APP_PASSWORD,
+                database="postgres",
+                sql="SELECT 1",
+                check=False,
+            )
+        )
+        _assert_hba_rejection(
+            _server_psql(
+                server,
+                host="::1",
+                user=_SAFETY_APP_ROLE,
+                password=_SAFETY_PASSWORD,
                 database="postgres",
                 sql="SELECT 1",
                 check=False,

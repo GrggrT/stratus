@@ -1,19 +1,16 @@
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stratus.db.models import (
     ExecutionMode,
-    Order,
     RuntimeControl,
-    Signal,
-    SignalStatus,
 )
-from stratus.db.session import dml_rowcount
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,9 +26,22 @@ async def get_runtime_control(session: AsyncSession) -> RuntimeSnapshot:
     if control is None:
         # Migration 0009 seeds this row; a missing row is an abnormal state,
         # so fail closed instead of defaulting to "trading allowed".
-        return RuntimeSnapshot(
-            True, ExecutionMode.PAPER, None, "runtime_control row missing"
+        return RuntimeSnapshot(True, ExecutionMode.PAPER, None, "runtime_control row missing")
+    if not control.kill_switch:
+        execution_authorized = await session.scalar(
+            select(func.paper_canary_execution_authorized())
         )
+        if execution_authorized is not True:
+            # Read-side defence in depth: execution jobs fail closed even if
+            # the independent watchdog process is unavailable at lease expiry.
+            # The runtime login receives only this boolean authority bit; RLS
+            # keeps lease identities and clocks inside the safety boundary.
+            return RuntimeSnapshot(
+                True,
+                control.mode,
+                None,
+                ("Polymarket PAPER canary lease is absent, unobserved, watchdog-stale, or expired"),
+            )
     return RuntimeSnapshot(
         kill_switch=control.kill_switch,
         mode=control.mode,
@@ -45,28 +55,37 @@ async def set_kill_switch(
     enabled: bool,
     *,
     expiration_reason: str = "kill_switch",
+    request_id: str | None = None,
+    actor: str = "stratus-runtime-stop",
+    reason: str | None = None,
 ) -> int:
+    if enabled:
+        stop_request_id = request_id or (f"paper-runtime-stop-{secrets.token_hex(16)}")
+        stop_reason = reason or (
+            f"Runtime safety stop engaged Polymarket controls; cause={expiration_reason}."
+        )
+        expired = await session.scalar(
+            select(
+                func.engage_paper_canary_runtime_stop(
+                    stop_request_id,
+                    actor,
+                    stop_reason,
+                )
+            )
+        )
+        if expired is None:
+            raise RuntimeError("database PAPER stop returned no result")
+        return int(expired)
+
     control = await get_runtime_control(session)
-    if not enabled and control.halted_reason is not None:
+    if control.halted_reason is not None:
         raise RuntimeError(f"project is halted: {control.halted_reason}")
     await session.execute(
         update(RuntimeControl)
         .where(RuntimeControl.id == 1)
         .values(kill_switch=enabled, updated_at=datetime.now(UTC))
     )
-    if not enabled:
-        return 0
-    result = await session.execute(
-        update(Signal)
-        .where(Signal.status == SignalStatus.PENDING)
-        .values(status=SignalStatus.EXPIRED, skip_reason=expiration_reason)
-    )
-    await session.execute(
-        update(Order)
-        .where(Order.mode == ExecutionMode.LIVE, Order.status.in_(["open", "pending"]))
-        .values(status="cancel_requested")
-    )
-    return dml_rowcount(result)
+    return 0
 
 
 async def set_mode(session: AsyncSession, mode: ExecutionMode) -> None:

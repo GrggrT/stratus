@@ -60,6 +60,15 @@ def runtime_database_role_name(database_name: str) -> str:
     return f"stratus_app_{suffix}"
 
 
+def safety_database_group_role_name(database_name: str) -> str:
+    return f"stratus_safety_{_runtime_database_role_suffix(database_name)}"
+
+
+def safety_database_role_name(database_name: str) -> str:
+    suffix = _runtime_database_role_suffix(database_name)
+    return f"stratus_safety_app_{suffix}"
+
+
 class MigrationSettings(BaseSettings):
     """Owner credential surface imported only by Alembic."""
 
@@ -90,6 +99,9 @@ class Settings(BaseSettings):
     stratus_runtime_password_file: Path = Path(
         ".secrets/stratus_runtime_password"
     )
+    # Independent control-plane credential. Runtime services must never mount
+    # this file; only the safety-role provisioner and safety-control use it.
+    stratus_safety_password_file: Path = Path(".secrets/stratus_safety_password")
     stratus_database_host: str = "127.0.0.1"
     stratus_database_port: int = Field(default=5432, ge=1, le=65535)
     stratus_database_name: str = "stratus"
@@ -461,6 +473,16 @@ class Settings(BaseSettings):
     live_tax_approved: bool = False
     api_host: str = "0.0.0.0"
     api_port: int = Field(default=8000, ge=1, le=65535)
+    # The independent emergency-stop control plane binds loopback when run
+    # directly. Compose overrides the in-container bind address while exposing
+    # the published port on host loopback only.
+    safety_api_host: str = "127.0.0.1"
+    safety_api_port: int = Field(default=8001, ge=1, le=65535)
+    safety_canary_lease_ttl_seconds: int = Field(default=15, ge=1, le=30)
+    safety_watchdog_poll_seconds: float = Field(default=3.0, ge=0.5, le=5.0)
+    # Independent emergency-control credential. It deliberately has no
+    # fallback to the operator API key.
+    safety_api_key: str | None = None
     # When set, every /api/v1 monitoring endpoint requires this value in the
     # X-API-Key header. Mandatory before the API is ever exposed beyond
     # loopback; optional while it stays on 127.0.0.1.
@@ -518,6 +540,29 @@ class Settings(BaseSettings):
                 "URL-safe unreserved characters"
             )
         role = runtime_database_role_name(self.stratus_database_name)
+        return (
+            f"postgresql+asyncpg://{role}:{password}@"
+            f"{self.stratus_database_host}:{self.stratus_database_port}/"
+            f"{self.stratus_database_name}"
+        )
+
+    def resolved_safety_database_url(self) -> str:
+        """Resolve the safety-control DSN from its dedicated secret file."""
+        try:
+            raw_password = self.stratus_safety_password_file.read_text(
+                encoding="utf-8"
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                "STRATUS safety database password file is missing or unreadable"
+            ) from exc
+        password = raw_password.rstrip("\r\n")
+        if not _RUNTIME_PASSWORD.fullmatch(password):
+            raise RuntimeError(
+                "STRATUS safety database password must contain at least 24 "
+                "URL-safe unreserved characters"
+            )
+        role = safety_database_role_name(self.stratus_database_name)
         return (
             f"postgresql+asyncpg://{role}:{password}@"
             f"{self.stratus_database_host}:{self.stratus_database_port}/"
@@ -763,6 +808,7 @@ class Settings(BaseSettings):
     @field_validator(
         "telegram_admin_user_id",
         "telegram_chat_id",
+        "safety_api_key",
         "operator_api_key",
         "polygon_private_key",
         "polymarket_funder",

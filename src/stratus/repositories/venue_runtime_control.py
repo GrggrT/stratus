@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stratus.db.models import (
@@ -75,11 +75,41 @@ def _snapshot(row: VenueRuntimeControl) -> VenueRuntimeSnapshot:
     )
 
 
+async def _effective_polymarket_snapshot(
+    session: AsyncSession,
+    row: VenueRuntimeControl,
+) -> VenueRuntimeSnapshot:
+    snapshot = _snapshot(row)
+    if row.kill_switch:
+        return snapshot
+    execution_authorized = await session.scalar(select(func.paper_canary_execution_authorized()))
+    if execution_authorized is True:
+        return snapshot
+    return VenueRuntimeSnapshot(
+        venue=snapshot.venue,
+        enabled=snapshot.enabled,
+        mode=snapshot.mode,
+        kill_switch=True,
+        halted_reason=(
+            "Polymarket PAPER canary lease is absent, unobserved, watchdog-stale, or expired"
+        ),
+        live_confirmation_until=None,
+        strategy_version=snapshot.strategy_version,
+        risk_config_version=snapshot.risk_config_version,
+        last_reconciled_at=snapshot.last_reconciled_at,
+        updated_at=snapshot.updated_at,
+    )
+
+
 async def get_venue_runtime_control(
     session: AsyncSession, venue: TradingVenue
 ) -> VenueRuntimeSnapshot:
     row = await session.get(VenueRuntimeControl, venue)
-    return _snapshot(row) if row is not None else _fail_closed_snapshot(venue)
+    if row is None:
+        return _fail_closed_snapshot(venue)
+    if venue is TradingVenue.POLYMARKET:
+        return await _effective_polymarket_snapshot(session, row)
+    return _snapshot(row)
 
 
 async def list_venue_runtime_controls(
@@ -87,10 +117,16 @@ async def list_venue_runtime_controls(
 ) -> list[VenueRuntimeSnapshot]:
     rows = (await session.execute(select(VenueRuntimeControl))).scalars().all()
     by_venue = {row.venue: row for row in rows}
-    return [
-        _snapshot(by_venue[venue]) if venue in by_venue else _fail_closed_snapshot(venue)
-        for venue in _VENUE_ORDER
-    ]
+    snapshots: list[VenueRuntimeSnapshot] = []
+    for venue in _VENUE_ORDER:
+        row = by_venue.get(venue)
+        if row is None:
+            snapshots.append(_fail_closed_snapshot(venue))
+        elif venue is TradingVenue.POLYMARKET:
+            snapshots.append(await _effective_polymarket_snapshot(session, row))
+        else:
+            snapshots.append(_snapshot(row))
+    return snapshots
 
 
 async def _locked_control(session: AsyncSession, venue: TradingVenue) -> VenueRuntimeControl:
@@ -132,6 +168,19 @@ async def set_venue_mode(session: AsyncSession, venue: TradingVenue, mode: Venue
         row.enabled = False
         row.kill_switch = True
     row.updated_at = datetime.now(UTC)
+
+
+async def seal_binance_backtest(session: AsyncSession) -> None:
+    """Atomically restore this release's only authorized Binance state."""
+    row = await _locked_control(session, TradingVenue.BINANCE_SPOT)
+    database_now = await session.scalar(select(func.clock_timestamp()))
+    if database_now is None:
+        raise RuntimeError("database clock returned no Binance seal timestamp")
+    row.enabled = True
+    row.mode = VenueMode.BACKTEST
+    row.kill_switch = True
+    row.live_confirmation_until = None
+    row.updated_at = database_now
 
 
 async def request_venue_live_confirmation(

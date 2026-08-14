@@ -455,10 +455,15 @@ async def test_rejected_strict_batch_does_not_mark_market_fetched(
 
 async def test_missing_capacity_sample_blocks_before_http_and_engages_kill_switch(
     db_sessions: SessionFactory,
+    active_paper_canary: object,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    assert active_paper_canary is not None
     targets = await _seed_markets(db_sessions, count=1)
+    async with db_sessions() as session:
+        control = await session.get(RuntimeControl, 1)
+        assert control is not None and control.kill_switch is False
     calls = 0
 
     async def unexpected_fetch(_: ClobClient, token_ids: list[str]) -> ClobBooksBatch:
@@ -478,17 +483,21 @@ async def test_missing_capacity_sample_blocks_before_http_and_engages_kill_switc
         assert market is not None and market.last_price_fetch_at is None
         assert control is not None and control.kill_switch is True
         assert await session.scalar(select(func.count()).select_from(ClobBookBatch)) == 0
-        control.kill_switch = False
 
 
 async def test_stale_capacity_sample_blocks_even_when_no_market_is_due(
     db_sessions: SessionFactory,
+    active_paper_canary: object,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    assert active_paper_canary is not None
     settings = _capacity_settings(tmp_path)
     assessment = await audit_storage_capacity(settings, db_sessions)
     assert assessment.severity != "blocking"
+    async with db_sessions() as session:
+        control = await session.get(RuntimeControl, 1)
+        assert control is not None and control.kill_switch is False
 
     class FutureDateTime(datetime):
         @classmethod
@@ -507,19 +516,23 @@ async def test_stale_capacity_sample_blocks_even_when_no_market_is_due(
     async with db_sessions.begin() as session:
         control = await session.get(RuntimeControl, 1)
         assert control is not None and control.kill_switch is True
-        control.kill_switch = False
 
 
 async def test_atomic_post_fetch_capacity_guard_rolls_back_without_cursor_advance(
     db_sessions: SessionFactory,
+    active_paper_canary: object,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    assert active_paper_canary is not None
     targets = await _seed_markets(db_sessions, count=1)
     targets += await _seed_markets(db_sessions, count=1)
     base_settings = _capacity_settings(tmp_path)
     assessment = await audit_storage_capacity(base_settings, db_sessions)
     assert assessment.severity != "blocking"
+    async with db_sessions() as session:
+        control = await session.get(RuntimeControl, 1)
+        assert control is not None and control.kill_switch is False
     fetch_calls = 0
 
     async def collected_batch(_: ClobClient, token_ids: list[str]) -> ClobBooksBatch:
@@ -556,7 +569,6 @@ async def test_atomic_post_fetch_capacity_guard_rolls_back_without_cursor_advanc
         assert await session.scalar(select(func.count()).select_from(ClobBookBatch)) == 0
         assert await session.scalar(select(func.count()).select_from(ClobMarketSnapshot)) == 0
         assert await session.scalar(select(func.count()).select_from(MarketPrice)) == 0
-        control.kill_switch = False
 
 
 async def test_deferred_constraint_rejects_partial_batch_projection(

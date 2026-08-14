@@ -17,11 +17,13 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -29,8 +31,16 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from stratus.config import Settings, get_migration_settings
+from stratus.config import (
+    Settings,
+    get_migration_settings,
+    runtime_database_role_name,
+    safety_database_group_role_name,
+    safety_database_role_name,
+)
 from stratus.db.models import ProbabilityPipelineReleaseEpoch, WeatherKind
+from stratus.db.session import create_engine as create_runtime_engine
+from stratus.jobs.process_operator_commands import process_operator_commands
 from stratus.repositories.accuracy import upsert_resolution_contract
 from stratus.repositories.evidence_continuity import (
     EvidenceLanePlan,
@@ -41,11 +51,16 @@ from stratus.repositories.evidence_continuity import (
     current_probability_pipeline_release_epoch,
     persist_probability_pipeline_release_plan,
 )
+from stratus.repositories.operator_commands import enqueue_command
 from stratus.services.evidence_release_manifest import (
     build_evidence_release_manifest,
     decide_evidence_lane_actions,
 )
 from stratus.services.resolution_contracts import parse_resolution_contract
+from stratus.services.safety_control import (
+    acquire_paper_canary_lease_atomically,
+    run_paper_canary_watchdog_once,
+)
 
 _TEST_SETTINGS = Settings(_env_file=None)
 TEST_IMAGE_DIGEST = "b" * 64
@@ -65,8 +80,40 @@ def _install_explicit_test_api_engine(
     """
     import stratus.api
 
-    def create_test_admin_engine(_settings: Settings) -> AsyncEngine:
-        return create_async_engine(migrated_database_url, pool_pre_ping=True)
+    def create_test_admin_engine(
+        settings: Settings,
+        *,
+        pool_size: int | None = None,
+        max_overflow: int | None = None,
+        read_only: bool = False,
+    ) -> AsyncEngine:
+        resolved_url = make_url(settings.resolved_database_url())
+        database_name = resolved_url.database
+        if (
+            database_name is not None
+            and resolved_url.username == runtime_database_role_name(database_name)
+        ):
+            return create_runtime_engine(
+                settings,
+                pool_size=pool_size,
+                max_overflow=max_overflow,
+                read_only=read_only,
+            )
+
+        resolved_pool_size = (
+            settings.stratus_database_pool_size if pool_size is None else pool_size
+        )
+        resolved_max_overflow = (
+            settings.stratus_database_max_overflow
+            if max_overflow is None
+            else max_overflow
+        )
+        return create_async_engine(
+            migrated_database_url,
+            pool_pre_ping=True,
+            pool_size=resolved_pool_size,
+            max_overflow=resolved_max_overflow,
+        )
 
     monkeypatch.setattr(stratus.api, "create_engine", create_test_admin_engine)
 
@@ -138,6 +185,7 @@ _TRUNCATE_TABLES = (
     "job_runs",
     "validation_checkpoints",
     "health_audits",
+    "paper_canary_safety_leases",
     "operator_commands",
 )
 
@@ -171,21 +219,20 @@ async def db_sessions(
         )
         # Migration 0009 seeds the legacy Polymarket control row. It is not
         # truncated because fail-closed reads require it to exist, but every
-        # test must start from the same paper-mode baseline. Capacity and
-        # operator-command tests legitimately engage this switch.
+        # test must start from migration 0047's fail-closed PAPER baseline.
         await session.execute(
             text(
-                "UPDATE runtime_control SET kill_switch = false, "
+                "UPDATE runtime_control SET kill_switch = true, "
                 "mode = 'paper'::execution_mode, live_confirmation_until = NULL, "
                 "halted_reason = NULL, updated_at = now() WHERE id = 1"
             )
         )
-        # Migration 0017 seeds venue controls. Reset their safe baseline
-        # between tests without deleting the rows that fail-closed reads need.
+        # Migration 0047 seals the venue baseline: Polymarket PAPER is stopped
+        # until an observed lease resumes it; Binance is backtest-only.
         await session.execute(
             text(
                 "UPDATE venue_runtime_control SET enabled = true, "
-                "mode = 'paper'::venue_mode, kill_switch = false, "
+                "mode = 'paper'::venue_mode, kill_switch = true, "
                 "halted_reason = NULL, live_confirmation_until = NULL, "
                 "strategy_version = NULL, risk_config_version = 'legacy', "
                 "last_reconciled_at = NULL WHERE venue = 'polymarket'"
@@ -193,8 +240,8 @@ async def db_sessions(
         )
         await session.execute(
             text(
-                "UPDATE venue_runtime_control SET enabled = false, "
-                "mode = 'disabled'::venue_mode, kill_switch = true, "
+                "UPDATE venue_runtime_control SET enabled = true, "
+                "mode = 'backtest'::venue_mode, kill_switch = true, "
                 "halted_reason = NULL, live_confirmation_until = NULL, "
                 "strategy_version = NULL, "
                 "risk_config_version = 'v1-conservative', "
@@ -205,6 +252,128 @@ async def db_sessions(
         yield factory
     finally:
         await engine.dispose()
+
+
+@pytest.fixture
+async def canary_role_sessions(
+    db_sessions: async_sessionmaker[AsyncSession],
+    migrated_database_url: str,
+) -> AsyncIterator[SimpleNamespace]:
+    """Expose the actual runtime and safety logins, never SET ROLE stand-ins."""
+    owner_url = make_url(migrated_database_url)
+    runtime_password = "runtime_canary_role_test_password_0047"
+    safety_password = "safety_canary_role_test_password_0047"
+    async with db_sessions.begin() as owner:
+        database_name = await owner.scalar(text("SELECT current_database()"))
+        assert isinstance(database_name, str)
+        runtime_role = runtime_database_role_name(database_name)
+        safety_group_role = safety_database_group_role_name(database_name)
+        safety_role = safety_database_role_name(database_name)
+        await owner.execute(
+            text(f'ALTER ROLE "{runtime_role}" LOGIN PASSWORD \'{runtime_password}\'')
+        )
+        await owner.execute(
+            text(f'ALTER ROLE "{safety_role}" LOGIN PASSWORD \'{safety_password}\'')
+        )
+
+    runtime_engine = create_async_engine(
+        owner_url.set(username=runtime_role, password=runtime_password),
+        pool_pre_ping=True,
+    )
+    safety_engine = create_async_engine(
+        owner_url.set(username=safety_role, password=safety_password),
+        pool_pre_ping=True,
+    )
+    safety_emergency_engine = create_async_engine(
+        owner_url.set(username=safety_role, password=safety_password),
+        pool_pre_ping=True,
+    )
+    roles = SimpleNamespace(
+        runtime=async_sessionmaker(runtime_engine, expire_on_commit=False),
+        safety=async_sessionmaker(safety_engine, expire_on_commit=False),
+        safety_emergency=async_sessionmaker(
+            safety_emergency_engine,
+            expire_on_commit=False,
+        ),
+        runtime_role=runtime_role,
+        safety_group_role=safety_group_role,
+        safety_role=safety_role,
+    )
+    try:
+        async with roles.runtime() as session:
+            assert await session.scalar(
+                text("SELECT public.assert_stratus_runtime_boundary(true)")
+            ) is True
+        async with roles.safety() as session:
+            assert await session.scalar(
+                text("SELECT public.assert_stratus_safety_boundary(true)")
+            ) is True
+        async with roles.safety_emergency() as session:
+            assert await session.scalar(
+                text("SELECT public.assert_stratus_safety_boundary(true)")
+            ) is True
+        yield roles
+    finally:
+        await runtime_engine.dispose()
+        await safety_engine.dispose()
+        await safety_emergency_engine.dispose()
+        async with db_sessions.begin() as owner:
+            await owner.execute(
+                text(f'ALTER ROLE "{runtime_role}" NOLOGIN PASSWORD NULL')
+            )
+            await owner.execute(
+                text(f'ALTER ROLE "{safety_role}" NOLOGIN PASSWORD NULL')
+            )
+
+
+@pytest.fixture
+async def active_paper_canary(
+    db_sessions: async_sessionmaker[AsyncSession],
+    migrated_database_url: str,
+    canary_role_sessions: SimpleNamespace,
+) -> SimpleNamespace:
+    """Open one genuine, watchdog-observed PAPER execution lease.
+
+    Migration 0047 deliberately makes ``kill_switch=false`` impossible to
+    manufacture with a direct fixture UPDATE.  Execution tests therefore use
+    the same split safety/runtime control path as the release canary: the
+    safety login reserves a lease, the watchdog observes it, and the runtime
+    login consumes the exact reserved resume command.
+    """
+    roles = canary_role_sessions
+    nonce = "integration-paper-canary-nonce-" + ("n" * 32)
+    await acquire_paper_canary_lease_atomically(
+        roles.safety,
+        lease_id="integration-paper-canary-lease",
+        run_id="integration-paper-canary-run",
+        acquire_request_id="integration-paper-canary-acquire",
+        resume_request_id="integration-paper-canary-resume",
+        direct_stop_request_id="integration-paper-canary-direct-stop",
+        release_request_id="integration-paper-canary-release",
+        resume_actor="integration-suite",
+        resume_reason="Exercise PAPER execution under migration 0047.",
+        nonce=nonce,
+        ttl_seconds=30,
+    )
+    assert await run_paper_canary_watchdog_once(roles.safety) is None
+    async with roles.runtime.begin() as session:
+        await enqueue_command(
+            session,
+            request_id="integration-paper-canary-resume",
+            command="resume",
+            payload={"venue": "polymarket"},
+            actor="integration-suite",
+            reason="Exercise PAPER execution under migration 0047.",
+        )
+    assert await process_operator_commands(
+        Settings(_env_file=None, database_url=migrated_database_url),
+        roles.runtime,
+    ) == (1, 1)
+    async with db_sessions() as session:
+        assert await session.scalar(
+            text("SELECT public.paper_canary_execution_authorized()")
+        ) is True
+    return roles
 
 
 @pytest.fixture

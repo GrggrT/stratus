@@ -115,6 +115,12 @@ async def test_archive_manifest_is_idempotent_and_failed_day_is_retryable(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
     async with db_sessions.begin() as session:
+        legacy = await session.get(RuntimeControl, 1, with_for_update=True)
+        assert legacy is not None
+        # Migration 0047 boots the global control fail-closed. Establish the
+        # prior state explicitly so this test can prove that a Binance archive
+        # failure seals only Binance and does not mutate the legacy control.
+        legacy.kill_switch = False
         await set_venue_enabled(session, TradingVenue.BINANCE_SPOT, True)
         await set_venue_mode(session, TradingVenue.BINANCE_SPOT, VenueMode.BACKTEST)
         await set_venue_kill_switch(session, TradingVenue.BINANCE_SPOT, False)

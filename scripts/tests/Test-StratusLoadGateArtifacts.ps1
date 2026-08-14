@@ -17,6 +17,20 @@ $parseErrors = $null
 if ($parseErrors.Count -ne 0) {
     throw 'Composite load-gate assertion has PowerShell syntax errors.'
 }
+$source = Get-Content -LiteralPath $scriptPath -Raw
+foreach ($requiredSourcePattern in @(
+    '[IO.File]::ReadAllBytes($absoluteHttp)',
+    '[IO.File]::ReadAllBytes($absoluteRuntime)',
+    'Get-BytesSha256 -Bytes $httpBytes',
+    'Get-BytesSha256 -Bytes $runtimeBytes'
+)) {
+    if (-not $source.Contains($requiredSourcePattern)) {
+        throw "Composite load-gate lacks exact-byte evidence binding: $requiredSourcePattern"
+    }
+}
+if ($source -match '(?im)\bGet-FileHash\b') {
+    throw 'Composite load-gate re-reads an artifact while hashing it.'
+}
 
 $hostExecutable = (Get-Process -Id $PID).Path
 $validationOutput = & $hostExecutable `
@@ -44,7 +58,9 @@ if (
     -not $validation.requires_raw_sample_coverage -or
     -not $validation.requires_exact_http_configuration -or
     -not $validation.requires_raw_http_reconciliation -or
-    -not $validation.requires_raw_runtime_reconciliation
+    -not $validation.requires_raw_runtime_reconciliation -or
+    -not $validation.requires_raw_topology_reconciliation -or
+    -not $validation.requires_topology_hash_binding
 ) {
     throw 'Composite load-gate validation contract is incomplete.'
 }
@@ -295,7 +311,7 @@ try {
                 max_api_idle_tx_seconds = 0.0
                 lock_waiters = 0
                 oldest_api_query_seconds = 0.25
-                schema_head = '20260730_0046'
+                schema_head = '20260730_0047'
                 controls_ok = $true
                 pending_commands = 0
                 live_orders = 0
@@ -312,8 +328,51 @@ try {
                 at = $firstSample.AddSeconds($_ * 5).ToString('O')
                 api_cpu_percent = 12.0
                 api_memory_percent = 20.0
+                api_memory_limit_bytes = 1073741824L
+                api_operator_key_entry_count = 1
                 postgres_cpu_percent = 30.0
                 postgres_memory_percent = 35.0
+            }
+        }
+    )
+    $topologySamples = @(
+        0..78 | ForEach-Object {
+            $topologyAt = if ($_ -eq 78) {
+                [DateTimeOffset]::Parse('2026-07-29T10:06:30Z')
+            }
+            else {
+                $firstSample.AddSeconds($_ * 5)
+            }
+            $projectRows = @(
+                [pscustomobject]@{
+                    container_id = 'api-container'
+                    project = 'weatherpoly'
+                    service = 'api'
+                    oneoff = 'False'
+                    container_name = 'weatherpoly-api-1'
+                    networks = @('weatherpoly_default')
+                },
+                [pscustomobject]@{
+                    container_id = 'postgres-container'
+                    project = 'weatherpoly'
+                    service = 'postgres'
+                    oneoff = 'False'
+                    container_name = 'weatherpoly-postgres-1'
+                    networks = @('weatherpoly_default','weatherpoly_safety-plane')
+                }
+            )
+            [pscustomobject]@{
+                at = $topologyAt.ToString('O')
+                project = 'weatherpoly'
+                allowed_services = @('api','postgres')
+                protected_networks = @('weatherpoly_default','weatherpoly_safety-plane')
+                running_services = @('api','postgres')
+                all_running_container_count = 2
+                all_running_containers = @($projectRows)
+                running_containers = @($projectRows)
+                unexpected_containers = @()
+                missing_container_ids = @()
+                safe = $true
             }
         }
     )
@@ -327,7 +386,7 @@ try {
         max_api_idle_tx_seconds = 0.0
         lock_waiters = 0
         oldest_api_query_seconds = 0.0
-        schema_head = '20260730_0046'
+        schema_head = '20260730_0047'
         controls_ok = $true
         pending_commands = 0
         live_orders = 0
@@ -347,7 +406,7 @@ try {
         database_interval_seconds = 1
         resource_interval_seconds = 5
         drain_seconds = 5
-        expected_schema_head = '20260730_0046'
+        expected_schema_head = '20260730_0047'
         maximum_api_sessions = 4
         expected_api_image_id = $imageId
         expected_revision = $revision
@@ -359,10 +418,12 @@ try {
             postgres_container_id = 'postgres-container'
             postgres_image_id = 'sha256:' + ('e' * 64)
             postgres_restart_count = 0
+            compose_project = 'weatherpoly'
         }
         summary = [pscustomobject]@{
             database_sample_count = 351
             resource_sample_count = 70
+            topology_sample_count = 79
             minimum_database_samples = 351
             minimum_resource_samples = 70
             sample_errors = 0
@@ -385,6 +446,7 @@ try {
             containers_healthy = $true
             candidate_identity_held = $true
             application_writers_stopped = $true
+            exact_project_topology_held = $true
             invariants_changed = $false
             drain_passed = $true
             runtime_passed = $true
@@ -394,6 +456,7 @@ try {
         sample_errors = @()
         database_samples = $databaseSamples
         resource_samples = $resourceSamples
+        topology_samples = $topologySamples
     }
     $validHttpJson = $http | ConvertTo-Json -Depth 12
     $validRuntimeJson = $runtime | ConvertTo-Json -Depth 12
@@ -416,7 +479,15 @@ try {
     if (
         -not $accepted.production_gate_passed -or
         $accepted.run_id -ne $runId -or
-        -not $accepted.overlap.runtime_covers_http_and_drain
+        -not $accepted.overlap.runtime_covers_http_and_drain -or
+        [string]$accepted.evidence.http_sha256 -cne (
+            Get-FileHash -LiteralPath $httpPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant() -or
+        [string]$accepted.evidence.runtime_sha256 -cne (
+            Get-FileHash -LiteralPath $runtimePath -Algorithm SHA256
+        ).Hash.ToLowerInvariant() -or
+        [int]$accepted.evidence.topology_sample_count -ne 79 -or
+        [string]$accepted.evidence.topology_sha256 -notmatch '^[0-9a-f]{64}$'
     ) {
         throw 'Composite load-gate did not bind valid evidence correctly.'
     }
@@ -520,6 +591,91 @@ try {
     $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
     if (@($rejected.violations) -notcontains 'runtime_database_evidence') {
         throw 'Malformed raw runtime rejection did not preserve its violation.'
+    }
+
+    $wrongMemoryRuntime = $validRuntimeJson | ConvertFrom-Json
+    $wrongMemoryRuntime.resource_samples[10].api_memory_limit_bytes = 2147483648L
+    $exitCode = Invoke-TestGate `
+        -Http $validHttp -Runtime $wrongMemoryRuntime `
+        -HttpPath $httpPath -RuntimePath $runtimePath -AcceptedPath $acceptedPath `
+        -RunId $runId -ImageId $imageId -Revision $revision -Digest $digest
+    if ($exitCode -ne 1) {
+        throw 'Transient API memory-cap inflation did not fail the composite load gate.'
+    }
+    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    if (@($rejected.violations) -notcontains 'runtime_resource_evidence') {
+        throw 'API memory-cap rejection did not preserve its violation.'
+    }
+
+    $missingOperatorRuntime = $validRuntimeJson | ConvertFrom-Json
+    $missingOperatorRuntime.resource_samples[10].api_operator_key_entry_count = 0
+    $exitCode = Invoke-TestGate `
+        -Http $validHttp -Runtime $missingOperatorRuntime `
+        -HttpPath $httpPath -RuntimePath $runtimePath -AcceptedPath $acceptedPath `
+        -RunId $runId -ImageId $imageId -Revision $revision -Digest $digest
+    if ($exitCode -ne 1) {
+        throw 'Transient API operator-credential removal did not fail the load gate.'
+    }
+    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    if (@($rejected.violations) -notcontains 'runtime_resource_evidence') {
+        throw 'API operator-credential rejection did not preserve its violation.'
+    }
+
+    $validHttp = $validHttpJson | ConvertFrom-Json
+    $unsafeTopologyRuntime = $validRuntimeJson | ConvertFrom-Json
+    $unsafeTopologyRuntime.topology_samples[10].all_running_containers += @(
+        [pscustomobject]@{
+            container_id = 'worker-container'
+            project = 'foreign-project'
+            service = 'worker'
+            oneoff = 'False'
+            container_name = 'foreign-worker'
+            networks = @('weatherpoly_default')
+        }
+    )
+    $unsafeTopologyRuntime.topology_samples[10].all_running_container_count = 3
+    $exitCode = Invoke-TestGate `
+        -Http $validHttp -Runtime $unsafeTopologyRuntime `
+        -HttpPath $httpPath -RuntimePath $runtimePath -AcceptedPath $acceptedPath `
+        -RunId $runId -ImageId $imageId -Revision $revision -Digest $digest
+    if ($exitCode -ne 1) {
+        throw 'Forged safe topology hiding a protected-network container did not fail.'
+    }
+    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    if (@($rejected.violations) -notcontains 'runtime_topology_evidence') {
+        throw 'Unexpected-container topology rejection lost its violation.'
+    }
+
+    $shortTopologyRuntime = $validRuntimeJson | ConvertFrom-Json
+    $shortTopologyRuntime.topology_samples = @(
+        $shortTopologyRuntime.topology_samples | Select-Object -First 69
+    )
+    $shortTopologyRuntime.summary.topology_sample_count = 69
+    $exitCode = Invoke-TestGate `
+        -Http $validHttp -Runtime $shortTopologyRuntime `
+        -HttpPath $httpPath -RuntimePath $runtimePath -AcceptedPath $acceptedPath `
+        -RunId $runId -ImageId $imageId -Revision $revision -Digest $digest
+    if ($exitCode -ne 1) {
+        throw 'Insufficient raw topology coverage did not fail.'
+    }
+    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    if (@($rejected.violations) -notcontains 'runtime_sample_coverage') {
+        throw 'Topology coverage rejection lost its violation.'
+    }
+
+    $forgedSummaryRuntime = $validRuntimeJson | ConvertFrom-Json
+    $forgedSummaryRuntime.summary.topology_sample_count = 80
+    $forgedSummaryRuntime.summary.exact_project_topology_held = $false
+    $exitCode = Invoke-TestGate `
+        -Http $validHttp -Runtime $forgedSummaryRuntime `
+        -HttpPath $httpPath -RuntimePath $runtimePath -AcceptedPath $acceptedPath `
+        -RunId $runId -ImageId $imageId -Revision $revision -Digest $digest
+    if ($exitCode -ne 1) {
+        throw 'Forged topology summary did not fail reconciliation.'
+    }
+    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    if (@($rejected.violations) -notcontains 'runtime_summary_reconciliation') {
+        throw 'Topology summary rejection lost its violation.'
     }
 }
 finally {

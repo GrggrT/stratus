@@ -11,7 +11,8 @@ __pycache__
 htmlcov
 apps
 backups
-docs
+docs/*
+!docs/RELEASE_CUTOVER_RUNBOOK.md
 tests
 *.log
 *.dump

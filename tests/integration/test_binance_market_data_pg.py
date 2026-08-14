@@ -202,6 +202,12 @@ class FakeBookTickerStream:
 
 async def _enable_binance_shadow(sessions: SessionFactory) -> None:
     async with sessions.begin() as session:
+        legacy = await session.get(RuntimeControl, 1, with_for_update=True)
+        assert legacy is not None
+        # Migration 0047 starts fail-closed. These tests intentionally exercise
+        # venue-local Binance halts and therefore establish an open legacy
+        # control as an explicit precondition.
+        legacy.kill_switch = False
         await set_venue_enabled(session, TradingVenue.BINANCE_SPOT, True)
         await set_venue_mode(session, TradingVenue.BINANCE_SPOT, VenueMode.SHADOW)
         await set_venue_kill_switch(session, TradingVenue.BINANCE_SPOT, False)

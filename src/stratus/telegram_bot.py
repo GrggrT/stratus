@@ -15,8 +15,6 @@ from stratus.db.models import ExecutionMode
 from stratus.db.session import create_engine, create_session_factory, verify_runtime_engine
 from stratus.repositories.markets import verify_market_station
 from stratus.repositories.runtime_control import (
-    get_runtime_control,
-    request_live_confirmation,
     set_kill_switch,
     set_mode,
 )
@@ -30,9 +28,7 @@ from stratus.repositories.telegram import (
     mark_delivery_sent,
     record_notification_heartbeat,
 )
-from stratus.services.live_execution import live_executor_configured
 from stratus.services.telegram_reports import (
-    calculate_live_gate,
     calibration_report,
     daily_report,
     live_equity_chart,
@@ -72,8 +68,9 @@ def build_router(settings: Settings, session_factory: object) -> Router:
             "/daily — previous-day P&L and CLV\n"
             "/live — live P&L, ROI, and CLV retrospective\n"
             "/verify <market_id> — approve parsed station\n"
-            "/stop /resume — kill switch\n"
-            "/mode paper|live — execution mode"
+            "/stop — engage kill switch\n"
+            "/resume — blocked outside release canary\n"
+            "/mode paper — execution mode (LIVE is disabled)"
         )
 
     @router.message(Command("status"))
@@ -134,13 +131,10 @@ def build_router(settings: Settings, session_factory: object) -> Router:
     async def resume_handler(message: Message) -> None:
         if await _deny_unless_admin(message, settings):
             return
-        try:
-            async with session_factory.begin() as session:  # type: ignore[attr-defined]
-                await set_kill_switch(session, False)
-        except RuntimeError as exc:
-            await message.answer(f"Resume blocked: {exc}")
-        else:
-            await message.answer("Kill switch off.")
+        await message.answer(
+            "Resume blocked: Polymarket PAPER may resume only through an "
+            "active DB-clock release-canary safety lease."
+        )
 
     @router.message(Command("verify"))
     async def verify_handler(message: Message) -> None:
@@ -161,53 +155,14 @@ def build_router(settings: Settings, session_factory: object) -> Router:
             return
         parts = (message.text or "").lower().split()
         if len(parts) != 2 or parts[1] not in {"paper", "live"}:
-            await message.answer("Usage: /mode paper|live")
+            await message.answer("Usage: /mode paper (LIVE is disabled in this PAPER-only release)")
+            return
+        if parts[1] == "live":
+            await message.answer("Live mode is disabled for this PAPER-only release.")
             return
         async with session_factory.begin() as session:  # type: ignore[attr-defined]
-            if parts[1] == "paper":
-                await set_mode(session, ExecutionMode.PAPER)
-                response = "Mode set to paper."
-            else:
-                if not settings.live_legal_approved:
-                    response = "Live mode blocked: Austrian legal classification is not approved."
-                elif not settings.live_tax_approved:
-                    response = "Live mode blocked: Austrian tax treatment is not approved."
-                else:
-                    gate = await calculate_live_gate(
-                        session,
-                        settings.initial_bankroll_usd,
-                        min_stations=settings.live_gate_min_stations,
-                        station_samples=settings.live_gate_station_samples,
-                        station_brier=settings.live_gate_station_brier,
-                        independent_samples_min=settings.live_gate_independent_samples,
-                    )
-                    if not gate.passed:
-                        response = "Live mode blocked: validation gate has not passed. Use /calib."
-                    else:
-                        control = await get_runtime_control(session)
-                        now = datetime.now(UTC)
-                        if (
-                            control.live_confirmation_until is None
-                            or control.live_confirmation_until < now
-                        ):
-                            deadline = await request_live_confirmation(session)
-                            response = (
-                                "Gate passed. Repeat /mode live before "
-                                f"{deadline:%H:%M:%S} UTC to confirm."
-                            )
-                        elif not live_executor_configured(settings.polygon_private_key):
-                            response = (
-                                "Live mode remains blocked: no trading wallet is "
-                                "configured (POLYGON_PRIVATE_KEY)."
-                            )
-                        else:
-                            await set_mode(session, ExecutionMode.LIVE)
-                            response = (
-                                "LIVE mode enabled. The executor will place real "
-                                "orders on the next cycle. Use /stop to halt "
-                                "immediately."
-                            )
-        await message.answer(response)
+            await set_mode(session, ExecutionMode.PAPER)
+        await message.answer("Mode set to paper.")
 
     return router
 
@@ -278,6 +233,18 @@ async def notification_loop(bot: Bot, settings: Settings, session_factory: objec
         await asyncio.sleep(5)
 
 
+def _bot_commands() -> list[BotCommand]:
+    return [
+        BotCommand(command="status", description="Bankroll and exposure"),
+        BotCommand(command="calib", description="Calibration and live gate"),
+        BotCommand(command="daily", description="Previous-day paper results"),
+        BotCommand(command="live", description="Live P&L, ROI, and CLV"),
+        BotCommand(command="stop", description="Engage kill switch"),
+        BotCommand(command="resume", description="Blocked outside release canary"),
+        BotCommand(command="mode", description="Set PAPER mode"),
+    ]
+
+
 async def run_bot(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
     if not settings.telegram_bot_token:
@@ -290,17 +257,7 @@ async def run_bot(settings: Settings | None = None) -> None:
     bot = Bot(token=settings.telegram_bot_token)
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(settings, session_factory))
-    await bot.set_my_commands(
-        [
-            BotCommand(command="status", description="Bankroll and exposure"),
-            BotCommand(command="calib", description="Calibration and live gate"),
-            BotCommand(command="daily", description="Previous-day paper results"),
-            BotCommand(command="live", description="Live P&L, ROI, and CLV"),
-            BotCommand(command="stop", description="Enable kill switch"),
-            BotCommand(command="resume", description="Disable kill switch"),
-            BotCommand(command="mode", description="Set paper or live mode"),
-        ]
-    )
+    await bot.set_my_commands(_bot_commands())
     notifier = asyncio.create_task(notification_loop(bot, settings, session_factory))
     try:
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())

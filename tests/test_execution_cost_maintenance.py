@@ -49,7 +49,9 @@ class _FakeFactory:
         return _FakeTransaction(self)
 
 
-async def test_composite_uses_one_clock_and_two_committed_phases(monkeypatch) -> None:
+async def test_composite_uses_one_clock_and_two_committed_phases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     factory = _FakeFactory()
     observed_at = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
     clocks = 0
@@ -66,7 +68,11 @@ async def test_composite_uses_one_clock_and_two_committed_phases(monkeypatch) ->
     ) -> MarkoutSealRun:
         assert now == observed_at
         session.writes.append("mark")
-        return MarkoutSealRun(obligations_claimed=1, marks_observed=1)
+        return MarkoutSealRun(
+            obligations_claimed=1,
+            marks_observed=1,
+            obligation_ids=(41,),
+        )
 
     async def fake_finalize(
         session: _FakeSession,
@@ -75,11 +81,21 @@ async def test_composite_uses_one_clock_and_two_committed_phases(monkeypatch) ->
     ) -> ObligationFinalizationRun:
         assert now == observed_at
         session.writes.append("seal")
-        return ObligationFinalizationRun(obligations_claimed=1, obligations_sealed=1)
+        return ObligationFinalizationRun(
+            obligations_claimed=1,
+            obligations_sealed=1,
+            obligation_ids=(52,),
+        )
 
     monkeypatch.setattr(maintenance, "execution_cost_clock_timestamp", fake_clock)
     monkeypatch.setattr(maintenance, "seal_due_execution_markouts", fake_markouts)
     monkeypatch.setattr(maintenance, "finalize_execution_cost_obligations", fake_finalize)
+    log_messages: list[str] = []
+
+    def capture_info(message: str, *args: object) -> None:
+        log_messages.append(message % args)
+
+    monkeypatch.setattr(maintenance.logger, "info", capture_info)
 
     result = await maintenance.maintain_execution_cost_evidence(
         Settings(_env_file=None),
@@ -90,6 +106,9 @@ async def test_composite_uses_one_clock_and_two_committed_phases(monkeypatch) ->
     assert factory.events == ["begin", "commit", "begin", "commit"]
     assert factory.durable == ["mark", "seal"]
     assert result.observed_at == observed_at
+    assert len(log_messages) == 1
+    assert "mark_ids=41" in log_messages[0]
+    assert "finalize_ids=52" in log_messages[0]
 
 
 async def test_finalizer_failure_cannot_rollback_committed_marks(monkeypatch) -> None:

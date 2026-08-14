@@ -411,6 +411,12 @@ async def test_shadow_residual_drift_warns_without_engaging_kill_switch(
     assessment = await audit_storage_capacity(settings, db_sessions)
     assert assessment.severity != "blocking"
     async with db_sessions.begin() as session:
+        control = await session.get(RuntimeControl, 1, with_for_update=True)
+        assert control is not None
+        # Migration 0047 deliberately boots fail-closed. This test exercises the
+        # narrower invariant that shadow-only drift must not engage a previously
+        # open global kill switch, so establish that precondition explicitly.
+        control.kill_switch = False
         session.add(
             ModelDriftEvent(
                 event_key="shadow-drift-health-test",

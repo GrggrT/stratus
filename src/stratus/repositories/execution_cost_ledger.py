@@ -105,6 +105,7 @@ class MarkoutSealRun:
     marks_observed: int = 0
     marks_missing: int = 0
     obligations_deferred: int = 0
+    obligation_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +113,7 @@ class ObligationFinalizationRun:
     obligations_claimed: int = 0
     obligations_sealed: int = 0
     obligations_deferred: int = 0
+    obligation_ids: tuple[int, ...] = ()
 
 
 async def append_live_reconciliation_observation(
@@ -1288,6 +1290,7 @@ async def seal_due_execution_markouts(
         marks_observed=marks_observed,
         marks_missing=marks_missing,
         obligations_deferred=deferred,
+        obligation_ids=tuple(obligation.id for obligation in obligations),
     )
 
 
@@ -1352,6 +1355,7 @@ async def finalize_execution_cost_obligations(
         obligations_claimed=len(obligations),
         obligations_sealed=sealed,
         obligations_deferred=deferred,
+        obligation_ids=tuple(obligation.id for obligation in obligations),
     )
 
 

@@ -277,6 +277,119 @@ def test_0046_accuracy_overview_indexes_fork_only_operational_lane() -> None:
     )
 
 
+def test_0047_paper_canary_safety_lease_forks_only_operational_lane() -> None:
+    migration = "migrations/versions/20260730_0047_paper_canary_safety_lease.py"
+
+    assert ALEMBIC_HEAD == "20260730_0047"
+    assert migration in _LANE_REPOSITORY_SOURCE_FILES["operational_legacy"]
+    assert all(
+        migration not in paths
+        for lane, paths in _LANE_REPOSITORY_SOURCE_FILES.items()
+        if lane != "operational_legacy"
+    )
+    assert {
+        "api.py",
+        "jobs/audit_gate.py",
+        "jobs/process_operator_commands.py",
+        "repositories/emergency_stop.py",
+        "repositories/paper_canary_leases.py",
+        "repositories/runtime_control.py",
+        "repositories/safety_lock.py",
+        "repositories/venue_runtime_control.py",
+        "services/evidence_release_manifest.py",
+        "services/operator_commands.py",
+        "services/safety_control.py",
+        "safety_api.py",
+        "telegram_bot.py",
+    } <= set(_LANE_SOURCE_FILES["operational_legacy"])
+    assert {
+        ".github/workflows/ci.yml",
+        "docs/RELEASE_CUTOVER_RUNBOOK.md",
+        "scripts/Assert-StratusLoadGateArtifacts.ps1",
+        "scripts/Assert-StratusPaperCanaryArtifacts.ps1",
+        "scripts/Assert-StratusPreStartTopology.ps1",
+        "scripts/Assert-StratusReleaseImage.ps1",
+        "scripts/Invoke-StratusDashboardLoadGate.ps1",
+        "scripts/Invoke-StratusPaperCanary.ps1",
+        "scripts/Invoke-StratusPaperCanaryStopBarrier.ps1",
+        "scripts/Invoke-StratusRuntimeLoadObserver.ps1",
+        "scripts/tests/Test-StratusDashboardLoadGate.ps1",
+        "scripts/tests/Test-StratusLoadGateArtifacts.ps1",
+        "scripts/tests/Test-StratusPaperCanary.ps1",
+        "scripts/tests/Test-StratusPaperCanaryArtifacts.ps1",
+        "scripts/tests/Test-StratusPaperCanaryStopBarrier.ps1",
+        "scripts/tests/Test-StratusPreMigrationBackupGate.ps1",
+        "scripts/tests/Test-StratusPreStartTopology.ps1",
+        "scripts/tests/Test-StratusReleaseImage.ps1",
+        "scripts/tests/Test-StratusReleaseRunbook.ps1",
+        "scripts/tests/Test-StratusRuntimeLoadObserver.ps1",
+    } <= set(_LANE_REPOSITORY_SOURCE_FILES["operational_legacy"])
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "api.py",
+        "jobs/audit_gate.py",
+        "services/evidence_release_manifest.py",
+    ],
+)
+def test_operational_boundary_source_change_changes_manifest_hash(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    assert source in _LANE_SOURCE_FILES["operational_legacy"]
+
+    package_root = tmp_path / "src" / "stratus"
+    source_path = package_root / source
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("first operational boundary", encoding="utf-8")
+    first, _ = _source_file_manifests(package_root, tmp_path)
+    source_path.write_text("second operational boundary", encoding="utf-8")
+    second, _ = _source_file_manifests(package_root, tmp_path)
+
+    first_row = next(
+        row for row in first["operational_legacy"] if row["path"] == source
+    )
+    second_row = next(
+        row for row in second["operational_legacy"] if row["path"] == source
+    )
+    assert first_row["sha256"] != second_row["sha256"]
+
+
+def test_every_stratus_release_gate_and_contract_is_in_operational_lane() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    gate_scripts = {
+        path.relative_to(repository_root).as_posix()
+        for pattern in ("Assert-Stratus*.ps1", "Invoke-Stratus*.ps1")
+        for path in (repository_root / "scripts").glob(pattern)
+    }
+    contract_scripts = {
+        path.relative_to(repository_root).as_posix()
+        for path in (repository_root / "scripts" / "tests").glob("Test-Stratus*.ps1")
+    }
+
+    assert gate_scripts | contract_scripts <= set(
+        _LANE_REPOSITORY_SOURCE_FILES["operational_legacy"]
+    )
+
+
+def test_operational_release_sources_are_present_in_candidate_image() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    dockerfile = (repository_root / "Dockerfile").read_text(encoding="utf-8")
+    dockerignore = (repository_root / ".dockerignore").read_text(encoding="utf-8")
+
+    assert (
+        "COPY .github/workflows/ci.yml ./.github/workflows/ci.yml" in dockerfile
+    )
+    assert (
+        "COPY docs/RELEASE_CUTOVER_RUNBOOK.md "
+        "./docs/RELEASE_CUTOVER_RUNBOOK.md" in dockerfile
+    )
+    assert "docs/*" in dockerignore.splitlines()
+    assert "!docs/RELEASE_CUTOVER_RUNBOOK.md" in dockerignore.splitlines()
+
+
 def test_locked_dependency_graph_is_hashed_into_every_lane(tmp_path: Path) -> None:
     for lane in LANE_NAMES:
         assert {"pyproject.toml", "uv.lock"} <= set(

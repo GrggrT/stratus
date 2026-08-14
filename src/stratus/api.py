@@ -20,6 +20,7 @@ from starlette.responses import Response
 from stratus.config import Settings, get_settings
 from stratus.db.models import HealthAudit
 from stratus.db.session import (
+    RuntimeDatabaseBoundaryError,
     RuntimeReadCapacityError,
     create_engine,
     create_read_session_factory,
@@ -245,6 +246,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "retryable": True,
             },
             headers={"Retry-After": "1"},
+        )
+
+    @app.exception_handler(RuntimeDatabaseBoundaryError)
+    async def runtime_database_boundary_failure(
+        _request: Request,
+        _error: RuntimeDatabaseBoundaryError,
+    ) -> JSONResponse:
+        logger.error("runtime database boundary rejected a checkout")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "runtime database boundary rejected",
+                "retryable": False,
+            },
         )
 
     @app.get("/healthz")

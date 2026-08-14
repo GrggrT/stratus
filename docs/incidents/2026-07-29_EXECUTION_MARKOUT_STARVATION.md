@@ -351,8 +351,8 @@ fail-closed runtime state and immutable evidence were reverified before any migr
 continued.
 
 The operational rule is now explicit: stage the migration service with
-`docker compose up --no-start --no-deps`, together with the reviewed exact image and the other
-no-build/no-pull controls. Installed Compose v2.38 cannot combine `compose create` with
+`docker compose --profile release up --no-start --no-deps`, together with the reviewed exact
+image and the other no-build/no-pull controls. Installed Compose v2.38 cannot combine `compose create` with
 `--no-deps`, so `compose create` is prohibited for this cutover. Dependency recreation is not an
 acceptable side effect of migration staging.
 

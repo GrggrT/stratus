@@ -67,13 +67,9 @@ def _reject_read_lane_mutation(execute_state: ORMExecuteState) -> None:
         or execute_state.is_delete
         or bool(getattr(statement, "is_dml", False))
         or any(
-            isinstance(element, UpdateBase)
-            for element in visitors.iterate(cast(Any, statement))
+            isinstance(element, UpdateBase) for element in visitors.iterate(cast(Any, statement))
         )
-        or (
-            isinstance(statement, TextClause)
-            and not _text_statement_is_read_only(statement)
-        )
+        or (isinstance(statement, TextClause) and not _text_statement_is_read_only(statement))
     ):
         raise RuntimeReadOnlyError("runtime read sessions reject mutating statements")
 
@@ -99,6 +95,14 @@ class _BoundaryConnection(Protocol):
     def cursor(self) -> _BoundaryCursor: ...
 
 
+class _BoundaryConnectionRecord(Protocol):
+    def invalidate(
+        self,
+        exception: BaseException | None = None,
+        soft: bool = False,
+    ) -> None: ...
+
+
 def _assert_runtime_connection(
     dbapi_connection: object,
     _connection_record: object,
@@ -108,11 +112,24 @@ def _assert_runtime_connection(
         cursor.execute("SELECT public.assert_stratus_runtime_boundary(true)")
         row = cursor.fetchone()
         if row is None or len(row) != 1 or row[0] is not True:
-            raise RuntimeDatabaseBoundaryError(
-                "database rejected the STRATUS runtime boundary"
-            )
+            raise RuntimeDatabaseBoundaryError("database rejected the STRATUS runtime boundary")
     finally:
         cursor.close()
+
+
+def _assert_runtime_checkout(
+    dbapi_connection: object,
+    connection_record: object,
+    _connection_proxy: object,
+) -> None:
+    """Re-prove and invalidate a pooled connection before every borrower."""
+    try:
+        _assert_runtime_connection(dbapi_connection, connection_record)
+    except Exception as exc:
+        cast(_BoundaryConnectionRecord, connection_record).invalidate(exc)
+        if isinstance(exc, RuntimeDatabaseBoundaryError):
+            raise
+        raise RuntimeDatabaseBoundaryError("runtime database boundary assertion failed") from exc
 
 
 def _runtime_server_settings(
@@ -149,19 +166,13 @@ def create_engine(
     database_url = settings.resolved_database_url()
     parsed_url = make_url(database_url)
     database_name = parsed_url.database
-    if database_name is None or parsed_url.username != runtime_database_role_name(
-        database_name
-    ):
+    if database_name is None or parsed_url.username != runtime_database_role_name(database_name):
         raise RuntimeDatabaseBoundaryError(
             "runtime entrypoints require the database-scoped stratus_app role"
         )
-    resolved_pool_size = (
-        settings.stratus_database_pool_size if pool_size is None else pool_size
-    )
+    resolved_pool_size = settings.stratus_database_pool_size if pool_size is None else pool_size
     resolved_max_overflow = (
-        settings.stratus_database_max_overflow
-        if max_overflow is None
-        else max_overflow
+        settings.stratus_database_max_overflow if max_overflow is None else max_overflow
     )
     if resolved_pool_size < 1 or resolved_max_overflow < 0:
         raise ValueError("runtime engine pool bounds must be non-negative and nonzero")
@@ -179,6 +190,7 @@ def create_engine(
         },
     )
     event.listen(engine.sync_engine, "connect", _assert_runtime_connection)
+    event.listen(engine.sync_engine, "checkout", _assert_runtime_checkout)
     return engine
 
 

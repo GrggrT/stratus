@@ -173,7 +173,8 @@ All eight roadmap items landed in the follow-up pass:
    lock, and the retention delete — the SQL the mock-based unit tests can
    only compile, never execute. Activated by `STRATUS_TEST_DATABASE_URL`;
    CI provides a `postgres:16` service container, locally use
-   `docker compose up -d postgres` plus a `stratus_test` database.
+   `docker compose --profile infrastructure up -d postgres` plus a
+   `stratus_test` database.
 2. **Actuals-vs-resolution reconciliation.** The health audit joins
    resolved markets to our METAR-derived `daily_actuals` and raises
    `actuals_resolution_mismatch` when a market resolved against what our

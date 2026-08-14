@@ -16,6 +16,8 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY README.md alembic.ini Dockerfile docker-compose.yml .dockerignore ./
 COPY migrations ./migrations
 COPY ops/postgres/stratus-pg_hba.conf ./ops/postgres/stratus-pg_hba.conf
+COPY .github/workflows/ci.yml ./.github/workflows/ci.yml
+COPY docs/RELEASE_CUTOVER_RUNBOOK.md ./docs/RELEASE_CUTOVER_RUNBOOK.md
 COPY src ./src
 COPY scripts ./scripts
 COPY scripts/stratus-runtime-entrypoint.sh /usr/local/bin/stratus-runtime-entrypoint

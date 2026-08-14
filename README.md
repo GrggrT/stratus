@@ -25,10 +25,10 @@ $runtimePassword = [Convert]::ToHexString(
   [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
 ).ToLowerInvariant()
 Set-Content .secrets\stratus_runtime_password $runtimePassword -NoNewline
-docker compose up -d postgres
+docker compose --profile infrastructure up -d postgres
 uv sync --extra dev
 uv run alembic upgrade head
-docker compose run --rm --no-deps provision-runtime-role
+docker compose --profile release run --rm --no-deps provision-runtime-role
 uv run stratus-fetch-forecasts
 uv run stratus-fetch-ensemble
 uv run stratus-discover-markets
@@ -390,7 +390,7 @@ The unauthenticated health surface exposes only `GET /healthz` (process liveness
 operator API to `127.0.0.1:8000`; no web UI or OpenAPI page is enabled, and mutations remain
 authenticated, allowlisted operator commands.
 
-Start daily database backups with `docker compose up -d backup`. A shared filesystem `flock`
+Start daily database backups with `docker compose --profile infrastructure up -d backup`. A shared filesystem `flock`
 serializes all writers. Each accepted restore point is atomically published as a
 `backups/stratus_<UTC>_<instance>_<pid>.backup/` directory containing `stratus.dump`,
 `catalog.list`, and `manifest.txt`; the manifest records archive/catalog SHA-256, byte and catalog

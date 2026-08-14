@@ -5,6 +5,11 @@ validated, operator-grade trading system.
 
 Last updated: 2026-07-29.
 
+Autonomous operating contract:
+`docs/AUTONOMOUS_PRODUCT_EXECUTION_PLAN.md` defines the product outcome,
+decision rights, non-negotiable safety invariants, operating cadence, and
+current execution queue.
+
 Related detail plan: `docs/EDGE_VALIDATION_PLAN.md` expands the anti-luck
 workstream: skill/luck PnL decomposition, bootstrap confidence intervals,
 execution-cost filters, potential-win sizing caps, calibration shrinkage, and
@@ -74,6 +79,7 @@ edge is positive. `P6 blocked` and `P7 blocked` are intentional fail-closed stat
 |---|---|---|---|
 | Now | Close the 2026-07-29 execution-markout starvation incident | none | `docs/PRODUCTION_READINESS_CHECKLIST.md` fully evidenced |
 | Now | Freeze, build, and stage the exact candidate while both venue kill switches remain engaged | verified source + restore | clean commit, green CI, immutable image digest, staged identity |
+| Now | Prove the independent PAPER-canary safety authority | verified source | schema 0047; DB-clock lease; watchdog; shared advisory-lock races; exact reserved resume/release identities; stop-before-diagnostics; terminal fail-closed release |
 | Next | Replace heartbeat-only detection with durable execution-obligation SLO metrics and alerts | P0 code | oldest-due/finalizable/late-pickup metrics, tests, operator surface |
 | Completed | Replace the application-only API read lane with a separate PostgreSQL-enforced read pool | P0 load acceptance | physically separate 3-read/1-write pools; `default_transaction_read_only=on`; application DML/CTE guard; integration proof |
 | Next | Give the read pool a dedicated least-privilege database credential | P1 security review | separate login; SELECT-only grants; mutable-function EXECUTE review/revoke; credential rotation and rollback drill |
@@ -84,25 +90,32 @@ edge is positive. `P6 blocked` and `P7 blocked` are intentional fail-closed stat
 | Next | Freeze the 20-city resolution contract registry before expanding traded stations | P1 | per-city source, station, timezone, day window, unit, rounding, artifact policy |
 | Next | Build point-in-time benchmark and structural-break datasets | P2 | versioned dataset, no look-ahead tests, coverage/latency report |
 | Next | Run regional-model shadow tournaments per station and horizon | P3 dataset | walk-forward Brier/log score/CRPS and availability-adjusted promotion evidence |
-| Continuous | Accumulate unmodified PAPER outcomes and execution evidence | P0 safety | live gate dashboard, independent station-days, skill/luck and cost attribution |
+| Continuous | Accumulate unmodified PAPER outcomes and execution evidence | P0 safety; paused during code-only hardening | resumes only through R7 after every prior release gate; live gate dashboard, independent station-days, skill/luck and cost attribution |
 | Gate | Re-review Austria/KYC/tax/geographic access and executor security | positive P5 | current primary-source record and explicit operator decisions |
 
 ### Active release sprint: successor PAPER candidate
+
+Current phase: code-only fail-closed hardening. Production PostgreSQL, API, worker, and
+`safety-control` are stopped; Polymarket PAPER is paused. An already-running backup sidecar may
+remain running, but it cannot start PostgreSQL and is not fresh-backup evidence while PostgreSQL
+is stopped. Apart from that sidecar, only disposable candidate/test infrastructure may run until
+R0 is accepted and the R1 immutable-image transition is recorded.
 
 This is the executable order for the current P0 release. A later step may be prepared in
 parallel, but it cannot mutate production state until every preceding exit condition is recorded.
 
 | Order | Task | Current state | Exit condition |
 |---|---|---|---|
-| R0 | Qualify replacement source | in progress | final SHA is clean/pushed; complete Linux CI, PostgreSQL integration, Compose validation, and Docker build pass |
+| R0 | Qualify replacement source | local candidate green; SHA/remote CI pending | final SHA is clean/pushed; complete Linux CI, PostgreSQL integration, Compose validation, and Docker build pass |
 | R1 | Build immutable candidate | blocked by R0 | clean detached worktree; exact revision label; `linux/amd64`; recorded tag, image ID, and digest |
-| R2 | Re-run production-size read-only load gate | blocked by R1 | HTTP v3 + runtime v2 + composite artifacts share run/image/overlap and all unrelaxed thresholds pass |
-| R3 | Close pre-activation evidence | blocked by R2 | P0-only scope attested; schema/indexes and controls re-proved; immediate reconciliation and API-only rollback proof accepted |
-| R4 | Activate successor continuity epoch | blocked by R3 | complete reviewed lane plan; zero-backfill execution-evidence fork; exact hashes/image; continuity match |
-| R5 | Cold-worker canary under kills | blocked by R4 | four consecutive composite runs, <=20-second gaps, separate phase commits, no legacy jobs/contention/errors/restarts/LIVE |
-| R6 | Resume only Polymarket PAPER | blocked by R5 | fresh non-critical audit and required jobs; audited venue-scoped command; Binance remains backtest+kill |
-| R7 | Sixty-minute PAPER canary | blocked by R6 | immutable T+0/5/15/30/45/60 evidence; cost obligations progress; no safety, identity, health, or load divergence |
-| R8 | Close incident and enter P1 | blocked by R7 | independent review, append-only acceptance record, durable alerts, DR/security/capacity work scheduled |
+| R2 | Prove backup/restore and apply the safety migration | blocked by R1 | only after the R1 transition is recorded, briefly start the retained exact production PostgreSQL container while every application writer remains stopped; a fresh hash-bound `0046` backup restores independently; the exact candidate migrates PostgreSQL to exactly `0047`; PAPER fence, roles, ACL/RLS, triggers, functions, and fail-closed controls pass |
+| R3 | Re-run production-size read-only load gate | blocked by R2 | HTTP v3 + runtime v2 + composite artifacts share run/image/schema `0047`/overlap and all unrelaxed thresholds pass |
+| R4 | Close pre-activation evidence | blocked by R3 | P0-only scope attested; schema/indexes and controls re-proved; immediate reconciliation passes; retained predecessor API image identity and post-activation diagnostic procedure are recorded |
+| R5 | Activate successor continuity epoch and prove API-only rollback isolation | blocked by R4 | complete reviewed lane plan and zero-backfill execution-evidence fork activate on the exact image; while kills remain engaged and the worker remains stopped, the retained predecessor API reports continuity mismatch against that active successor without changing plans, epochs, lanes, or evidence; the exact candidate API is restored and reports continuity match |
+| R6 | Cold-worker canary under kills | blocked by R5 | safety-control healthy without a lease; four consecutive composite runs, <=20-second gaps, separate phase commits, no legacy jobs/contention/errors/restarts/LIVE |
+| R7 | Arm the lease and resume only Polymarket PAPER | blocked by R6 | exact safety-control image; fresh watchdog; immutable ready marker; lease-reserved venue command; Binance remains backtest+kill |
+| R8 | Sixty-minute PAPER canary | collector and safety control implemented; runtime blocked by R7 | immutable T+0/5/15/30/45/60 evidence; every naturally created/due cost obligation progresses, or its absence is recorded without synthetic production fills; no divergence; atomic terminal STOP leaves runtime fail closed |
+| R9 | Close incident and enter P1 | blocked by R8 | independent review, append-only acceptance record, durable alerts, DR/security/capacity work scheduled |
 
 Automatic rollback is deliberately narrow: a failed gate stops the candidate API/worker and
 preserves both kills; it never enables LIVE, changes Binance, rewrites evidence, or starts the
@@ -150,10 +163,22 @@ are cancelled/coalesced, database statements and transaction lifetimes are bound
 accuracy overview has purpose-built indexes under source head `20260730_0046`. That index-only
 migration was applied while every application writer was stopped; the database is now at `0046`.
 
+The next candidate source head is `20260730_0047`, directly following that accepted operational
+head. It adds a short DB-clock Polymarket PAPER-canary lease, PostgreSQL runtime/venue/request
+fences, an independently supervised loopback-only safety-control service, a shared transaction
+advisory lock for empty-set and queued-resume races, and atomic terminal STOP semantics. Focused
+working-tree tests are green, but 0047 is not production-applied or release-accepted. A fresh
+0046 backup/restore, exact-candidate migration proof, full CI, image identity, successor epoch,
+and PAPER canary remain mandatory.
+
 Runtime acceptance remains pending. The first staged gate on revision `09945edfd492` failed with
 13 observed `idle in transaction` sessions and peak PostgreSQL CPU of `308.43%`; the candidate was
-stopped and not accepted. The implemented remediation must pass a new exact-candidate load gate
-against the already migrated `0046` database before epoch activation or PAPER resume.
+stopped and not accepted. The immutable candidate must first prove a fresh isolated restore of
+`0046`. After the R1 immutable-image transition is recorded, the retained exact production
+PostgreSQL container may be started for the bounded R2/R3 cutover window while every application
+writer remains stopped; the candidate then applies its own `0047` migration. Only after the
+database is proven at exactly `0047` may the implemented remediation run a new exact-candidate
+load gate. Epoch activation and PAPER resume remain forbidden until that gate passes.
 
 ## Definition of quality
 

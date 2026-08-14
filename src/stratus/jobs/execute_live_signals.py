@@ -707,6 +707,12 @@ async def poll_live_fills(
     async with session_factory_scope(settings, session_factory) as sessions:
         async with sessions.begin() as session:
             targets = await open_live_orders(session)
+        # The PAPER-only release must not create a synthetic LIVE bankroll
+        # history row merely because a wallet key is configured.  With no
+        # retained LIVE inventory there is nothing to reconcile, so avoid both
+        # the venue connection and the balance snapshot entirely.
+        if not targets:
+            return 0, 0
         live_trader: Trader = trader or await _connect_trader(settings)
         for target in targets:
             request_started_at = datetime.now(UTC)

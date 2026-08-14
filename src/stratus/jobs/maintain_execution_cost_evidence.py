@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 EXECUTION_COST_MAINTENANCE_INTERVAL_SECONDS = 15
 
 
+def _log_ids(values: tuple[int, ...]) -> str:
+    return ",".join(str(value) for value in values) if values else "-"
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionCostMaintenanceRun:
     observed_at: datetime
@@ -56,16 +60,19 @@ async def maintain_execution_cost_evidence(
     logger.info(
         (
             "execution cost maintenance: at=%s mark_claimed=%d observed=%d "
-            "missing=%d deferred=%d finalize_claimed=%d sealed=%d deferred=%d"
+            "missing=%d deferred=%d mark_ids=%s finalize_claimed=%d "
+            "sealed=%d deferred=%d finalize_ids=%s"
         ),
         observed_at.isoformat(),
         markouts.obligations_claimed,
         markouts.marks_observed,
         markouts.marks_missing,
         markouts.obligations_deferred,
+        _log_ids(markouts.obligation_ids),
         finalization.obligations_claimed,
         finalization.obligations_sealed,
         finalization.obligations_deferred,
+        _log_ids(finalization.obligation_ids),
     )
     return ExecutionCostMaintenanceRun(
         observed_at=observed_at,

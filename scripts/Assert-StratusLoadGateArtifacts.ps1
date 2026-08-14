@@ -44,6 +44,8 @@ $validation = [pscustomobject]@{
     requires_exact_http_configuration = $true
     requires_raw_http_reconciliation = $true
     requires_raw_runtime_reconciliation = $true
+    requires_raw_topology_reconciliation = $true
+    requires_topology_hash_binding = $true
     production_gate_passed = $null
 }
 if ($ValidateOnly) {
@@ -173,6 +175,50 @@ function Get-RawMaximum {
     return ($Rows | Measure-Object -Property $Property -Maximum).Maximum
 }
 
+function Test-ExactStringSet {
+    param(
+        [AllowNull()][object[]] $Actual,
+        [Parameter(Mandatory = $true)][string[]] $Expected
+    )
+
+    $actualStrings = @($Actual | ForEach-Object { [string]$_ })
+    $expectedStrings = @($Expected | ForEach-Object { [string]$_ })
+    return (
+        $actualStrings.Count -eq $expectedStrings.Count -and
+        @($actualStrings | Sort-Object -Unique).Count -eq $actualStrings.Count -and
+        (@($actualStrings | Sort-Object) -join "`n") -ceq
+            (@($expectedStrings | Sort-Object) -join "`n")
+    )
+}
+
+function Get-BytesSha256 {
+    param([Parameter(Mandatory = $true)][byte[]] $Bytes)
+
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        return (
+            [BitConverter]::ToString($hasher.ComputeHash($Bytes))
+        ).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $hasher.Dispose()
+    }
+}
+
+function Get-TopologyRowKey {
+    param([Parameter(Mandatory = $true)][object] $Row)
+
+    $networks = @($Row.networks | ForEach-Object { [string]$_ } | Sort-Object)
+    return @(
+        [string]$Row.container_id,
+        [string]$Row.project,
+        [string]$Row.service,
+        [string]$Row.oneoff,
+        [string]$Row.container_name,
+        ($networks -join ',')
+    ) -join "`n"
+}
+
 $startedAt = [DateTimeOffset]::UtcNow
 $runId = $ExpectedRunId.ToLowerInvariant()
 $absoluteOutput = [IO.Path]::GetFullPath($OutputPath)
@@ -189,8 +235,13 @@ try {
         throw 'Runtime observation artifact does not exist.'
     }
 
-    $http = Get-Content -LiteralPath $absoluteHttp -Raw | ConvertFrom-Json
-    $runtime = Get-Content -LiteralPath $absoluteRuntime -Raw | ConvertFrom-Json
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    $httpBytes = [IO.File]::ReadAllBytes($absoluteHttp)
+    $runtimeBytes = [IO.File]::ReadAllBytes($absoluteRuntime)
+    $httpSha256 = Get-BytesSha256 -Bytes $httpBytes
+    $runtimeSha256 = Get-BytesSha256 -Bytes $runtimeBytes
+    $http = $strictUtf8.GetString($httpBytes) | ConvertFrom-Json
+    $runtime = $strictUtf8.GetString($runtimeBytes) | ConvertFrom-Json
     $violations = [Collections.Generic.List[string]]::new()
 
     $expectedEndpoints = @(
@@ -670,7 +721,8 @@ try {
         'drain_seconds', 'expected_schema_head', 'maximum_api_sessions',
         'expected_api_image_id', 'expected_revision',
         'expected_release_digest', 'baseline', 'summary', 'violations',
-        'drain', 'sample_errors', 'database_samples', 'resource_samples'
+        'drain', 'sample_errors', 'database_samples', 'resource_samples',
+        'topology_samples'
     )
     if (-not (Test-HasProperties $runtime $runtimeTopFields)) {
         Add-UniqueViolation $violations 'runtime_contract'
@@ -694,7 +746,7 @@ try {
             [int]$runtime.drain_seconds -ne 5 -or
             -not (Test-NonNegativeInteger $runtime.maximum_api_sessions) -or
             [int]$runtime.maximum_api_sessions -ne 4 -or
-            [string]$runtime.expected_schema_head -ne '20260730_0046'
+            [string]$runtime.expected_schema_head -ne '20260730_0047'
         ) {
             Add-UniqueViolation $violations 'runtime_configuration'
         }
@@ -718,12 +770,13 @@ try {
         -not (Test-HasProperties $runtime.baseline @(
             'api_container_id', 'api_image_id', 'api_restart_count',
             'postgres_container_id', 'postgres_image_id',
-            'postgres_restart_count'
+            'postgres_restart_count', 'compose_project'
         )) -or
         [string]$runtime.baseline.api_image_id -ne $ExpectedApiImageId -or
         [string]::IsNullOrWhiteSpace([string]$runtime.baseline.api_container_id) -or
         [string]::IsNullOrWhiteSpace([string]$runtime.baseline.postgres_container_id) -or
         [string]::IsNullOrWhiteSpace([string]$runtime.baseline.postgres_image_id) -or
+        [string]::IsNullOrWhiteSpace([string]$runtime.baseline.compose_project) -or
         -not (Test-NonNegativeInteger $runtime.baseline.api_restart_count) -or
         -not (Test-NonNegativeInteger $runtime.baseline.postgres_restart_count)
     ) {
@@ -740,7 +793,16 @@ try {
             $runtime.resource_samples
         }
     )
-    if ($databaseSamples.Count -lt 351 -or $resourceSamples.Count -lt 70) {
+    $topologySamples = @(
+        if (Test-HasProperties $runtime @('topology_samples')) {
+            $runtime.topology_samples
+        }
+    )
+    if (
+        $databaseSamples.Count -lt 351 -or
+        $resourceSamples.Count -lt 70 -or
+        $topologySamples.Count -lt 70
+    ) {
         Add-UniqueViolation $violations 'runtime_sample_coverage'
     }
 
@@ -782,7 +844,7 @@ try {
             -not (Try-ParseTimestamp $sample.at ([ref]$sampleAt)) -or
             $sample.controls_ok -isnot [bool] -or
             -not [bool]$sample.controls_ok -or
-            [string]$sample.schema_head -ne '20260730_0046' -or
+            [string]$sample.schema_head -ne '20260730_0047' -or
             [int]$sample.api_sessions -gt 4 -or
             [int]$sample.api_active -gt [int]$sample.api_sessions -or
             [int]$sample.api_idle_in_tx -ne 0 -or
@@ -808,7 +870,8 @@ try {
     }
 
     $resourceFields = @(
-        'at', 'api_cpu_percent', 'api_memory_percent',
+        'at', 'api_cpu_percent', 'api_memory_percent', 'api_memory_limit_bytes',
+        'api_operator_key_entry_count',
         'postgres_cpu_percent', 'postgres_memory_percent'
     )
     $resourceTimes = [Collections.Generic.List[DateTimeOffset]]::new()
@@ -830,6 +893,10 @@ try {
         }
         if (
             -not $numericValid -or
+            -not (Test-NonNegativeInteger $sample.api_memory_limit_bytes) -or
+            [int64]$sample.api_memory_limit_bytes -ne 1073741824L -or
+            -not (Test-NonNegativeInteger $sample.api_operator_key_entry_count) -or
+            [int]$sample.api_operator_key_entry_count -ne 1 -or
             -not (Try-ParseTimestamp $sample.at ([ref]$sampleAt)) -or
             [double]$sample.api_memory_percent -ge 90 -or
             [double]$sample.postgres_cpu_percent -ge 200
@@ -842,6 +909,181 @@ try {
     }
     if ($resourceMalformed -or $resourceTimes.Count -ne $resourceSamples.Count) {
         Add-UniqueViolation $violations 'runtime_resource_evidence'
+    }
+
+    $topologyTimes = [Collections.Generic.List[DateTimeOffset]]::new()
+    $topologyMalformed = $false
+    $expectedTopologyServices = @('api', 'postgres')
+    $baselineProject = if (
+        (Test-HasProperties $runtime @('baseline')) -and
+        (Test-HasProperties $runtime.baseline @(
+            'api_container_id', 'postgres_container_id', 'compose_project'
+        ))
+    ) {
+        [string]$runtime.baseline.compose_project
+    }
+    else {
+        ''
+    }
+    $expectedContainerIds = if ([string]::IsNullOrWhiteSpace($baselineProject)) {
+        @()
+    }
+    else {
+        @(
+            [string]$runtime.baseline.api_container_id,
+            [string]$runtime.baseline.postgres_container_id
+        )
+    }
+    $expectedServiceById = @{}
+    if (
+        $expectedContainerIds.Count -eq 2 -and
+        -not [string]::IsNullOrWhiteSpace($expectedContainerIds[0]) -and
+        -not [string]::IsNullOrWhiteSpace($expectedContainerIds[1]) -and
+        $expectedContainerIds[0] -cne $expectedContainerIds[1]
+    ) {
+        $expectedServiceById[$expectedContainerIds[0]] = 'api'
+        $expectedServiceById[$expectedContainerIds[1]] = 'postgres'
+    }
+    else {
+        $topologyMalformed = $true
+    }
+    foreach ($sample in $topologySamples) {
+        $topologyAt = [DateTimeOffset]::MinValue
+        $requiredFields = @(
+            'at', 'project', 'allowed_services', 'protected_networks',
+            'running_services', 'all_running_container_count',
+            'all_running_containers', 'running_containers',
+            'unexpected_containers', 'missing_container_ids', 'safe'
+        )
+        if (-not (Test-HasProperties $sample $requiredFields)) {
+            $topologyMalformed = $true
+            continue
+        }
+        $allRows = @($sample.all_running_containers)
+        $runningRows = @($sample.running_containers)
+        $protectedNetworks = @(
+            $sample.protected_networks | ForEach-Object { [string]$_ }
+        )
+        $allRowKeys = [Collections.Generic.List[string]]::new()
+        $runningRowKeys = [Collections.Generic.List[string]]::new()
+        $recomputedRelevantKeys = [Collections.Generic.List[string]]::new()
+        $recomputedRelevantRows = [Collections.Generic.List[object]]::new()
+        $allIds = @(
+            $allRows | ForEach-Object {
+                if (Test-HasProperties $_ @(
+                    'container_id', 'project', 'service', 'oneoff',
+                    'container_name', 'networks'
+                )) {
+                    $rowNetworks = @($_.networks | ForEach-Object { [string]$_ })
+                    if (
+                        @($rowNetworks | Where-Object {
+                            [string]::IsNullOrWhiteSpace($_)
+                        }).Count -ne 0 -or
+                        @($rowNetworks | Sort-Object -Unique).Count -ne
+                            $rowNetworks.Count
+                    ) {
+                        $topologyMalformed = $true
+                    }
+                    $rowKey = Get-TopologyRowKey -Row $_
+                    $allRowKeys.Add($rowKey)
+                    if (
+                        $expectedServiceById.ContainsKey([string]$_.container_id) -or
+                        [string]$_.project -ceq $baselineProject -or
+                        @($rowNetworks | Where-Object {
+                            $_ -cin $protectedNetworks
+                        }).Count -ne 0
+                    ) {
+                        $recomputedRelevantRows.Add($_)
+                        $recomputedRelevantKeys.Add($rowKey)
+                    }
+                    [string]$_.container_id
+                }
+                else {
+                    $topologyMalformed = $true
+                }
+            }
+        )
+        $runningIds = @(
+            $runningRows | ForEach-Object {
+                if (Test-HasProperties $_ @(
+                    'container_id', 'project', 'service', 'oneoff',
+                    'container_name', 'networks'
+                )) {
+                    $rowNetworks = @($_.networks | ForEach-Object { [string]$_ })
+                    if (
+                        @($rowNetworks | Where-Object {
+                            [string]::IsNullOrWhiteSpace($_)
+                        }).Count -ne 0 -or
+                        @($rowNetworks | Sort-Object -Unique).Count -ne
+                            $rowNetworks.Count
+                    ) {
+                        $topologyMalformed = $true
+                    }
+                    $runningRowKeys.Add((Get-TopologyRowKey -Row $_))
+                    [string]$_.container_id
+                }
+                else {
+                    $topologyMalformed = $true
+                }
+            }
+        )
+        $rowsSafe = $recomputedRelevantRows.Count -eq 2
+        $recomputedNetworkUnion = @(
+            $recomputedRelevantRows |
+                ForEach-Object { @($_.networks) } |
+                ForEach-Object { [string]$_ } |
+                Sort-Object -Unique
+        )
+        foreach ($row in $recomputedRelevantRows) {
+            if (
+                -not (Test-HasProperties $row @(
+                    'container_id', 'project', 'service', 'oneoff',
+                    'container_name', 'networks'
+                )) -or
+                [string]$row.project -cne $baselineProject -or
+                -not $expectedServiceById.ContainsKey([string]$row.container_id) -or
+                [string]$row.service -cne
+                    [string]$expectedServiceById[[string]$row.container_id] -or
+                [string]$row.oneoff -cne 'False' -or
+                [string]::IsNullOrWhiteSpace([string]$row.container_name)
+            ) {
+                $rowsSafe = $false
+            }
+        }
+        if (
+            -not (Try-ParseTimestamp $sample.at ([ref]$topologyAt)) -or
+            [string]$sample.project -cne $baselineProject -or
+            -not (Test-ExactStringSet $sample.allowed_services $expectedTopologyServices) -or
+            -not (Test-ExactStringSet $sample.running_services $expectedTopologyServices) -or
+            $protectedNetworks.Count -eq 0 -or
+            @($protectedNetworks | Where-Object {
+                [string]::IsNullOrWhiteSpace($_)
+            }).Count -ne 0 -or
+            @($protectedNetworks | Sort-Object -Unique).Count -ne
+                $protectedNetworks.Count -or
+            -not (Test-ExactStringSet $recomputedNetworkUnion $protectedNetworks) -or
+            -not (Test-ExactStringSet $runningIds $expectedContainerIds) -or
+            -not (Test-ExactStringSet $runningRowKeys $recomputedRelevantKeys) -or
+            @($runningIds | Sort-Object -Unique).Count -ne $runningIds.Count -or
+            @($allIds | Sort-Object -Unique).Count -ne $allIds.Count -or
+            @($allRowKeys | Sort-Object -Unique).Count -ne $allRowKeys.Count -or
+            -not (Test-NonNegativeInteger $sample.all_running_container_count) -or
+            [int]$sample.all_running_container_count -ne $allRows.Count -or
+            @($runningIds | Where-Object { $_ -notin $allIds }).Count -ne 0 -or
+            @($sample.unexpected_containers).Count -ne 0 -or
+            @($sample.missing_container_ids).Count -ne 0 -or
+            $sample.safe -isnot [bool] -or
+            -not [bool]$sample.safe -or
+            -not $rowsSafe
+        ) {
+            $topologyMalformed = $true
+        }
+        else {
+            $topologyTimes.Add($topologyAt)
+        }
+    }
+    if ($topologyMalformed -or $topologyTimes.Count -ne $topologySamples.Count) {
+        Add-UniqueViolation $violations 'runtime_topology_evidence'
     }
 
     $postgresCpu = @(
@@ -876,8 +1118,10 @@ try {
     $drainAt = [DateTimeOffset]::MinValue
     $firstDatabaseSampleAt = [DateTimeOffset]::MinValue
     $firstResourceSampleAt = [DateTimeOffset]::MinValue
+    $firstTopologySampleAt = [DateTimeOffset]::MinValue
     $lastDatabaseSampleAt = [DateTimeOffset]::MinValue
     $lastResourceSampleAt = [DateTimeOffset]::MinValue
+    $lastTopologySampleAt = [DateTimeOffset]::MinValue
     $runtimeTimestampsValid = (
         (Test-HasProperties $runtime @(
             'started_at', 'observation_started_at', 'completed_at', 'drain'
@@ -889,14 +1133,18 @@ try {
         (Try-ParseTimestamp $runtime.drain.at ([ref]$drainAt)) -and
         $databaseTimes.Count -eq $databaseSamples.Count -and
         $resourceTimes.Count -eq $resourceSamples.Count -and
+        $topologyTimes.Count -eq $topologySamples.Count -and
         $databaseTimes.Count -gt 0 -and
-        $resourceTimes.Count -gt 0
+        $resourceTimes.Count -gt 0 -and
+        $topologyTimes.Count -gt 0
     )
     if ($runtimeTimestampsValid) {
         $firstDatabaseSampleAt = $databaseTimes[0]
         $firstResourceSampleAt = $resourceTimes[0]
+        $firstTopologySampleAt = $topologyTimes[0]
         $lastDatabaseSampleAt = $databaseTimes[-1]
         $lastResourceSampleAt = $resourceTimes[-1]
+        $lastTopologySampleAt = $topologyTimes[-1]
         for ($index = 1; $index -lt $databaseTimes.Count; $index += 1) {
             if ($databaseTimes[$index] -le $databaseTimes[$index - 1]) {
                 $runtimeTimestampsValid = $false
@@ -907,16 +1155,25 @@ try {
                 $runtimeTimestampsValid = $false
             }
         }
+        for ($index = 1; $index -lt $topologyTimes.Count; $index += 1) {
+            if ($topologyTimes[$index] -le $topologyTimes[$index - 1]) {
+                $runtimeTimestampsValid = $false
+            }
+        }
         if (
             $runtimeProcessStarted -gt $runtimeStarted -or
             $runtimeStarted -gt $firstDatabaseSampleAt -or
             $runtimeStarted -gt $firstResourceSampleAt -or
+            $runtimeStarted -gt $firstTopologySampleAt -or
             $firstDatabaseSampleAt -gt $httpStarted -or
             $firstResourceSampleAt -gt $httpStarted -or
+            $firstTopologySampleAt -gt $httpStarted -or
             $lastDatabaseSampleAt -gt $drainAt -or
             $lastResourceSampleAt -gt $drainAt -or
+            $lastTopologySampleAt -lt $drainAt -or
             ($lastDatabaseSampleAt - $firstDatabaseSampleAt).TotalSeconds -lt 350 -or
             ($lastResourceSampleAt - $firstResourceSampleAt).TotalSeconds -lt 345 -or
+            ($lastTopologySampleAt - $firstTopologySampleAt).TotalSeconds -lt 390 -or
             $drainAt -lt $httpCompleted.AddSeconds(5) -or
             ($drainAt - $firstDatabaseSampleAt).TotalSeconds -lt 390 -or
             $runtimeCompleted -lt $drainAt
@@ -960,7 +1217,7 @@ try {
         (Test-HasProperties $runtime @('drain')) -and
         (Test-HasProperties $runtime.drain $databaseFields) -and
         $drainCountsValid -and
-        [string]$runtime.drain.schema_head -eq '20260730_0046' -and
+        [string]$runtime.drain.schema_head -eq '20260730_0047' -and
         $runtime.drain.controls_ok -is [bool] -and
         [bool]$runtime.drain.controls_ok -and
         (Test-NonNegativeInteger $runtime.drain.api_sessions) -and
@@ -987,7 +1244,7 @@ try {
     }
 
     $summaryFields = @(
-        'database_sample_count', 'resource_sample_count',
+        'database_sample_count', 'resource_sample_count', 'topology_sample_count',
         'minimum_database_samples', 'minimum_resource_samples',
         'sample_errors', 'max_api_sessions', 'max_api_active',
         'max_runtime_writer_sessions', 'max_api_idle_in_tx',
@@ -998,6 +1255,7 @@ try {
         'consecutive_postgres_cpu_150', 'identity_changed',
         'restart_changed', 'oom_observed', 'containers_healthy',
         'candidate_identity_held', 'application_writers_stopped',
+        'exact_project_topology_held',
         'invariants_changed', 'drain_passed', 'runtime_passed'
     )
     $sampleErrors = @(
@@ -1023,6 +1281,7 @@ try {
             'consecutive_postgres_cpu_150', 'identity_changed',
             'restart_changed', 'oom_observed', 'containers_healthy',
             'candidate_identity_held', 'application_writers_stopped',
+            'exact_project_topology_held',
             'invariants_changed', 'drain_passed', 'runtime_passed'
         )) {
             if (
@@ -1033,7 +1292,7 @@ try {
             }
         }
         foreach ($field in @(
-            'database_sample_count', 'resource_sample_count',
+            'database_sample_count', 'resource_sample_count', 'topology_sample_count',
             'minimum_database_samples', 'minimum_resource_samples',
             'sample_errors'
         )) {
@@ -1060,6 +1319,7 @@ try {
         $runtimeDeclaredViolations.Count -ne 0 -or
         [int]$runtime.summary.database_sample_count -ne $databaseSamples.Count -or
         [int]$runtime.summary.resource_sample_count -ne $resourceSamples.Count -or
+        [int]$runtime.summary.topology_sample_count -ne $topologySamples.Count -or
         [int]$runtime.summary.minimum_database_samples -ne 351 -or
         [int]$runtime.summary.minimum_resource_samples -ne 70 -or
         [int]$runtime.summary.sample_errors -ne $sampleErrors.Count -or
@@ -1104,6 +1364,8 @@ try {
         -not [bool]$runtime.summary.containers_healthy -or
         -not [bool]$runtime.summary.candidate_identity_held -or
         -not [bool]$runtime.summary.application_writers_stopped -or
+        -not [bool]$runtime.summary.exact_project_topology_held -or
+        $topologyMalformed -or
         [bool]$runtime.summary.invariants_changed -or
         [bool]$runtime.summary.drain_passed -ne $drainValid -or
         -not [bool]$runtime.summary.runtime_passed
@@ -1136,9 +1398,15 @@ try {
         }
         evidence = [pscustomobject]@{
             http_artifact = $absoluteHttp
-            http_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $absoluteHttp).Hash.ToLowerInvariant()
+            http_sha256 = $httpSha256
             runtime_artifact = $absoluteRuntime
-            runtime_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $absoluteRuntime).Hash.ToLowerInvariant()
+            runtime_sha256 = $runtimeSha256
+            topology_sample_count = $topologySamples.Count
+            topology_sha256 = Get-BytesSha256 -Bytes (
+                [Text.UTF8Encoding]::new($false).GetBytes(
+                    ($topologySamples | ConvertTo-Json -Depth 12 -Compress)
+                )
+            )
         }
         violations = @($violations)
     }

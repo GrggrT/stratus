@@ -659,7 +659,14 @@ class Calibration(Base):
 
 class Signal(Base):
     __tablename__ = "signals"
-    __table_args__ = (UniqueConstraint("market_id", "ts", name="uq_signals_market_time"),)
+    __table_args__ = (
+        UniqueConstraint("market_id", "ts", name="uq_signals_market_time"),
+        Index(
+            "ix_signals_pending_stop_cleanup",
+            "id",
+            postgresql_where=text("status = 'pending'::signal_status"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"))
@@ -689,7 +696,17 @@ class Signal(Base):
 
 class Order(Base):
     __tablename__ = "orders"
-    __table_args__ = (UniqueConstraint("signal_id", "mode", name="uq_orders_signal_mode"),)
+    __table_args__ = (
+        UniqueConstraint("signal_id", "mode", name="uq_orders_signal_mode"),
+        Index(
+            "ix_orders_live_open_stop_cleanup",
+            "id",
+            postgresql_where=text(
+                "mode = 'live'::execution_mode "
+                "AND status IN ('open', 'pending')"
+            ),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"))
@@ -1176,6 +1193,12 @@ class BankrollLog(Base):
 
 class RuntimeControl(Base):
     __tablename__ = "runtime_control"
+    __table_args__ = (
+        CheckConstraint(
+            "id = 1",
+            name="ck_runtime_control_singleton_id",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
     kill_switch: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
@@ -1275,7 +1298,18 @@ class OperatorCommand(Base):
     """
 
     __tablename__ = "operator_commands"
-    __table_args__ = (Index("ix_operator_commands_status", "status", "id"),)
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'succeeded', 'rejected', 'failed') "
+            "AND ((status = 'pending' AND detail IS NULL "
+            "AND executed_at IS NULL) OR (status IN ("
+            "'succeeded', 'rejected', 'failed') AND detail IS NOT NULL "
+            "AND btrim(detail) <> '' AND executed_at IS NOT NULL "
+            "AND executed_at >= created_at))",
+            name="ck_operator_commands_lifecycle",
+        ),
+        Index("ix_operator_commands_status", "status", "id"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     request_id: Mapped[str] = mapped_column(String(64), unique=True)
@@ -1289,6 +1323,113 @@ class OperatorCommand(Base):
     detail: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PaperCanarySafetyLease(Base):
+    """Short DB-clock lease authorizing one release PAPER canary."""
+
+    __tablename__ = "paper_canary_safety_leases"
+    __table_args__ = (
+        CheckConstraint(
+            "lease_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{7,63}$' "
+            "AND run_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{7,63}$' "
+            "AND acquire_request_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{7,63}$' "
+            "AND resume_request_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{7,63}$' "
+            "AND watchdog_stop_request_id ~ "
+            "'^[A-Za-z0-9][A-Za-z0-9._:-]{7,63}$' "
+            "AND direct_stop_request_id ~ "
+            "'^[A-Za-z0-9][A-Za-z0-9._:-]{7,63}$' "
+            "AND release_request_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{7,63}$'",
+            name="ck_paper_canary_lease_safe_identifiers",
+        ),
+        CheckConstraint(
+            "nonce_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_paper_canary_lease_nonce_sha256",
+        ),
+        CheckConstraint(
+            "btrim(resume_actor) <> '' "
+            "AND char_length(resume_actor) <= 64 "
+            "AND btrim(resume_reason) <> '' "
+            "AND char_length(resume_reason) <= 2000",
+            name="ck_paper_canary_lease_resume_identity",
+        ),
+        CheckConstraint(
+            "acquire_request_id <> resume_request_id "
+            "AND watchdog_stop_request_id NOT IN "
+            "(acquire_request_id, resume_request_id) "
+            "AND direct_stop_request_id NOT IN "
+            "(acquire_request_id, resume_request_id, watchdog_stop_request_id) "
+            "AND release_request_id NOT IN ("
+            "acquire_request_id, resume_request_id, "
+            "watchdog_stop_request_id, direct_stop_request_id)",
+            name="ck_paper_canary_lease_distinct_requests",
+        ),
+        CheckConstraint(
+            "heartbeat_at >= acquired_at "
+            "AND watchdog_at >= acquired_at "
+            "AND expires_at > heartbeat_at "
+            "AND expires_at <= heartbeat_at + interval '30 seconds'",
+            name="ck_paper_canary_lease_bounded_time",
+        ),
+        CheckConstraint(
+            "state IN ("
+            "'active', 'released', 'expired_stopped', 'expired_safe', "
+            "'revoked_stopped')",
+            name="ck_paper_canary_lease_state",
+        ),
+        CheckConstraint(
+            "(state = 'active' AND released_at IS NULL "
+            " AND release_request_id IS NOT NULL AND stop_command_id IS NULL) "
+            "OR (state = 'released' AND released_at IS NOT NULL "
+            " AND release_request_id IS NOT NULL AND stop_command_id IS NOT NULL) "
+            "OR (state = 'expired_stopped' AND released_at IS NULL "
+            " AND release_request_id IS NOT NULL AND stop_command_id IS NOT NULL) "
+            "OR (state = 'revoked_stopped' AND released_at IS NULL "
+            " AND release_request_id IS NOT NULL AND stop_command_id IS NOT NULL) "
+            "OR (state = 'expired_safe' AND released_at IS NULL "
+            " AND release_request_id IS NOT NULL AND stop_command_id IS NULL)",
+            name="ck_paper_canary_lease_terminal_shape",
+        ),
+        Index(
+            "uq_paper_canary_single_active_lease",
+            "state",
+            unique=True,
+            postgresql_where=text("state = 'active'"),
+        ),
+        Index(
+            "ix_paper_canary_active_expiry",
+            "expires_at",
+            "id",
+            postgresql_where=text("state = 'active'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    lease_id: Mapped[str] = mapped_column(String(64), unique=True)
+    run_id: Mapped[str] = mapped_column(String(64), unique=True)
+    acquire_request_id: Mapped[str] = mapped_column(String(64), unique=True)
+    resume_request_id: Mapped[str] = mapped_column(String(64), unique=True)
+    resume_actor: Mapped[str] = mapped_column(String(64))
+    resume_reason: Mapped[str] = mapped_column(Text)
+    watchdog_stop_request_id: Mapped[str] = mapped_column(String(64), unique=True)
+    direct_stop_request_id: Mapped[str] = mapped_column(String(64), unique=True)
+    release_request_id: Mapped[str] = mapped_column(String(64), unique=True)
+    nonce_sha256: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(24), server_default="active")
+    acquired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("clock_timestamp()")
+    )
+    heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("clock_timestamp()")
+    )
+    watchdog_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("clock_timestamp()")
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stop_command_id: Mapped[int | None] = mapped_column(
+        ForeignKey("operator_commands.id", ondelete="RESTRICT"),
+    )
 
 
 class HealthAudit(Base):

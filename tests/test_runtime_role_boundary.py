@@ -17,6 +17,12 @@ _PRODUCTION_APP_ROLE = (
         _PRODUCTION_DATABASE.encode()
     ).hexdigest()
 )
+_PRODUCTION_SAFETY_APP_ROLE = (
+    "stratus_safety_app_"
+    + hashlib.md5(  # noqa: S324 - PostgreSQL-compatible identifier, not security
+        _PRODUCTION_DATABASE.encode()
+    ).hexdigest()
+)
 
 
 def _compose_service(compose: str, service: str) -> str:
@@ -31,9 +37,11 @@ def _compose_service(compose: str, service: str) -> str:
                 "postgres",
                 "migrate",
                 "provision-runtime-role",
+                "provision-safety-role",
                 "worker",
                 "binance-market-stream",
                 "api",
+                "safety-control",
                 "backup",
                 "backup-offsite",
                 "telegram",
@@ -63,8 +71,7 @@ def test_compose_routes_only_runtime_services_through_application_role() -> None
     provisioner = _compose_service(compose, "provision-runtime-role")
     validator = _compose_service(compose, "validate-owner-password")
     required_owner = (
-        "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set to a strong "
-        "non-default owner password}"
+        "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set to a strong non-default owner password}"
     )
     assert required_owner in postgres
     assert required_owner in migrate
@@ -88,8 +95,7 @@ def test_compose_routes_only_runtime_services_through_application_role() -> None
     assert "validate-owner-password:" in postgres
     assert "condition: service_completed_successfully" in postgres
     assert (
-        "file: ${STRATUS_RUNTIME_PASSWORD_FILE:-"
-        "./.secrets/stratus_runtime_password}"
+        "file: ${STRATUS_RUNTIME_PASSWORD_FILE:-./.secrets/stratus_runtime_password}"
     ) in compose
 
 
@@ -99,10 +105,7 @@ def test_compose_mounts_release_controlled_postgres_hba_boundary() -> None:
 
     assert "hba_file=/etc/postgresql/stratus-pg_hba.conf" in postgres
     assert "password_encryption=scram-sha-256" in postgres
-    assert (
-        "./ops/postgres/stratus-pg_hba.conf:"
-        "/etc/postgresql/stratus-pg_hba.conf:ro"
-    ) in postgres
+    assert ("./ops/postgres/stratus-pg_hba.conf:/etc/postgresql/stratus-pg_hba.conf:ro") in postgres
 
 
 def test_postgres_hba_allows_only_the_production_app_database() -> None:
@@ -115,10 +118,18 @@ def test_postgres_hba_allows_only_the_production_app_database() -> None:
     # PostgreSQL uses the leading slash as the regex marker; unlike sed, the
     # pattern has no closing slash delimiter.
     app_family = r"/^stratus_app_[0-9a-f]{32}$"
+    safety_app_family = r"/^stratus_safety_app_[0-9a-f]{32}$"
 
     assert rules == [
         ["local", _PRODUCTION_DATABASE, _PRODUCTION_APP_ROLE, "scram-sha-256"],
+        [
+            "local",
+            _PRODUCTION_DATABASE,
+            _PRODUCTION_SAFETY_APP_ROLE,
+            "scram-sha-256",
+        ],
         ["local", "all", app_family, "reject"],
+        ["local", "all", safety_app_family, "reject"],
         [
             "host",
             _PRODUCTION_DATABASE,
@@ -126,7 +137,15 @@ def test_postgres_hba_allows_only_the_production_app_database() -> None:
             "0.0.0.0/0",
             "scram-sha-256",
         ],
+        [
+            "host",
+            _PRODUCTION_DATABASE,
+            _PRODUCTION_SAFETY_APP_ROLE,
+            "0.0.0.0/0",
+            "scram-sha-256",
+        ],
         ["host", "all", app_family, "0.0.0.0/0", "reject"],
+        ["host", "all", safety_app_family, "0.0.0.0/0", "reject"],
         [
             "host",
             _PRODUCTION_DATABASE,
@@ -134,7 +153,15 @@ def test_postgres_hba_allows_only_the_production_app_database() -> None:
             "::/0",
             "scram-sha-256",
         ],
+        [
+            "host",
+            _PRODUCTION_DATABASE,
+            _PRODUCTION_SAFETY_APP_ROLE,
+            "::/0",
+            "scram-sha-256",
+        ],
         ["host", "all", app_family, "::/0", "reject"],
+        ["host", "all", safety_app_family, "::/0", "reject"],
         ["local", "all", "all", "scram-sha-256"],
         ["host", "all", "all", "0.0.0.0/0", "scram-sha-256"],
         ["host", "all", "all", "::/0", "scram-sha-256"],
@@ -144,25 +171,21 @@ def test_postgres_hba_allows_only_the_production_app_database() -> None:
 
 def test_runtime_entrypoint_reads_secret_and_rechecks_boundary() -> None:
     dockerfile = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
-    entrypoint = (
-        _ROOT / "scripts" / "stratus-runtime-entrypoint.sh"
-    ).read_text(encoding="utf-8")
+    entrypoint = (_ROOT / "scripts" / "stratus-runtime-entrypoint.sh").read_text(encoding="utf-8")
 
     assert "COPY scripts/stratus-runtime-entrypoint.sh" in dockerfile
     assert (
-        "COPY ops/postgres/stratus-pg_hba.conf "
-        "./ops/postgres/stratus-pg_hba.conf"
+        "COPY ops/postgres/stratus-pg_hba.conf ./ops/postgres/stratus-pg_hba.conf"
     ) in dockerfile
     assert "/run/secrets/stratus_runtime_password" in entrypoint
+    assert "STRATUS_SAFETY_PASSWORD_FILE" in entrypoint
     assert "python -m stratus.runtime_db_boundary" in entrypoint
     assert 'exec "$@"' in entrypoint
-    assert "echo \"$runtime_password\"" not in entrypoint
+    assert 'echo "$runtime_password"' not in entrypoint
 
 
 def test_host_api_launch_sanitizes_owner_environment_and_working_directory() -> None:
-    script = (
-        _ROOT / "scripts" / "Start-StratusDevApi.ps1"
-    ).read_text(encoding="utf-8")
+    script = (_ROOT / "scripts" / "Start-StratusDevApi.ps1").read_text(encoding="utf-8")
 
     assert "Start-SanitizedRuntimeProcess" in script
     assert "Write-RuntimeSafeEnvironmentFile" in script
@@ -204,19 +227,52 @@ def test_owner_and_runtime_credentials_are_documented_separately() -> None:
     assert "MIGRATION_DATABASE_URL=" not in example
     assert "STRATUS_RUNTIME_DATABASE_URL=" in example
     assert "STRATUS_RUNTIME_PASSWORD_FILE=" in example
+    assert "STRATUS_SAFETY_PASSWORD_FILE=" in example
+    assert "SAFETY_API_KEY=" in example
     assert "Required before starting application services" in example
     assert ".secrets/" in (_ROOT / ".gitignore").read_text(encoding="utf-8")
 
 
 def test_ci_compose_validation_supplies_strong_test_owner_password() -> None:
-    workflow = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     validate_step = workflow[workflow.index("- name: Validate Compose") :]
     validate_step = validate_step[: validate_step.index("- name: Docker build")]
 
     assert "POSTGRES_PASSWORD: ci-only-owner-password-000000000000" in validate_step
-    assert "docker compose config --quiet" in validate_step
+    assert "STRATUS_RUNTIME_PASSWORD_FILE:" in validate_step
+    assert "STRATUS_SAFETY_PASSWORD_FILE:" in validate_step
+    assert "OPERATOR_API_KEY:" in validate_step
+    assert "SAFETY_API_KEY:" in validate_step
+    assert 'docker compose "${compose_args[@]}" config --quiet' in validate_step
+    assert '--project-directory "$GITHUB_WORKSPACE"' in validate_step
+    assert '-f "$GITHUB_WORKSPACE/docker-compose.yml"' in validate_step
+    assert '--env-file "$compose_env"' in validate_step
+    assert '--project-name weatherpoly' in validate_step
+    assert (
+        'docker compose "${compose_args[@]}" --profile release run --rm --no-deps '
+        "validate-owner-password"
+    ) in validate_step
+    assert (
+        'docker compose "${compose_args[@]}" --profile release run --rm --no-deps '
+        "validate-safety-credentials"
+    ) in validate_step
+
+
+def test_ci_actions_are_commit_pinned_and_console_build_is_unconditional() -> None:
+    workflow_root = _ROOT / ".github" / "workflows"
+    for path in workflow_root.glob("*.yml"):
+        workflow = path.read_text(encoding="utf-8")
+        for line in workflow.splitlines():
+            if "uses:" not in line:
+                continue
+            reference = line.split("uses:", 1)[1].split("#", 1)[0].strip()
+            assert "@" in reference
+            revision = reference.rsplit("@", 1)[1]
+            assert len(revision) == 40
+            assert all(character in "0123456789abcdef" for character in revision)
+
+    console_workflow = (workflow_root / "console.yml").read_text(encoding="utf-8")
+    assert "paths:" not in console_workflow
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI is unavailable")

@@ -25,6 +25,10 @@ from stratus.db.models import (
 )
 from stratus.jobs.process_operator_commands import process_operator_commands
 from stratus.repositories.operator_commands import enqueue_command
+from stratus.services.safety_control import (
+    acquire_paper_canary_lease_atomically,
+    run_paper_canary_watchdog_once,
+)
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("STRATUS_TEST_DATABASE_URL"),
@@ -48,10 +52,13 @@ async def _kill_switch_state(sessions: SessionFactory) -> bool:
 
 
 async def test_stop_resume_cycle_through_the_queue(
-    db_sessions: SessionFactory, migrated_database_url: str
+    db_sessions: SessionFactory,
+    migrated_database_url: str,
+    canary_role_sessions: object,
 ) -> None:
+    roles = canary_role_sessions
     settings = _settings(migrated_database_url)
-    async with db_sessions.begin() as session:
+    async with roles.runtime.begin() as session:
         _, created = await enqueue_command(
             session,
             request_id="req-stop-0001",
@@ -63,7 +70,7 @@ async def test_stop_resume_cycle_through_the_queue(
     assert created is True
 
     # Retried request with the same id must not enqueue twice.
-    async with db_sessions.begin() as session:
+    async with roles.runtime.begin() as session:
         row, created = await enqueue_command(
             session,
             request_id="req-stop-0001",
@@ -74,20 +81,43 @@ async def test_stop_resume_cycle_through_the_queue(
         )
     assert created is False
 
-    succeeded, finished = await process_operator_commands(settings, db_sessions)
+    succeeded, finished = await process_operator_commands(
+        settings,
+        roles.runtime,
+    )
     assert (succeeded, finished) == (1, 1)
     assert await _kill_switch_state(db_sessions) is True
 
-    async with db_sessions.begin() as session:
+    nonce = "n" * 32
+    await acquire_paper_canary_lease_atomically(
+        roles.safety,
+        lease_id="lease-resume-0001",
+        run_id="run-resume-00001",
+        acquire_request_id="req-acquire-0001",
+        resume_request_id="req-resume-0001",
+        direct_stop_request_id="req-direct-stop-0001",
+        release_request_id="req-release-0001",
+        resume_actor="integration",
+        resume_reason="drill over",
+        nonce=nonce,
+        ttl_seconds=15,
+    )
+    # Acquisition deliberately sets watchdog_at == acquired_at. The separate
+    # control-plane pass must observe it before the reserved resume may queue.
+    assert await run_paper_canary_watchdog_once(roles.safety) is None
+    async with roles.runtime.begin() as session:
         await enqueue_command(
             session,
             request_id="req-resume-0001",
             command="resume",
-            payload={},
+            payload={"venue": "polymarket"},
             actor="integration",
             reason="drill over",
         )
-    succeeded, finished = await process_operator_commands(settings, db_sessions)
+    succeeded, finished = await process_operator_commands(
+        settings,
+        roles.runtime,
+    )
     assert (succeeded, finished) == (1, 1)
     assert await _kill_switch_state(db_sessions) is False
 
@@ -142,10 +172,9 @@ async def test_verify_market_command_unblocks_the_market(
 
 
 async def test_set_mode_paper_switches_and_live_is_gated(
-    db_sessions: SessionFactory, migrated_database_url: str, monkeypatch: pytest.MonkeyPatch
+    db_sessions: SessionFactory,
+    migrated_database_url: str,
 ) -> None:
-    from types import SimpleNamespace
-
     from stratus.db.models import ExecutionMode, RuntimeControl
     from stratus.jobs.process_operator_commands import process_operator_commands
 
@@ -179,10 +208,10 @@ async def test_set_mode_paper_switches_and_live_is_gated(
             )
         ).scalar_one()
     assert rejected.status == "rejected"
-    assert "legal" in (rejected.detail or "")
+    assert "PAPER-only" in (rejected.detail or "")
 
-    # With flags + wallet + a passing gate (patched), live needs the
-    # two-step confirmation: first opens the window, second flips the mode.
+    # Even with operator flags and a wallet, the release boundary remains
+    # authoritative: no confirmation window may open and LIVE is unreachable.
     gated = Settings(
         database_url=migrated_database_url,
         operator_api_key="secret-key",
@@ -191,31 +220,21 @@ async def test_set_mode_paper_switches_and_live_is_gated(
         polygon_private_key="0xtestkey",
     )
 
-    async def passing_gate(
-        session: object, bankroll: float, **_: object
-    ) -> SimpleNamespace:
-        return SimpleNamespace(passed=True)
-
-    monkeypatch.setattr(
-        "stratus.jobs.process_operator_commands.calculate_live_gate", passing_gate
-    )
     await enqueue("req-mode-0003", "live")
-    assert await process_operator_commands(gated, db_sessions) == (1, 1)
+    assert await process_operator_commands(gated, db_sessions) == (0, 1)
     async with db_sessions() as session:
         control = await session.get(RuntimeControl, 1)
-    assert control is not None
-    assert control.mode is ExecutionMode.PAPER  # window opened, not switched
-    assert control.live_confirmation_until is not None
-
-    await enqueue("req-mode-0004", "live")
-    assert await process_operator_commands(gated, db_sessions) == (1, 1)
-    async with db_sessions() as session:
-        control = await session.get(RuntimeControl, 1)
-    assert control is not None and control.mode is ExecutionMode.LIVE
-
-    # Restore paper for other tests.
-    await enqueue("req-mode-0005", "paper")
-    await process_operator_commands(gated, db_sessions)
+        blocked = (
+            await session.execute(
+                select(OperatorCommand).where(
+                    OperatorCommand.request_id == "req-mode-0003"
+                )
+            )
+        ).scalar_one()
+    assert control is not None and control.mode is ExecutionMode.PAPER
+    assert control.live_confirmation_until is None
+    assert blocked.status == "rejected"
+    assert "paper-only" in (blocked.detail or "").lower()
 
 
 async def test_http_submit_and_audit_roundtrip(

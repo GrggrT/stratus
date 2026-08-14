@@ -1,15 +1,66 @@
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from stratus.config import Settings
 from stratus.repositories.analytics import ActualOrderFill
 from stratus.repositories.telegram import format_fill_notification_execution
-from stratus.telegram_bot import build_router
+from stratus.telegram_bot import _bot_commands, build_router
 
 
 def test_telegram_router_registers_command_handlers() -> None:
     router = build_router(Settings(telegram_admin_user_id=42), object())
 
     assert len(router.message.handlers) == 9
+
+
+async def test_telegram_help_describes_resume_as_release_canary_only() -> None:
+    router = build_router(Settings(telegram_admin_user_id=42), object())
+    handler = next(
+        item.callback
+        for item in router.message.handlers
+        if item.callback.__name__ == "help_handler"
+    )
+    answer = AsyncMock()
+    message = SimpleNamespace(
+        text="/help",
+        from_user=SimpleNamespace(id=42),
+        answer=answer,
+    )
+
+    await handler(message)
+
+    help_text = answer.await_args.args[0]
+    assert "/stop — engage kill switch" in help_text
+    assert "/resume — blocked outside release canary" in help_text
+    assert "/stop /resume — kill switch" not in help_text
+
+
+def test_telegram_command_menu_does_not_offer_direct_resume_or_live_mode() -> None:
+    descriptions = {item.command: item.description for item in _bot_commands()}
+
+    assert descriptions["stop"] == "Engage kill switch"
+    assert descriptions["resume"] == "Blocked outside release canary"
+    assert descriptions["mode"] == "Set PAPER mode"
+
+
+async def test_telegram_mode_live_is_rejected_before_database_access() -> None:
+    router = build_router(Settings(telegram_admin_user_id=42), object())
+    handler = next(
+        item.callback
+        for item in router.message.handlers
+        if item.callback.__name__ == "mode_handler"
+    )
+    answer = AsyncMock()
+    message = SimpleNamespace(
+        text="/mode live",
+        from_user=SimpleNamespace(id=42),
+        answer=answer,
+    )
+
+    await handler(message)
+
+    answer.assert_awaited_once_with("Live mode is disabled for this PAPER-only release.")
 
 
 def test_fill_notification_distinguishes_limit_from_actual_vwap() -> None:

@@ -116,15 +116,16 @@ async def test_capacity_audit_persists_append_only_database_measurement(
 
 async def test_capacity_probe_failure_is_persisted_blocking_and_engages_kill_switch(
     db_sessions: SessionFactory,
+    active_paper_canary: object,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    assert active_paper_canary is not None
     missing_path = tmp_path / "missing-capacity-probe"
     settings = get_settings().model_copy(update={"clob_ledger_capacity_path": str(missing_path)})
-    async with db_sessions.begin() as session:
+    async with db_sessions() as session:
         control = await session.get(RuntimeControl, 1)
-        assert control is not None
-        control.kill_switch = False
+        assert control is not None and control.kill_switch is False
 
     async def notification_failure(*_: object) -> bool:
         raise RuntimeError("telegram queue unavailable")
@@ -145,8 +146,6 @@ async def test_capacity_probe_failure_is_persisted_blocking_and_engages_kill_swi
         assert sample.free_disk_bytes is None
         assert sample.details["free_disk_error"]
         assert control is not None and control.kill_switch is True
-        # Avoid leaking the deliberately blocked runtime into unrelated PG tests.
-        control.kill_switch = False
 
 
 async def test_capacity_write_advisory_lock_serializes_collectors(
@@ -173,8 +172,10 @@ async def test_capacity_write_advisory_lock_serializes_collectors(
 
 async def test_capacity_kill_serializes_after_inflight_intent_and_blocks_next_execution(
     db_sessions: SessionFactory,
+    active_paper_canary: object,
     tmp_path: Path,
 ) -> None:
+    assert active_paper_canary is not None
     settings = get_settings().model_copy(
         update={
             "clob_ledger_capacity_path": str(tmp_path),
@@ -183,6 +184,8 @@ async def test_capacity_kill_serializes_after_inflight_intent_and_blocks_next_ex
     )
     assessment = await audit_storage_capacity(settings, db_sessions)
     assert assessment.severity != "blocking"
+    async with db_sessions() as session:
+        assert (await get_runtime_control(session)).kill_switch is False
     intent_locked = asyncio.Event()
     release_intent = asyncio.Event()
     kill_committed = asyncio.Event()
@@ -229,6 +232,3 @@ async def test_capacity_kill_serializes_after_inflight_intent_and_blocks_next_ex
         control = await get_runtime_control(session)
         assert gate.allowed is True
         assert control.kill_switch is True
-        stored = await session.get(RuntimeControl, 1)
-        assert stored is not None
-        stored.kill_switch = False

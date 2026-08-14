@@ -15,6 +15,7 @@ from stratus.db.models import (
     ValidationCheckpoint,
 )
 from stratus.db.session import session_factory_scope
+from stratus.repositories.runtime_control import set_kill_switch
 from stratus.repositories.telegram import enqueue_notification
 from stratus.services.telegram_reports import calculate_live_gate
 
@@ -26,6 +27,29 @@ def due_checkpoint(elapsed_days: int, completed: set[int]) -> int | None:
     return next(
         (day for day in CHECKPOINT_DAYS if elapsed_days >= day and day not in completed),
         None,
+    )
+
+
+async def _halt_after_repeated_gate_failure(
+    session: AsyncSession,
+    *,
+    reason: str,
+    now: datetime,
+) -> None:
+    # Acquire the canonical exclusive PAPER safety lock and audited STOP before
+    # persisting the terminal product halt. The following UPDATE is re-entrant
+    # under that transaction lock and cannot race a deferred exposure commit.
+    await set_kill_switch(
+        session,
+        True,
+        actor="stratus-audit-gate",
+        reason=reason,
+        expiration_reason="validation_gate",
+    )
+    await session.execute(
+        update(RuntimeControl)
+        .where(RuntimeControl.id == 1)
+        .values(halted_reason=reason, updated_at=now)
     )
 
 
@@ -117,10 +141,10 @@ async def audit_gate(
             )
             if checkpoint_day == 60 and not gate.passed and prior_failures == 30:
                 reason = "validation gate failed at day 30 and day 60"
-                await session.execute(
-                    update(RuntimeControl)
-                    .where(RuntimeControl.id == 1)
-                    .values(kill_switch=True, halted_reason=reason, updated_at=now)
+                await _halt_after_repeated_gate_failure(
+                    session,
+                    reason=reason,
+                    now=now,
                 )
                 await enqueue_notification(
                     session,

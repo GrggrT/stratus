@@ -14,8 +14,8 @@ param(
     [ValidateSet(5)]
     [int] $DrainSeconds = 5,
 
-    [ValidateSet('20260730_0046')]
-    [string] $ExpectedSchemaHead = '20260730_0046',
+    [ValidateSet('20260730_0047')]
+    [string] $ExpectedSchemaHead = '20260730_0047',
 
     [ValidateSet(4)]
     [int] $MaxApiSessions = 4,
@@ -41,6 +41,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$ExpectedApiMemoryLimitBytes = 1073741824L
 
 $validation = [pscustomobject]@{
     schema_version = 2
@@ -57,6 +58,8 @@ $validation = [pscustomobject]@{
     requires_shared_run_id = $true
     requires_exact_api_identity = $true
     requires_ready_marker = $true
+    requires_exhaustive_project_topology = $true
+    counts_all_other_client_backends = $true
     thresholds = [pscustomobject]@{
         api_idle_in_transaction = 0
         global_idle_in_transaction = 0
@@ -98,31 +101,64 @@ function Get-Maximum {
 }
 
 function Invoke-DatabaseSnapshot {
-    param([Parameter(Mandatory = $true)][string] $PostgresContainer)
+    param(
+        [Parameter(Mandatory = $true)][string] $PostgresContainer,
+        [Parameter(Mandatory = $true)][string[]] $ApiClientAddresses
+    )
+
+    $apiAddressLiterals = @(
+        $ApiClientAddresses | ForEach-Object {
+            $parsedAddress = $null
+            if (-not [Net.IPAddress]::TryParse([string]$_, [ref]$parsedAddress)) {
+                throw "Invalid candidate API client address: $_"
+            }
+            "'$($parsedAddress.ToString())'::inet"
+        }
+    )
+    if ($apiAddressLiterals.Count -eq 0) {
+        throw 'Candidate API has no PostgreSQL client address allowlist.'
+    }
+    $apiAddressArray = $apiAddressLiterals -join ','
 
     $sql = @"
 SELECT json_build_object(
   'at', clock_timestamp(),
   'api_sessions', (
     SELECT count(*) FROM pg_stat_activity
-    WHERE datname=current_database() AND application_name='stratus-api'
+    WHERE datname=current_database()
+      AND backend_type='client backend'
+      AND usename=('stratus_app_' || md5(current_database()))
+      AND application_name='stratus-api'
+      AND client_addr = ANY(ARRAY[$apiAddressArray])
   ),
   'api_active', (
     SELECT count(*) FROM pg_stat_activity
     WHERE datname=current_database()
-      AND application_name='stratus-api' AND state='active'
+      AND backend_type='client backend'
+      AND usename=('stratus_app_' || md5(current_database()))
+      AND application_name='stratus-api'
+      AND client_addr = ANY(ARRAY[$apiAddressArray])
+      AND state='active'
   ),
   'api_idle_in_tx', (
     SELECT count(*) FROM pg_stat_activity
     WHERE datname=current_database()
+      AND backend_type='client backend'
+      AND usename=('stratus_app_' || md5(current_database()))
       AND application_name='stratus-api'
+      AND client_addr = ANY(ARRAY[$apiAddressArray])
       AND state LIKE 'idle in transaction%'
   ),
   'runtime_writer_sessions', (
     SELECT count(*) FROM pg_stat_activity
     WHERE datname=current_database()
-      AND application_name LIKE 'stratus-%'
-      AND application_name <> 'stratus-api'
+      AND pid <> pg_backend_pid()
+      AND backend_type='client backend'
+      AND NOT (
+        usename=('stratus_app_' || md5(current_database()))
+        AND application_name='stratus-api'
+        AND client_addr = ANY(ARRAY[$apiAddressArray])
+      )
   ),
   'global_idle_in_tx', (
     SELECT count(*) FROM pg_stat_activity
@@ -135,7 +171,10 @@ SELECT json_build_object(
     )
     FROM pg_stat_activity
     WHERE datname=current_database()
+      AND backend_type='client backend'
+      AND usename=('stratus_app_' || md5(current_database()))
       AND application_name='stratus-api'
+      AND client_addr = ANY(ARRAY[$apiAddressArray])
       AND state LIKE 'idle in transaction%'
   ),
   'lock_waiters', (
@@ -149,7 +188,11 @@ SELECT json_build_object(
     )
     FROM pg_stat_activity
     WHERE datname=current_database()
-      AND application_name='stratus-api' AND state='active'
+      AND backend_type='client backend'
+      AND usename=('stratus_app_' || md5(current_database()))
+      AND application_name='stratus-api'
+      AND client_addr = ANY(ARRAY[$apiAddressArray])
+      AND state='active'
   ),
   'schema_head', (SELECT version_num FROM alembic_version),
   'controls_ok', (
@@ -209,12 +252,128 @@ function Get-ResourceSnapshot {
     ) {
         throw 'Docker resource sample omitted a required container.'
     }
+    $apiInspectRows = @((docker inspect $ApiContainer | ConvertFrom-Json))
+    if ($LASTEXITCODE -ne 0 -or $apiInspectRows.Count -ne 1) {
+        throw 'Docker API memory-limit sample failed.'
+    }
     return [pscustomobject]@{
         at = [DateTimeOffset]::UtcNow.ToString('O')
         api_cpu_percent = Convert-Percent $stats[$ApiContainer].CPUPerc
         api_memory_percent = Convert-Percent $stats[$ApiContainer].MemPerc
+        api_memory_limit_bytes = [int64]$apiInspectRows[0].HostConfig.Memory
+        api_operator_key_entry_count = @(
+            $apiInspectRows[0].Config.Env | Where-Object {
+                [string]$_ -imatch '^OPERATOR_API_KEY='
+            }
+        ).Count
         postgres_cpu_percent = Convert-Percent $stats[$PostgresContainer].CPUPerc
         postgres_memory_percent = Convert-Percent $stats[$PostgresContainer].MemPerc
+    }
+}
+
+function Get-RunningProjectTopology {
+    param(
+        [Parameter(Mandatory = $true)][string] $ProjectName,
+        [Parameter(Mandatory = $true)][string] $ApiContainerId,
+        [Parameter(Mandatory = $true)][string] $PostgresContainerId,
+        [Parameter(Mandatory = $true)][string[]] $AllowedNetworks
+    )
+
+    $allowedServices = @('api', 'postgres')
+    $composeServices = @(
+        & docker @script:StratusReleaseComposeArguments `
+            ps --status running --services |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Docker Compose running-service inventory failed.'
+    }
+
+    $format = (
+        '{{.ID}}|{{.Label "com.docker.compose.project"}}|' +
+        '{{.Label "com.docker.compose.service"}}|' +
+        '{{.Label "com.docker.compose.oneoff"}}|{{.Names}}|{{.Networks}}'
+    )
+    $runningRows = @(
+        docker ps --no-trunc `
+            --format $format
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Docker running-container project inventory failed.'
+    }
+
+    $allowedById = @{
+        $ApiContainerId = 'api'
+        $PostgresContainerId = 'postgres'
+    }
+    $containers = [Collections.Generic.List[object]]::new()
+    $allContainers = [Collections.Generic.List[object]]::new()
+    $unexpected = [Collections.Generic.List[string]]::new()
+    foreach ($line in $runningRows) {
+        if ([string]::IsNullOrWhiteSpace([string]$line)) {
+            continue
+        }
+        $parts = @([string]$line -split '\|', 6)
+        if ($parts.Count -ne 6) {
+            throw 'Docker running-container inventory returned a malformed row.'
+        }
+        $row = [pscustomobject]@{
+            container_id = [string]$parts[0]
+            project = [string]$parts[1]
+            service = [string]$parts[2]
+            oneoff = [string]$parts[3]
+            container_name = [string]$parts[4]
+            networks = @([string]$parts[5] -split ',' | Where-Object { $_ -ne '' })
+        }
+        $allContainers.Add($row)
+        $isRelevant = (
+            $allowedById.ContainsKey($row.container_id) -or
+            $row.project -eq $ProjectName -or
+            @($row.networks | Where-Object { $_ -in $AllowedNetworks }).Count -ne 0
+        )
+        if (-not $isRelevant) {
+            continue
+        }
+        $containers.Add($row)
+        if (
+            -not $allowedById.ContainsKey($row.container_id) -or
+            [string]$allowedById[$row.container_id] -ne $row.service -or
+            $row.project -ne $ProjectName -or
+            $row.oneoff -ne 'False'
+        ) {
+            $unexpected.Add(
+                "$($row.container_name):$($row.service):$($row.container_id)"
+            )
+        }
+    }
+
+    $missingIds = @(
+        $allowedById.Keys |
+            Where-Object { $_ -notin @($containers | ForEach-Object container_id) }
+    )
+    $serviceSetSafe = (
+        $composeServices.Count -eq $allowedServices.Count -and
+        @($composeServices | Sort-Object -Unique).Count -eq $allowedServices.Count -and
+        @($composeServices | Where-Object { $_ -notin $allowedServices }).Count -eq 0 -and
+        @($allowedServices | Where-Object { $_ -notin $composeServices }).Count -eq 0
+    )
+    return [pscustomobject]@{
+        at = [DateTimeOffset]::UtcNow.ToString('O')
+        project = $ProjectName
+        allowed_services = $allowedServices
+        protected_networks = @($AllowedNetworks | Sort-Object -Unique)
+        running_services = @($composeServices)
+        all_running_container_count = $allContainers.Count
+        all_running_containers = @($allContainers)
+        running_containers = @($containers)
+        unexpected_containers = @($unexpected)
+        missing_container_ids = @($missingIds)
+        safe = (
+            $serviceSetSafe -and
+            $containers.Count -eq $allowedById.Count -and
+            $unexpected.Count -eq 0 -and
+            $missingIds.Count -eq 0
+        )
     }
 }
 
@@ -269,6 +428,41 @@ trap {
 }
 
 $absoluteRoot = [IO.Path]::GetFullPath($Root)
+$composePath = Join-Path $absoluteRoot 'docker-compose.yml'
+$composeEnvPath = Join-Path $absoluteRoot '.env'
+foreach ($overrideName in @(
+    'COMPOSE_FILE',
+    'COMPOSE_PROFILES',
+    'COMPOSE_PROJECT_NAME',
+    'COMPOSE_PATH_SEPARATOR'
+)) {
+    if (Test-Path -LiteralPath "Env:$overrideName") {
+        throw "Release Compose override environment variable is forbidden: $overrideName"
+    }
+}
+foreach ($requiredFile in @($composePath, $composeEnvPath)) {
+    if (
+        -not (Test-Path -LiteralPath $requiredFile -PathType Leaf) -or
+        ((Get-Item -LiteralPath $requiredFile -Force).Attributes -band
+            [IO.FileAttributes]::ReparsePoint)
+    ) {
+        throw "Release Compose provenance file is missing or linked: $requiredFile"
+    }
+}
+if (@(
+    Get-Content -LiteralPath $composeEnvPath |
+        Where-Object {
+            $_ -match '^\s*(?:export\s+)?COMPOSE_(?:FILE|PROFILES|PROJECT_NAME|PATH_SEPARATOR)\s*='
+        }
+).Count -ne 0) {
+    throw 'Release .env must not define a reserved Compose override variable.'
+}
+$script:StratusReleaseComposeArguments = @(
+    'compose', '--project-directory', $absoluteRoot,
+    '-f', $composePath,
+    '--env-file', $composeEnvPath,
+    '--project-name', 'weatherpoly'
+)
 $absoluteOutput = if ([IO.Path]::IsPathRooted($OutputPath)) {
     [IO.Path]::GetFullPath($OutputPath)
 }
@@ -298,15 +492,8 @@ if (
     throw 'Shared run ID and exact API image identity are required.'
 }
 Set-Location -LiteralPath $absoluteRoot
-$unexpectedServices = @(
-    docker compose ps --status running --services |
-        Where-Object { $_ -in @('worker', 'telegram', 'binance-market-stream') }
-)
-if ($unexpectedServices.Count -ne 0) {
-    throw "Runtime gate requires application writers stopped: $($unexpectedServices -join ', ')"
-}
-$apiIds = @(docker compose ps -q api)
-$postgresIds = @(docker compose ps -q postgres)
+$apiIds = @(& docker @script:StratusReleaseComposeArguments ps -q api)
+$postgresIds = @(& docker @script:StratusReleaseComposeArguments ps -q postgres)
 if ($apiIds.Count -ne 1 -or $postgresIds.Count -ne 1) {
     throw 'Runtime gate requires exactly one running Compose API and PostgreSQL container.'
 }
@@ -323,6 +510,13 @@ if (
 }
 if (
     $baselineApi.Image -ne $ExpectedApiImageId -or
+    [int64]$baselineApi.HostConfig.Memory -ne $ExpectedApiMemoryLimitBytes -or
+    @($baselineApi.Config.Env | Where-Object {
+        [string]$_ -imatch '^OPERATOR_API_KEY='
+    }).Count -ne 1 -or
+    @($baselineApi.Config.Env | Where-Object {
+        [string]$_ -cmatch '^OPERATOR_API_KEY=.+$'
+    }).Count -ne 1 -or
     $baselineApi.Config.Labels.'org.opencontainers.image.revision' -ne $ExpectedRevision -or
     @(
         $baselineApi.Config.Env |
@@ -331,12 +525,49 @@ if (
 ) {
     throw 'Runtime gate API identity does not match the exact candidate.'
 }
+$projectName = [string]$baselineApi.Config.Labels.'com.docker.compose.project'
+if (
+    [string]::IsNullOrWhiteSpace($projectName) -or
+    [string]$baselinePostgres.Config.Labels.'com.docker.compose.project' -ne $projectName -or
+    [string]$baselineApi.Config.Labels.'com.docker.compose.service' -ne 'api' -or
+    [string]$baselinePostgres.Config.Labels.'com.docker.compose.service' -ne 'postgres' -or
+    [string]$baselineApi.Config.Labels.'com.docker.compose.oneoff' -ne 'False' -or
+    [string]$baselinePostgres.Config.Labels.'com.docker.compose.oneoff' -ne 'False'
+) {
+    throw 'Runtime gate containers do not have the exact Compose project/service identity.'
+}
 $apiName = ([string]$baselineApi.Name).TrimStart('/')
 $postgresName = ([string]$baselinePostgres.Name).TrimStart('/')
+$allowedNetworkNames = @(
+    @($baselineApi.NetworkSettings.Networks.PSObject.Properties.Name) +
+    @($baselinePostgres.NetworkSettings.Networks.PSObject.Properties.Name) |
+        Sort-Object -Unique
+)
+if ($allowedNetworkNames.Count -eq 0) {
+    throw 'Runtime gate containers have no authoritative Docker networks.'
+}
+$apiClientAddresses = @(
+    $baselineApi.NetworkSettings.Networks.PSObject.Properties |
+        ForEach-Object { [string]$_.Value.IPAddress } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+        Sort-Object -Unique
+)
+if ($apiClientAddresses.Count -eq 0) {
+    throw 'Runtime gate API has no authoritative Docker network address.'
+}
 $databaseSamples = [Collections.Generic.List[object]]::new()
 $resourceSamples = [Collections.Generic.List[object]]::new()
+$topologySamples = [Collections.Generic.List[object]]::new()
 $sampleErrors = [Collections.Generic.List[object]]::new()
 $observationStartedAt = [DateTimeOffset]::UtcNow
+$baselineTopology = Get-RunningProjectTopology -ProjectName $projectName `
+    -ApiContainerId ([string]$baselineApi.Id) `
+    -PostgresContainerId ([string]$baselinePostgres.Id) `
+    -AllowedNetworks $allowedNetworkNames
+$topologySamples.Add($baselineTopology)
+if (-not [bool]$baselineTopology.safe) {
+    throw 'Runtime gate requires the exact API/PostgreSQL project topology only.'
+}
 $deadline = $observationStartedAt.AddSeconds($DurationSeconds)
 $nextResourceAt = $observationStartedAt
 $readyWritten = $false
@@ -344,7 +575,10 @@ $readyWritten = $false
 while ([DateTimeOffset]::UtcNow -lt $deadline) {
     $sampleStarted = [DateTimeOffset]::UtcNow
     try {
-        $databaseSamples.Add((Invoke-DatabaseSnapshot -PostgresContainer $postgresName))
+        $databaseSamples.Add(
+            (Invoke-DatabaseSnapshot -PostgresContainer $postgresName `
+                -ApiClientAddresses $apiClientAddresses)
+        )
     }
     catch {
         $sampleErrors.Add([pscustomobject]@{
@@ -367,13 +601,29 @@ while ([DateTimeOffset]::UtcNow -lt $deadline) {
                 error = $_.Exception.GetBaseException().Message
             })
         }
+        try {
+            $topologySamples.Add(
+                (Get-RunningProjectTopology -ProjectName $projectName `
+                    -ApiContainerId ([string]$baselineApi.Id) `
+                    -PostgresContainerId ([string]$baselinePostgres.Id) `
+                    -AllowedNetworks $allowedNetworkNames)
+            )
+        }
+        catch {
+            $sampleErrors.Add([pscustomobject]@{
+                at = [DateTimeOffset]::UtcNow.ToString('O')
+                source = 'topology'
+                error = $_.Exception.GetBaseException().Message
+            })
+        }
         $nextResourceAt = [DateTimeOffset]::UtcNow.AddSeconds($ResourceIntervalSeconds)
     }
 
     if (
         -not $readyWritten -and
         $databaseSamples.Count -gt 0 -and
-        $resourceSamples.Count -gt 0
+        $resourceSamples.Count -gt 0 -and
+        $topologySamples.Count -gt 0
     ) {
         $firstDatabaseSample = $databaseSamples[0]
         $firstResourceSample = $resourceSamples[0]
@@ -391,7 +641,11 @@ while ([DateTimeOffset]::UtcNow -lt $deadline) {
             [int]$firstDatabaseSample.live_fill_legs -ne 0 -or
             [int]$firstDatabaseSample.live_enrollments -ne 0 -or
             [int]$firstDatabaseSample.runtime_writer_sessions -ne 0 -or
+            -not [bool]$topologySamples[0].safe -or
             [double]$firstResourceSample.api_memory_percent -ge 90 -or
+            [int64]$firstResourceSample.api_memory_limit_bytes -ne
+                $ExpectedApiMemoryLimitBytes -or
+            [int]$firstResourceSample.api_operator_key_entry_count -ne 1 -or
             [double]$firstResourceSample.postgres_cpu_percent -ge 200
         ) {
             throw 'Runtime observer preflight is not fail-closed, writer-free, and contention-free.'
@@ -406,6 +660,7 @@ while ([DateTimeOffset]::UtcNow -lt $deadline) {
             api_image_id = $ExpectedApiImageId
             revision = $ExpectedRevision
             release_digest = $ExpectedReleaseDigest
+            compose_project = $projectName
             preflight_safe = $true
             database_preflight = [pscustomobject]@{
                 api_sessions = [int]$firstDatabaseSample.api_sessions
@@ -432,11 +687,18 @@ while ([DateTimeOffset]::UtcNow -lt $deadline) {
 }
 
 Start-Sleep -Seconds $DrainSeconds
-$drain = Invoke-DatabaseSnapshot -PostgresContainer $postgresName
+$drain = Invoke-DatabaseSnapshot -PostgresContainer $postgresName `
+    -ApiClientAddresses $apiClientAddresses
+$finalTopology = Get-RunningProjectTopology -ProjectName $projectName `
+    -ApiContainerId ([string]$baselineApi.Id) `
+    -PostgresContainerId ([string]$baselinePostgres.Id) `
+    -AllowedNetworks $allowedNetworkNames
+$topologySamples.Add($finalTopology)
 $finalApi = @((docker inspect $apiName | ConvertFrom-Json))[0]
 $finalPostgres = @((docker inspect $postgresName | ConvertFrom-Json))[0]
 $dbRows = @($databaseSamples)
 $resourceRows = @($resourceSamples)
+$topologyRows = @($topologySamples)
 $pgCpu = @($resourceRows | ForEach-Object { [double]$_.postgres_cpu_percent })
 $twoAt150 = $false
 for ($index = 1; $index -lt $pgCpu.Count; $index += 1) {
@@ -471,16 +733,20 @@ $containersHealthy = (
 )
 $candidateIdentityHeld = (
     $finalApi.Image -eq $ExpectedApiImageId -and
+    [int64]$finalApi.HostConfig.Memory -eq $ExpectedApiMemoryLimitBytes -and
+    @($finalApi.Config.Env | Where-Object {
+        [string]$_ -imatch '^OPERATOR_API_KEY='
+    }).Count -eq 1 -and
+    @($finalApi.Config.Env | Where-Object {
+        [string]$_ -cmatch '^OPERATOR_API_KEY=.+$'
+    }).Count -eq 1 -and
     $finalApi.Config.Labels.'org.opencontainers.image.revision' -eq $ExpectedRevision -and
     @(
         $finalApi.Config.Env |
             Where-Object { $_ -eq "RELEASE_IMAGE_DIGEST=$ExpectedReleaseDigest" }
     ).Count -eq 1
 )
-$finalUnexpectedServices = @(
-    docker compose ps --status running --services |
-        Where-Object { $_ -in @('worker', 'telegram', 'binance-market-stream') }
-)
+$topologyFailures = @($topologyRows | Where-Object { -not [bool]$_.safe })
 $invariantFailures = @(
     $dbRows | Where-Object {
         [string]$_.schema_head -ne $ExpectedSchemaHead -or
@@ -498,6 +764,7 @@ $violations = [Collections.Generic.List[string]]::new()
 if ($sampleErrors.Count -ne 0) { $violations.Add('sample_error') }
 if ($dbRows.Count -eq 0) { $violations.Add('no_database_samples') }
 if ($resourceRows.Count -eq 0) { $violations.Add('no_resource_samples') }
+if ($topologyRows.Count -eq 0) { $violations.Add('no_topology_samples') }
 if (-not $readyWritten) { $violations.Add('ready_marker_missing') }
 $minimumDatabaseSamples = [Math]::Floor(
     ($DurationSeconds / $DatabaseIntervalSeconds) * 0.9
@@ -510,6 +777,9 @@ if ($dbRows.Count -lt $minimumDatabaseSamples) {
 }
 if ($resourceRows.Count -lt $minimumResourceSamples) {
     $violations.Add('resource_sample_coverage')
+}
+if ($topologyRows.Count -lt $minimumResourceSamples) {
+    $violations.Add('topology_sample_coverage')
 }
 if ((Get-Maximum $dbRows 'api_sessions') -gt $MaxApiSessions) {
     $violations.Add('api_session_bound')
@@ -524,6 +794,20 @@ if ((Get-Maximum $dbRows 'lock_waiters') -ne 0) { $violations.Add('lock_waiter')
 if ((Get-Maximum $resourceRows 'api_memory_percent') -ge 90) {
     $violations.Add('api_memory')
 }
+if (
+    @($resourceRows | Where-Object {
+        [int64]$_.api_memory_limit_bytes -ne $ExpectedApiMemoryLimitBytes
+    }).Count -ne 0
+) {
+    $violations.Add('api_memory_limit_changed')
+}
+if (
+    @($resourceRows | Where-Object {
+        [int]$_.api_operator_key_entry_count -ne 1
+    }).Count -ne 0
+) {
+    $violations.Add('api_operator_credential_changed')
+}
 if ((Get-Maximum $resourceRows 'postgres_cpu_percent') -ge 200) {
     $violations.Add('postgres_cpu_single')
 }
@@ -534,8 +818,9 @@ if ($restartChanged) { $violations.Add('container_restart') }
 if ($oomObserved) { $violations.Add('container_oom') }
 if (-not $containersHealthy) { $violations.Add('container_not_healthy') }
 if (-not $candidateIdentityHeld) { $violations.Add('candidate_identity_changed') }
-if ($finalUnexpectedServices.Count -ne 0) {
+if ($topologyFailures.Count -ne 0) {
     $violations.Add('application_writer_started')
+    $violations.Add('container_topology_changed')
 }
 if ($invariantFailures.Count -ne 0) { $violations.Add('runtime_invariant') }
 $drainInvariantFailure = (
@@ -562,6 +847,7 @@ if (
 $summary = [pscustomobject]@{
     database_sample_count = $dbRows.Count
     resource_sample_count = $resourceRows.Count
+    topology_sample_count = $topologyRows.Count
     minimum_database_samples = $minimumDatabaseSamples
     minimum_resource_samples = $minimumResourceSamples
     sample_errors = $sampleErrors.Count
@@ -583,7 +869,8 @@ $summary = [pscustomobject]@{
     oom_observed = $oomObserved
     containers_healthy = $containersHealthy
     candidate_identity_held = $candidateIdentityHeld
-    application_writers_stopped = $finalUnexpectedServices.Count -eq 0
+    application_writers_stopped = $topologyFailures.Count -eq 0
+    exact_project_topology_held = $topologyFailures.Count -eq 0
     invariants_changed = $invariantFailures.Count -ne 0
     drain_passed = (
         [int]$drain.api_active -eq 0 -and
@@ -618,6 +905,7 @@ $result = [pscustomobject]@{
         postgres_container_id = $baselinePostgres.Id
         postgres_image_id = $baselinePostgres.Image
         postgres_restart_count = [int]$baselinePostgres.RestartCount
+        compose_project = $projectName
     }
     summary = $summary
     violations = @($violations)
@@ -625,6 +913,7 @@ $result = [pscustomobject]@{
     sample_errors = @($sampleErrors)
     database_samples = $dbRows
     resource_samples = $resourceRows
+    topology_samples = $topologyRows
 }
 Write-ObserverArtifact -Path $absoluteOutput -Artifact $result
 $summary | ConvertTo-Json -Compress

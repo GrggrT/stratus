@@ -66,10 +66,12 @@ Useful options:
 .\scripts\Start-StratusDevApi.ps1 -NoBackup
 ```
 
-Do not use plain `docker compose up -d` for this mode. That starts the compose `api` and `worker` services from the Docker image, which may be older than the working tree and can reintroduce stale endpoints or a running scheduler. Use one of these instead:
+Plain `docker compose up -d` intentionally selects no services. Choose an explicit profile; for
+host-run API/worker development, start only the profiled infrastructure and keep any stale
+containerized application processes stopped:
 
 ```powershell
-docker compose up -d postgres backup
+docker compose --profile infrastructure up -d postgres backup
 docker compose stop api worker
 ```
 
@@ -90,7 +92,7 @@ if ($owner.CommandLine -like "*\.venv\Scripts\stratus-api.exe*") {
 } else {
     throw "Port 8000 is not owned by the host stratus-api: $($owner.CommandLine)"
 }
-docker compose up -d api worker
+docker compose --profile release up -d api worker
 ```
 
 Logs from the host API are written to `api.out.log` and `api.err.log`; `*.log` files are gitignored.

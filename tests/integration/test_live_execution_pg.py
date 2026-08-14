@@ -4,6 +4,7 @@ that the mock-free unit tests cannot express."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -11,11 +12,13 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import func, select, update
+from asyncpg.exceptions import RaiseError
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -75,10 +78,20 @@ from stratus.repositories.execution import (
     PaperExecutionValue,
     claim_live_order,
     persist_paper_executions,
+    record_live_placement,
+)
+from stratus.repositories.execution_cost_ledger import (
+    append_live_reconciliation_observation,
+    create_intent_for_order,
 )
 from stratus.repositories.market_prices import PriceTarget
 from stratus.repositories.model_probs import ModelProbabilityValue, upsert_model_probs
-from stratus.repositories.signals import expire_unclaimed_pending_signals_for_events
+from stratus.repositories.runtime_control import get_runtime_control
+from stratus.repositories.signals import (
+    SignalValue,
+    expire_unclaimed_pending_signals_for_events,
+    insert_signals,
+)
 from stratus.repositories.station_reliability import (
     StationReliabilitySnapshotValue,
     insert_station_reliability_snapshot,
@@ -88,6 +101,7 @@ from stratus.services.clob_evidence import (
     LEGACY_MARKET_PROTOCOL,
 )
 from stratus.services.pipeline_identity import probability_pipeline_fingerprint
+from stratus.services.safety_control import stop_polymarket_atomically
 from stratus.services.station_reliability import station_reliability_policy_hash
 
 pytestmark = [
@@ -96,6 +110,7 @@ pytestmark = [
         reason="STRATUS_TEST_DATABASE_URL is not set",
     ),
     pytest.mark.usefixtures("activated_probability_release_epoch"),
+    pytest.mark.usefixtures("active_paper_canary"),
 ]
 
 SessionFactory = async_sessionmaker[AsyncSession]
@@ -108,6 +123,11 @@ TEST_PIPELINE_COHORT = probability_pipeline_release_cohort(
     pipeline_version=_TEST_SETTINGS.probability_pipeline_version,
     material_fingerprint=probability_pipeline_fingerprint(_TEST_SETTINGS),
     activation_manifest_hash=build_effective_promotion_manifest(()).manifest_hash,
+)
+LIVE_PAPER_ONLY_LATCH_ERROR = "PAPER canary history forbids non-PAPER runtime state"
+LIVE_FUTURE_XFAIL_REASON = (
+    "Migration 0047 latches this release to PAPER; retain "
+    "the legacy LIVE placement contract for an explicit future release."
 )
 
 
@@ -189,6 +209,20 @@ async def _set_runtime(
             .where(RuntimeControl.id == 1)
             .values(mode=mode, kill_switch=kill, halted_reason=None)
         )
+
+
+async def _set_live_runtime_or_xfail(sessions: SessionFactory) -> None:
+    """Xfail only for migration 0047's exact, database-owned LIVE latch."""
+
+    try:
+        await _set_runtime(sessions, mode=ExecutionMode.LIVE)
+    except DBAPIError as exc:
+        latch_error = exc.orig.__cause__
+        assert isinstance(latch_error, RaiseError)
+        assert latch_error.sqlstate == "P0001"
+        assert str(latch_error) == LIVE_PAPER_ONLY_LATCH_ERROR
+        pytest.xfail(LIVE_FUTURE_XFAIL_REASON)
+    pytest.fail("Migration 0047 unexpectedly allowed LIVE runtime mode")
 
 
 def _raw_book(
@@ -323,17 +357,13 @@ def _candidate_only_eligible_event_batch(
         response_sha256=hashlib.sha256(response_body).hexdigest(),
         response_bytes=len(response_body),
         response_headers=(),
-        snapshots=tuple(
-            parse_strict_book_snapshot(books_by_token[token]) for token in requested
-        ),
+        snapshots=tuple(parse_strict_book_snapshot(books_by_token[token]) for token in requested),
     )
 
 
 async def _seed_market(sessions: SessionFactory, *, polymarket_id: str) -> PriceTarget:
     async with sessions.begin() as session:
-        station = await session.scalar(
-            select(Station).where(Station.icao == "KLGA")
-        )
+        station = await session.scalar(select(Station).where(Station.icao == "KLGA"))
         assert station is not None
         market = Market(
             polymarket_id=polymarket_id,
@@ -397,8 +427,7 @@ async def _pending_signal(
                 prob=model_probability,
                 sigma=Decimal("1.0000"),
                 horizon_h=Decimal("6.00"),
-                components=model_components
-                or {"pipeline": {"cohort": TEST_PIPELINE_COHORT}},
+                components=model_components or {"pipeline": {"cohort": TEST_PIPELINE_COHORT}},
                 market_snapshot_id=snapshot_id,
                 market_anchor_protocol=CLOB_DUAL_PROTOCOL,
             )
@@ -426,6 +455,36 @@ async def _pending_signal(
         return signal.id
 
 
+async def _stage_runtime_paper_order(
+    session: AsyncSession,
+    signal_id: int,
+) -> Order:
+    """Write the canonical phase-one Order+Intent pair without committing it."""
+
+    order = Order(
+        signal_id=signal_id,
+        mode=ExecutionMode.PAPER,
+        clob_order_id=f"paper-{signal_id}",
+        token_id="yes-token",
+        side=TradeSide.BUY_YES,
+        price=Decimal("0.53"),
+        size_usd=Decimal("20"),
+        filled_usd=Decimal("0"),
+        status="paper_pending",
+    )
+    session.add(order)
+    await session.flush()
+    await create_intent_for_order(
+        session,
+        order.id,
+        release_image_digest=TEST_IMAGE_DIGEST,
+        order_style="taker",
+        expected_fee_usd=Decimal("0"),
+        expected_fee_unavailable_reason=None,
+    )
+    return order
+
+
 async def _append_station_reliability_snapshot(
     session: AsyncSession,
     *,
@@ -450,20 +509,14 @@ async def _append_station_reliability_snapshot(
             boundary_units=0,
             unavailable_units=0,
             reliability_score=Decimal("0.950000") if conflict else Decimal("1.000000"),
-            reliability_lower_bound=(
-                Decimal("0.763869") if conflict else Decimal("0.838875")
-            ),
+            reliability_lower_bound=(Decimal("0.763869") if conflict else Decimal("0.838875")),
             status=(
-                StationReliabilityStatus.BLOCKED
-                if conflict
-                else StationReliabilityStatus.RELIABLE
+                StationReliabilityStatus.BLOCKED if conflict else StationReliabilityStatus.RELIABLE
             ),
             latest_conflict_at=conflict_at,
             latest_conflict_date=local_date - timedelta(days=1) if conflict else None,
             latest_conflict_kind=WeatherKind.HIGH if conflict else None,
-            resolution_cooldown_until=(
-                evaluated_at + timedelta(hours=48) if conflict else None
-            ),
+            resolution_cooldown_until=(evaluated_at + timedelta(hours=48) if conflict else None),
             latest_observation_at=evaluated_at,
             observation_local_date=local_date,
             observation_cooldown_until=None,
@@ -545,9 +598,7 @@ async def test_materialized_model_probability_matches_signal_and_intent(
     raw_probabilities = ("0.160462", "0.300000", "0.539550")
 
     async with db_sessions.begin() as session:
-        station = await session.scalar(
-            select(Station).where(Station.icao == "KCOH")
-        )
+        station = await session.scalar(select(Station).where(Station.icao == "KCOH"))
         assert station is not None
         markets = [
             Market(
@@ -612,9 +663,7 @@ async def test_materialized_model_probability_matches_signal_and_intent(
                 market_snapshot_id=snapshots[market.id].id,
                 market_anchor_protocol=CLOB_DUAL_PROTOCOL,
             )
-            for market, raw_probability in zip(
-                markets, raw_probabilities, strict=True
-            )
+            for market, raw_probability in zip(markets, raw_probabilities, strict=True)
         ]
         materialization = _materialize_event_probability_coherence(
             raw_values,
@@ -634,9 +683,7 @@ async def test_materialized_model_probability_matches_signal_and_intent(
     assert accepted >= 1
 
     async with db_sessions() as session:
-        signal = await session.scalar(
-            select(Signal).where(Signal.market_id == selected_market_id)
-        )
+        signal = await session.scalar(select(Signal).where(Signal.market_id == selected_market_id))
         assert signal is not None
         model = await session.scalar(
             select(ModelProb).where(
@@ -724,9 +771,7 @@ async def test_candidate_anchor_v2_uses_current_materialized_siblings_not_old_an
         # prove that selection must not borrow those sibling rows after a newer
         # complete model vector has been published.
         old_batch = await persist_clob_batch(session, _event_batch(targets), targets)
-        old_snapshots = {
-            snapshot.market_id: snapshot for snapshot in old_batch.snapshots
-        }
+        old_snapshots = {snapshot.market_id: snapshot for snapshot in old_batch.snapshots}
         old_time = old_batch.batch.first_seen_at + timedelta(microseconds=1)
         old_values = [
             ModelProbabilityValue(
@@ -761,9 +806,7 @@ async def test_candidate_anchor_v2_uses_current_materialized_siblings_not_old_an
                 for market in markets
             },
         )
-        assert old_materialization.valid_event_ids == frozenset(
-            {"candidate-anchor-v2-event"}
-        )
+        assert old_materialization.valid_event_ids == frozenset({"candidate-anchor-v2-event"})
         await upsert_model_probs(session, list(old_materialization.values))
 
         current_batch = await persist_clob_batch(
@@ -774,13 +817,9 @@ async def test_candidate_anchor_v2_uses_current_materialized_siblings_not_old_an
             ),
             targets,
         )
-        current_snapshots = {
-            snapshot.market_id: snapshot for snapshot in current_batch.snapshots
-        }
+        current_snapshots = {snapshot.market_id: snapshot for snapshot in current_batch.snapshots}
         assert current_snapshots[markets[0].id].eligible
-        assert all(
-            not current_snapshots[market.id].eligible for market in markets[1:]
-        )
+        assert all(not current_snapshots[market.id].eligible for market in markets[1:])
         current_time = current_batch.batch.first_seen_at + timedelta(microseconds=1)
         await _append_station_reliability_snapshot(
             session,
@@ -807,14 +846,10 @@ async def test_candidate_anchor_v2_uses_current_materialized_siblings_not_old_an
                     },
                 },
                 market_snapshot_id=(
-                    current_snapshots[market.id].id
-                    if market.id == markets[0].id
-                    else None
+                    current_snapshots[market.id].id if market.id == markets[0].id else None
                 ),
                 market_anchor_protocol=(
-                    CLOB_DUAL_PROTOCOL
-                    if market.id == markets[0].id
-                    else LEGACY_MARKET_PROTOCOL
+                    CLOB_DUAL_PROTOCOL if market.id == markets[0].id else LEGACY_MARKET_PROTOCOL
                 ),
             )
             for market, probability in zip(markets, probabilities, strict=True)
@@ -834,9 +869,7 @@ async def test_candidate_anchor_v2_uses_current_materialized_siblings_not_old_an
             value.components["event_coherence"]["materialized"] is True
             for value in current_materialization.values
         )
-        assert current_materialization.blocked_event_ids == frozenset(
-            {"candidate-anchor-v2-event"}
-        )
+        assert current_materialization.blocked_event_ids == frozenset({"candidate-anchor-v2-event"})
         await upsert_model_probs(session, list(current_materialization.values))
         selected_market_id = markets[0].id
         sibling_market_ids = [market.id for market in markets[1:]]
@@ -845,13 +878,9 @@ async def test_candidate_anchor_v2_uses_current_materialized_siblings_not_old_an
 
     assert accepted == 1
     async with db_sessions() as session:
-        signal = await session.scalar(
-            select(Signal).where(Signal.market_id == selected_market_id)
-        )
+        signal = await session.scalar(select(Signal).where(Signal.market_id == selected_market_id))
         sibling_signals = await session.scalar(
-            select(func.count())
-            .select_from(Signal)
-            .where(Signal.market_id.in_(sibling_market_ids))
+            select(func.count()).select_from(Signal).where(Signal.market_id.in_(sibling_market_ids))
         )
         selected_model = await session.scalar(
             select(ModelProb).where(
@@ -914,9 +943,7 @@ async def test_blocked_event_revokes_only_unclaimed_pending_signal(
     async with db_sessions() as session:
         claimed = await session.get(Signal, claimed_signal_id)
         unclaimed = await session.get(Signal, unclaimed_signal_id)
-        order = await session.scalar(
-            select(Order).where(Order.signal_id == claimed_signal_id)
-        )
+        order = await session.scalar(select(Order).where(Order.signal_id == claimed_signal_id))
     assert claimed is not None and claimed.status is SignalStatus.PENDING
     assert order is not None
     assert unclaimed is not None and unclaimed.status is SignalStatus.EXPIRED
@@ -1033,9 +1060,7 @@ async def test_paper_nonpositive_pending_signal_expires_without_order_or_global_
         signal = await session.get(Signal, signal_id)
         control = await session.get(RuntimeControl, 1)
         order_count = await session.scalar(select(func.count()).select_from(Order))
-        intent_count = await session.scalar(
-            select(func.count()).select_from(ExecutionOrderIntent)
-        )
+        intent_count = await session.scalar(select(func.count()).select_from(ExecutionOrderIntent))
     assert signal is not None
     assert signal.status is SignalStatus.EXPIRED
     assert signal.skip_reason == "paper_order_size_nonpositive"
@@ -1065,14 +1090,18 @@ async def test_new_station_conflict_revokes_paper_signal_before_order(
     assert order is None
 
 
-async def test_new_station_conflict_revokes_live_signal_before_venue_call(
+async def test_paper_only_release_rejects_live_before_venue_call(
     db_sessions: SessionFactory,
     migrated_database_url: str,
 ) -> None:
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
     signal_id = await _pending_signal(db_sessions)
-    await _append_conflicting_snapshot_for_signal(db_sessions, signal_id)
     trader = FakeTrader()
+
+    with pytest.raises(
+        DBAPIError,
+        match="PAPER canary history forbids non-PAPER runtime state",
+    ):
+        await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
 
     assert await execute_live_signals(
         _settings(migrated_database_url),
@@ -1084,8 +1113,7 @@ async def test_new_station_conflict_revokes_live_signal_before_venue_call(
     async with db_sessions() as session:
         signal = await session.get(Signal, signal_id)
         order = await session.scalar(select(Order).where(Order.signal_id == signal_id))
-    assert signal is not None and signal.status is SignalStatus.EXPIRED
-    assert signal.skip_reason == "station_resolution_conflict"
+    assert signal is not None and signal.status is SignalStatus.PENDING
     assert order is None
     assert trader.placed == []
 
@@ -1144,7 +1172,7 @@ async def test_signal_rejects_snapshot_from_another_station(
 async def test_places_a_live_order_and_marks_the_signal_executed(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await _set_live_runtime_or_xfail(db_sessions)
     signal_id = await _pending_signal(db_sessions)
     trader = FakeTrader(result=PlacedOrder(order_id="0xabc", status="live"))
 
@@ -1172,7 +1200,7 @@ async def test_live_order_intent_fails_closed_when_capacity_probe_is_unavailable
     tmp_path: Path,
 ) -> None:
     signal_id = await _pending_signal(db_sessions)
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await _set_live_runtime_or_xfail(db_sessions)
     trader = FakeTrader()
     settings = _settings(migrated_database_url).model_copy(
         update={"clob_ledger_capacity_path": str(tmp_path / "missing-probe")}
@@ -1193,7 +1221,6 @@ async def test_live_order_intent_fails_closed_when_capacity_probe_is_unavailable
         assert signal is not None and signal.status is SignalStatus.EXPIRED
         assert control is not None and control.kill_switch is True
         assert await session.scalar(select(Order).where(Order.signal_id == signal_id)) is None
-        control.kill_switch = False
 
 
 async def test_paper_fill_fails_closed_when_capacity_probe_is_unavailable(
@@ -1203,6 +1230,9 @@ async def test_paper_fill_fails_closed_when_capacity_probe_is_unavailable(
 ) -> None:
     signal_id = await _pending_signal(db_sessions)
     await _set_runtime(db_sessions, mode=ExecutionMode.PAPER)
+    async with db_sessions() as session:
+        control = await session.get(RuntimeControl, 1)
+        assert control is not None and control.kill_switch is False
     settings = _settings(migrated_database_url).model_copy(
         update={"clob_ledger_capacity_path": str(tmp_path / "missing-probe")}
     )
@@ -1216,7 +1246,6 @@ async def test_paper_fill_fails_closed_when_capacity_probe_is_unavailable(
         assert signal is not None and signal.status is SignalStatus.EXPIRED
         assert control is not None and control.kill_switch is True
         assert await session.scalar(select(Order).where(Order.signal_id == signal_id)) is None
-        control.kill_switch = False
 
 
 async def test_paper_uses_earliest_qualifying_post_intent_book(
@@ -1272,9 +1301,7 @@ async def test_paper_without_qualifying_book_stays_pending_until_ttl(
     monkeypatch: pytest.MonkeyPatch,
     activated_probability_release_epoch: ReleaseActivator,
 ) -> None:
-    settings = _settings(migrated_database_url).model_copy(
-        update={"paper_order_ttl_minutes": 1}
-    )
+    settings = _settings(migrated_database_url).model_copy(update={"paper_order_ttl_minutes": 1})
     await activated_probability_release_epoch(settings)
     signal_id = await _pending_signal(db_sessions)
     target = await _target_for_signal(db_sessions, signal_id)
@@ -1422,7 +1449,7 @@ async def test_execution_state_quarantine_requires_kill_switch(
 async def test_legacy_pending_signal_is_expired_without_live_placement(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await _set_live_runtime_or_xfail(db_sessions)
     signal_id = await _legacy_pending_signal(db_sessions)
     trader = FakeTrader()
 
@@ -1444,7 +1471,7 @@ async def test_legacy_pending_signal_is_expired_without_live_placement(
 async def test_readiness_gate_blocks_when_geoblocked(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await _set_live_runtime_or_xfail(db_sessions)
     await _pending_signal(db_sessions)
     trader = FakeTrader()
 
@@ -1464,7 +1491,7 @@ async def test_readiness_gate_blocks_when_geoblocked(
 async def test_unknown_outcome_halts_trading(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await _set_live_runtime_or_xfail(db_sessions)
     await _pending_signal(db_sessions)
     trader = FakeTrader(place_error=TimeoutError("network timeout"))
 
@@ -1484,11 +1511,9 @@ async def test_unknown_outcome_halts_trading(
 async def test_missing_order_id_response_halts_without_no_fill_seal(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await _set_live_runtime_or_xfail(db_sessions)
     await _pending_signal(db_sessions)
-    trader = FakeTrader(
-        place_error=ClobPlacementOutcomeUnknown("CLOB response is missing orderID")
-    )
+    trader = FakeTrader(place_error=ClobPlacementOutcomeUnknown("CLOB response is missing orderID"))
 
     placed, failed, unconfirmed = await execute_live_signals(
         _settings(migrated_database_url), db_sessions, trader=trader, geoblock=NOT_BLOCKED
@@ -1498,9 +1523,7 @@ async def test_missing_order_id_response_halts_without_no_fill_seal(
     async with db_sessions() as session:
         order = (await session.execute(select(Order))).scalar_one()
         control = await session.get(RuntimeControl, 1)
-        seal_count = await session.scalar(
-            select(func.count()).select_from(ExecutionCostSeal)
-        )
+        seal_count = await session.scalar(select(func.count()).select_from(ExecutionCostSeal))
     assert order.status == "submit_unconfirmed"
     assert control is not None and control.kill_switch is True
     assert seal_count == 0
@@ -1509,7 +1532,7 @@ async def test_missing_order_id_response_halts_without_no_fill_seal(
 async def test_explicit_rejection_does_not_halt(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await _set_live_runtime_or_xfail(db_sessions)
     await _pending_signal(db_sessions)
     trader = FakeTrader(place_error=ClobVenueRejected("not enough balance"))
 
@@ -1531,7 +1554,7 @@ async def test_explicit_rejection_does_not_halt(
 async def test_orphaned_submitting_order_is_escalated_not_resent(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await _set_live_runtime_or_xfail(db_sessions)
     signal_id = await _pending_signal(db_sessions)
     # Simulate a crash between claim-commit and submit.
     async with db_sessions.begin() as session:
@@ -1564,13 +1587,57 @@ async def test_orphaned_submitting_order_is_escalated_not_resent(
 
 
 async def _place_one(db_sessions: SessionFactory, url: str) -> tuple[int, str]:
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
-    await _pending_signal(db_sessions)
-    trader = FakeTrader(result=PlacedOrder(order_id="0xfill", status="live"))
-    await execute_live_signals(_settings(url), db_sessions, trader=trader, geoblock=NOT_BLOCKED)
-    async with db_sessions() as session:
-        order = (await session.execute(select(Order))).scalar_one()
-    return order.id, order.clob_order_id or ""
+    """Seed a historical LIVE placement without reopening LIVE execution.
+
+    Poll/cancel reconciliation remains mandatory in the PAPER-only release:
+    an emergency cutover may leave an already submitted order to reconcile.
+    The fixture therefore writes the same durable intent and placement
+    evidence as the former executor path while leaving runtime mode PAPER.
+    """
+    signal_id = await _pending_signal(db_sessions)
+    clob_order_id = "0xfill"
+    async with db_sessions.begin() as session:
+        signal = await session.get(Signal, signal_id)
+        assert signal is not None
+        order_id = await claim_live_order(
+            session,
+            LiveOrderClaim(
+                signal_id=signal.id,
+                market_id=signal.market_id,
+                side=signal.side,
+                price=Decimal("0.530000"),
+                size_usd=signal.size_usd,
+                token_id=signal.token_id,
+            ),
+        )
+        assert order_id is not None
+        intent = await create_intent_for_order(
+            session,
+            order_id,
+            release_image_digest=_settings(url).release_image_digest,
+            order_style="taker",
+            expected_fee_usd=None,
+            expected_fee_unavailable_reason="live_fee_quote_not_modeled",
+        )
+        now = max(datetime.now(UTC), intent.intent_at)
+        await append_live_reconciliation_observation(
+            session,
+            order_id,
+            observation_kind="placement",
+            sdk_method="place_gtc_buy",
+            parser_version="placed-order-v1",
+            request_started_at=now,
+            response_received_at=now,
+            normalized_payload={"order_id": clob_order_id, "status": "live"},
+        )
+        await record_live_placement(
+            session,
+            order_id=order_id,
+            clob_order_id=clob_order_id,
+            status="open",
+            placed_at=now,
+        )
+    return order_id, clob_order_id
 
 
 async def _place_cancel_requested(
@@ -1633,7 +1700,7 @@ async def test_poll_builds_position_from_partial_then_full_fill(
 async def test_immediate_matched_placement_is_reconciled_before_terminal_state(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await _set_live_runtime_or_xfail(db_sessions)
     await _pending_signal(db_sessions)
     placement = FakeTrader(result=PlacedOrder(order_id="0ximmediate", status="matched"))
 
@@ -1737,7 +1804,7 @@ async def test_terminal_zero_fill_cancel_drops_out_of_poll_set(
     assert enrollments == []
 
 
-async def test_execute_signals_dispatches_by_runtime_mode(
+async def test_execute_signals_stays_on_paper_when_live_transition_is_rejected(
     db_sessions: SessionFactory, migrated_database_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from stratus.jobs import execute_signals as dispatch_module
@@ -1757,10 +1824,14 @@ async def test_execute_signals_dispatches_by_runtime_mode(
 
     await _set_runtime(db_sessions, mode=ExecutionMode.PAPER)
     await dispatch_module.execute_signals(_settings(migrated_database_url), db_sessions)
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    with pytest.raises(
+        DBAPIError,
+        match="PAPER canary history forbids non-PAPER runtime state",
+    ):
+        await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
     await dispatch_module.execute_signals(_settings(migrated_database_url), db_sessions)
 
-    assert calls == ["paper", "live"]
+    assert calls == ["paper", "paper"]
 
 
 async def test_audit_health_flags_unconfirmed_live_orders(
@@ -1896,7 +1967,7 @@ async def test_stale_live_signals_are_expired_not_left_pending(
     migrated_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await _set_live_runtime_or_xfail(db_sessions)
     # A valid dual-token signal older than the 10-minute live TTL.
     signal_id = await _pending_signal(db_sessions)
     async with db_sessions() as session:
@@ -1936,7 +2007,7 @@ async def test_stale_live_signals_are_expired_not_left_pending(
 async def test_order_placed_into_active_kill_switch_is_queued_for_cancel(
     db_sessions: SessionFactory, migrated_database_url: str
 ) -> None:
-    await _set_runtime(db_sessions, mode=ExecutionMode.LIVE)
+    await _set_live_runtime_or_xfail(db_sessions)
     await _pending_signal(db_sessions)
 
     # A trader whose placement engages the kill switch mid-cycle, simulating a
@@ -2241,3 +2312,809 @@ async def test_cancel_keeps_order_pending_when_final_state_is_unavailable(
     assert order.status == "cancel_requested"
     assert trader.canceled == [clob_order_id]
     assert {row.observation_kind for row in observations} == {"placement", "cancel"}
+
+
+async def test_paper_phase1_commit_loses_deterministic_stop_race(
+    db_sessions: SessionFactory,
+    migrated_database_url: str,
+    active_paper_canary: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_id = await _pending_signal(db_sessions)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = execute_signals_module.create_intent_for_order
+
+    async def pause_after_intent(*args: Any, **kwargs: Any) -> Any:
+        result = await original(*args, **kwargs)
+        entered.set()
+        await release.wait()
+        return result
+
+    monkeypatch.setattr(
+        execute_signals_module,
+        "create_intent_for_order",
+        pause_after_intent,
+    )
+    task = asyncio.create_task(
+        execute_paper_signals(
+            _settings(migrated_database_url),
+            active_paper_canary.runtime,
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    stopped = await stop_polymarket_atomically(
+        active_paper_canary.safety,
+        request_id="paper-phase1-commit-stop",
+        actor="integration-suite",
+        reason="STOP wins after Order and Intent writes but before commit.",
+    )
+    release.set()
+    assert stopped.command.status == "succeeded"
+    assert await asyncio.wait_for(task, timeout=5) == (0, 0, 0)
+
+    async with db_sessions() as session:
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(Order).where(Order.signal_id == signal_id)
+            )
+            == 0
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ExecutionOrderIntent)
+                .where(ExecutionOrderIntent.signal_id == signal_id)
+            )
+            == 0
+        )
+
+
+async def test_paper_phase2_commit_loses_deterministic_stop_race(
+    db_sessions: SessionFactory,
+    migrated_database_url: str,
+    active_paper_canary: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_id = await _pending_signal(db_sessions)
+    target = await _target_for_signal(db_sessions, signal_id)
+    settings = _settings(migrated_database_url)
+    assert await execute_paper_signals(
+        settings,
+        active_paper_canary.runtime,
+    ) == (0, 0, 1)
+    async with db_sessions.begin() as session:
+        await persist_clob_batch(
+            session,
+            _dual_batch(target, yes_ask="0.51", causal_now=True),
+            [target],
+        )
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = execute_signals_module.record_paper_fill
+
+    async def pause_after_fill(*args: Any, **kwargs: Any) -> Any:
+        result = await original(*args, **kwargs)
+        entered.set()
+        await release.wait()
+        return result
+
+    monkeypatch.setattr(execute_signals_module, "record_paper_fill", pause_after_fill)
+    task = asyncio.create_task(execute_paper_signals(settings, active_paper_canary.runtime))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    stopped = await stop_polymarket_atomically(
+        active_paper_canary.safety,
+        request_id="paper-phase2-commit-stop",
+        actor="integration-suite",
+        reason="STOP wins after fill projection writes but before commit.",
+    )
+    release.set()
+    assert stopped.command.status == "succeeded"
+    assert await asyncio.wait_for(task, timeout=5) == (0, 0, 0)
+
+    async with db_sessions() as session:
+        order = await session.scalar(select(Order).where(Order.signal_id == signal_id))
+        signal = await session.get(Signal, signal_id)
+        assert order is not None and order.status == "paper_resting"
+        assert signal is not None and signal.status is SignalStatus.PENDING
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ExecutionFillLeg)
+                .where(ExecutionFillLeg.order_id == order.id)
+            )
+            == 0
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(Position)
+                .where(Position.market_id == signal.market_id)
+            )
+            == 0
+        )
+
+
+async def test_runtime_signal_fence_smoke_and_live_order_rejection(
+    db_sessions: SessionFactory,
+    active_paper_canary: Any,
+) -> None:
+    signal_id = await _pending_signal(db_sessions)
+    async with active_paper_canary.runtime.begin() as runtime:
+        inserted = await runtime.execute(
+            text(
+                """
+                INSERT INTO signals (
+                    market_id, ts, side, model_prob, market_price, edge,
+                    kelly_frac, size_usd, confidence, status, skip_reason,
+                    clob_snapshot_id, station_reliability_snapshot_id,
+                    token_id, benchmark_protocol
+                )
+                SELECT market_id, ts + interval '1 second', side, model_prob,
+                       market_price, edge, kelly_frac, size_usd, confidence,
+                       'pending'::signal_status, NULL, clob_snapshot_id,
+                       station_reliability_snapshot_id, token_id,
+                       benchmark_protocol
+                FROM signals WHERE id = :signal_id
+                RETURNING id
+                """
+            ),
+            {"signal_id": signal_id},
+        )
+        pending_id = int(inserted.scalar_one())
+        await runtime.execute(
+            text(
+                """
+                INSERT INTO signals (
+                    market_id, ts, side, model_prob, market_price, edge,
+                    kelly_frac, size_usd, confidence, status, skip_reason,
+                    clob_snapshot_id, station_reliability_snapshot_id,
+                    token_id, benchmark_protocol
+                )
+                SELECT market_id, ts + interval '2 seconds', side, model_prob,
+                       market_price, edge, kelly_frac, size_usd, confidence,
+                       'skipped'::signal_status, 'integration_smoke',
+                       clob_snapshot_id, station_reliability_snapshot_id,
+                       token_id, benchmark_protocol
+                FROM signals WHERE id = :signal_id
+                """
+            ),
+            {"signal_id": signal_id},
+        )
+
+    with pytest.raises(DBAPIError, match="forbids LIVE order exposure"):
+        async with active_paper_canary.runtime.begin() as runtime:
+            runtime.add(
+                Order(
+                    signal_id=pending_id,
+                    mode=ExecutionMode.LIVE,
+                    clob_order_id=None,
+                    token_id="yes-token",
+                    side=TradeSide.BUY_YES,
+                    price=Decimal("0.53"),
+                    size_usd=Decimal("20"),
+                    filled_usd=Decimal("0"),
+                    status="submitting",
+                )
+            )
+
+
+async def test_signal_writer_commit_loses_stop_after_runtime_precheck(
+    db_sessions: SessionFactory,
+    active_paper_canary: Any,
+) -> None:
+    template_id = await _pending_signal(db_sessions)
+    async with db_sessions() as owner:
+        template = await owner.get(Signal, template_id)
+        assert template is not None
+
+    async with active_paper_canary.runtime() as precheck:
+        control = await get_runtime_control(precheck)
+        assert control.kill_switch is False
+
+    runtime = active_paper_canary.runtime()
+    await runtime.begin()
+    written = await insert_signals(
+        runtime,
+        [
+            SignalValue(
+                market_id=template.market_id,
+                ts=template.ts + timedelta(seconds=10),
+                side=template.side,
+                model_prob=template.model_prob,
+                market_price=template.market_price,
+                edge=template.edge,
+                kelly_frac=template.kelly_frac,
+                size_usd=template.size_usd,
+                confidence=template.confidence,
+                status=SignalStatus.PENDING,
+                skip_reason=None,
+                clob_snapshot_id=template.clob_snapshot_id,
+                station_reliability_snapshot_id=(template.station_reliability_snapshot_id),
+                token_id=template.token_id,
+                benchmark_protocol=template.benchmark_protocol,
+            )
+        ],
+    )
+    assert written == 1
+    stopped = await stop_polymarket_atomically(
+        active_paper_canary.safety,
+        request_id="paper-signal-writer-stop",
+        actor="integration-suite",
+        reason="STOP lands after generation precheck but before signal commit.",
+    )
+    assert stopped.command.status == "succeeded"
+    with pytest.raises(DBAPIError, match="authority expired before commit"):
+        await runtime.commit()
+    await runtime.close()
+    async with db_sessions() as owner:
+        assert (
+            await owner.scalar(
+                select(func.count())
+                .select_from(Signal)
+                .where(
+                    Signal.market_id == template.market_id,
+                    Signal.ts == template.ts + timedelta(seconds=10),
+                )
+            )
+            == 0
+        )
+
+
+async def test_expiry_before_commit_rejects_runtime_exposure(
+    db_sessions: SessionFactory,
+    active_paper_canary: Any,
+) -> None:
+    signal_id = await _pending_signal(db_sessions)
+    runtime = active_paper_canary.runtime()
+    await runtime.begin()
+    await _stage_runtime_paper_order(runtime, signal_id)
+    async with db_sessions.begin() as owner:
+        await owner.execute(
+            text(
+                "ALTER TABLE paper_canary_safety_leases "
+                "DISABLE TRIGGER trg_paper_canary_lease_audit"
+            )
+        )
+        await owner.execute(
+            text(
+                "UPDATE paper_canary_safety_leases "
+                "SET acquired_at = clock_timestamp() - interval '3 seconds', "
+                "heartbeat_at = clock_timestamp() - interval '2 seconds', "
+                "watchdog_at = clock_timestamp() - interval '2 seconds', "
+                "expires_at = clock_timestamp() - interval '1 second' "
+                "WHERE state = 'active'"
+            )
+        )
+        await owner.execute(
+            text(
+                "ALTER TABLE paper_canary_safety_leases ENABLE TRIGGER trg_paper_canary_lease_audit"
+            )
+        )
+    with pytest.raises(DBAPIError, match="authority expired before commit"):
+        await runtime.commit()
+    await runtime.close()
+
+
+async def test_stale_watchdog_fails_read_and_commit_authority(
+    db_sessions: SessionFactory,
+    active_paper_canary: Any,
+) -> None:
+    signal_id = await _pending_signal(db_sessions)
+    async with db_sessions.begin() as owner:
+        await owner.execute(
+            text(
+                "ALTER TABLE paper_canary_safety_leases "
+                "DISABLE TRIGGER trg_paper_canary_lease_audit"
+            )
+        )
+        await owner.execute(
+            text(
+                "UPDATE paper_canary_safety_leases SET "
+                "acquired_at = clock_timestamp() - interval '20 seconds', "
+                "heartbeat_at = clock_timestamp() - interval '8 seconds', "
+                "watchdog_at = clock_timestamp() - interval '8 seconds', "
+                "expires_at = clock_timestamp() + interval '15 seconds' "
+                "WHERE state = 'active'"
+            )
+        )
+        await owner.execute(
+            text(
+                "ALTER TABLE paper_canary_safety_leases ENABLE TRIGGER trg_paper_canary_lease_audit"
+            )
+        )
+        assert (
+            await owner.scalar(text("SELECT public.paper_canary_execution_authorized()")) is False
+        )
+
+    async with active_paper_canary.runtime() as runtime_read:
+        effective = await get_runtime_control(runtime_read)
+    assert effective.kill_switch is True
+    assert "watchdog-stale" in (effective.halted_reason or "")
+
+    with pytest.raises(DBAPIError, match="authority expired before commit"):
+        async with active_paper_canary.runtime.begin() as runtime:
+            await _stage_runtime_paper_order(runtime, signal_id)
+
+
+async def test_execution_shared_lock_commits_before_stop_then_stop_seals(
+    db_sessions: SessionFactory,
+    active_paper_canary: Any,
+) -> None:
+    signal_id = await _pending_signal(db_sessions)
+    runtime = active_paper_canary.runtime()
+    await runtime.begin()
+    await _stage_runtime_paper_order(runtime, signal_id)
+    await runtime.execute(text("SET CONSTRAINTS trg_paper_canary_order_commit_fence IMMEDIATE"))
+    started = monotonic()
+    with pytest.raises(DBAPIError, match="authority serialization is busy"):
+        async with active_paper_canary.runtime.begin() as raw_runtime:
+            await raw_runtime.execute(
+                update(RuntimeControl)
+                .where(RuntimeControl.id == 1)
+                .values(halted_reason="raw halt must fail fast")
+            )
+    with pytest.raises(DBAPIError, match="venue authority serialization is busy"):
+        async with active_paper_canary.runtime.begin() as raw_runtime:
+            await raw_runtime.execute(
+                text(
+                    "UPDATE venue_runtime_control SET kill_switch=true "
+                    "WHERE venue::text='polymarket'"
+                )
+            )
+    assert monotonic() - started < 1.0
+    stop_task = asyncio.create_task(
+        stop_polymarket_atomically(
+            active_paper_canary.safety,
+            request_id="paper-execution-first-stop",
+            actor="integration-suite",
+            reason="Execution shared lock commits before STOP seals controls.",
+        )
+    )
+    for _ in range(100):
+        async with db_sessions() as owner:
+            waiting = bool(
+                await owner.scalar(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                        "WHERE locktype = 'advisory' AND NOT granted)"
+                    )
+                )
+            )
+        if waiting:
+            break
+        await asyncio.sleep(0.01)
+    assert waiting is True
+    await runtime.commit()
+    await runtime.close()
+    stopped = await asyncio.wait_for(stop_task, timeout=5)
+    assert stopped.command.status == "succeeded"
+    async with db_sessions() as owner:
+        control = await owner.get(RuntimeControl, 1)
+        assert control is not None and control.kill_switch is True
+        assert (
+            await owner.scalar(
+                select(func.count()).select_from(Order).where(Order.signal_id == signal_id)
+            )
+            == 1
+        )
+
+
+async def test_raw_polymarket_kill_wins_then_deferred_exposure_aborts(
+    db_sessions: SessionFactory,
+    active_paper_canary: Any,
+) -> None:
+    signal_id = await _pending_signal(db_sessions)
+    runtime = active_paper_canary.runtime()
+    await runtime.begin()
+    await _stage_runtime_paper_order(runtime, signal_id)
+    async with active_paper_canary.runtime.begin() as raw_runtime:
+        await raw_runtime.execute(
+            text("UPDATE venue_runtime_control SET kill_switch=true WHERE venue::text='polymarket'")
+        )
+    with pytest.raises(DBAPIError, match="authority expired before commit"):
+        await runtime.commit()
+    await runtime.close()
+
+
+async def test_repeatable_read_snapshot_cannot_bypass_stop_at_commit(
+    db_sessions: SessionFactory,
+    active_paper_canary: Any,
+) -> None:
+    signal_id = await _pending_signal(db_sessions)
+    runtime = active_paper_canary.runtime()
+    await runtime.begin()
+    await runtime.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+    assert await runtime.scalar(text("SELECT public.paper_canary_execution_authorized()")) is True
+    await _stage_runtime_paper_order(runtime, signal_id)
+    stopped = await stop_polymarket_atomically(
+        active_paper_canary.safety,
+        request_id="paper-repeatable-read-stop",
+        actor="integration-suite",
+        reason="STOP wins after the runtime establishes a stale RR snapshot.",
+    )
+    assert stopped.command.status == "succeeded"
+    with pytest.raises(DBAPIError, match="requires READ COMMITTED isolation"):
+        await runtime.commit()
+    await runtime.close()
+
+
+async def test_deferred_commit_waits_for_uncommitted_stop_then_aborts(
+    db_sessions: SessionFactory,
+    active_paper_canary: Any,
+) -> None:
+    signal_id = await _pending_signal(db_sessions)
+    runtime = active_paper_canary.runtime()
+    await runtime.begin()
+    await _stage_runtime_paper_order(runtime, signal_id)
+
+    safety = active_paper_canary.safety()
+    await safety.begin()
+    await safety.execute(
+        text(
+            "SELECT * FROM public.safety_paper_canary_stop("
+            "'paper-uncommitted-stop', 'integration-suite', "
+            "'Hold exclusive STOP lock until executor commit is waiting.')"
+        )
+    )
+    commit_task = asyncio.create_task(runtime.commit())
+    for _ in range(100):
+        async with db_sessions() as owner:
+            waiting = bool(
+                await owner.scalar(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks "
+                        "WHERE locktype='advisory' AND mode='ShareLock' "
+                        "AND NOT granted)"
+                    )
+                )
+            )
+        if waiting:
+            break
+        await asyncio.sleep(0.01)
+    assert waiting is True
+    await safety.commit()
+    await safety.close()
+    with pytest.raises(DBAPIError, match="authority expired before commit"):
+        await asyncio.wait_for(commit_task, timeout=5)
+    await runtime.close()
+    async with db_sessions() as owner:
+        assert (
+            await owner.scalar(
+                select(func.count()).select_from(Order).where(Order.signal_id == signal_id)
+            )
+            == 0
+        )
+
+
+async def test_runtime_cannot_clear_or_rewrite_halt_reasons(
+    db_sessions: SessionFactory,
+    active_paper_canary: Any,
+) -> None:
+    async with db_sessions.begin() as owner:
+        await owner.execute(
+            update(RuntimeControl)
+            .where(RuntimeControl.id == 1)
+            .values(halted_reason="owner terminal halt")
+        )
+        await owner.execute(
+            text(
+                "UPDATE venue_runtime_control "
+                "SET halted_reason='owner venue halt' "
+                "WHERE venue::text='polymarket'"
+            )
+        )
+
+    for statement in (
+        "UPDATE runtime_control SET halted_reason=NULL WHERE id=1",
+        "UPDATE runtime_control SET halted_reason='rewrite' WHERE id=1",
+        "UPDATE venue_runtime_control SET halted_reason=NULL WHERE venue::text='polymarket'",
+        "UPDATE venue_runtime_control SET halted_reason='rewrite' WHERE venue::text='polymarket'",
+    ):
+        with pytest.raises(DBAPIError, match="halt reason clearing or rewriting"):
+            async with active_paper_canary.runtime.begin() as runtime:
+                await runtime.execute(text(statement))
+
+
+async def test_runtime_cannot_delete_or_rewrite_legacy_execution_identity(
+    db_sessions: SessionFactory,
+    active_paper_canary: Any,
+) -> None:
+    target = await _seed_market(db_sessions, polymarket_id="pm-legacy-identity")
+    async with db_sessions.begin() as owner:
+        signal = Signal(
+            market_id=target.market_id,
+            ts=NOW,
+            side=TradeSide.BUY_YES,
+            model_prob=Decimal("0.600000"),
+            market_price=Decimal("0.520000"),
+            edge=Decimal("0.080000"),
+            kelly_frac=Decimal("0.010000"),
+            size_usd=Decimal("20.0000"),
+            confidence=SignalConfidence.B,
+            status=SignalStatus.PENDING,
+            clob_snapshot_id=None,
+            token_id=None,
+            benchmark_protocol=LEGACY_MARKET_PROTOCOL,
+            station_reliability_snapshot_id=None,
+        )
+        owner.add(signal)
+        await owner.flush()
+        order = Order(
+            signal_id=signal.id,
+            mode=ExecutionMode.PAPER,
+            clob_order_id=f"legacy-paper-{signal.id}",
+            token_id=None,
+            side=signal.side,
+            price=Decimal("0.53"),
+            size_usd=Decimal("20"),
+            filled_usd=Decimal("0"),
+            status="paper_pending",
+        )
+        owner.add(order)
+        await owner.flush()
+        position = Position(
+            market_id=signal.market_id,
+            order_id=None,
+            mode=ExecutionMode.PAPER,
+            side=signal.side,
+            avg_price=Decimal("0.53"),
+            size_shares=Decimal("10"),
+            size_usd=Decimal("5.30"),
+            fee_usd=Decimal("0"),
+            status=PositionStatus.OPEN,
+            benchmark_protocol=LEGACY_MARKET_PROTOCOL,
+            token_id=None,
+        )
+        owner.add(position)
+        await owner.flush()
+        order_id = order.id
+        position_id = position.id
+
+    cases = (
+        (
+            "DELETE FROM orders WHERE id=:row_id",
+            order_id,
+            "runtime deletion of execution inventory is forbidden",
+        ),
+        (
+            "UPDATE orders SET mode='live'::execution_mode WHERE id=:row_id",
+            order_id,
+            "runtime order identity is immutable",
+        ),
+        (
+            "DELETE FROM positions WHERE id=:row_id",
+            position_id,
+            "runtime deletion of execution inventory is forbidden",
+        ),
+        (
+            "UPDATE positions SET side='buy_no'::trade_side WHERE id=:row_id",
+            position_id,
+            "runtime position identity is immutable",
+        ),
+    )
+    for statement, row_id, message in cases:
+        with pytest.raises(DBAPIError, match=message):
+            async with active_paper_canary.runtime.begin() as runtime:
+                await runtime.execute(text(statement), {"row_id": row_id})
+
+
+async def test_runtime_commit_rejects_unprojected_paper_order_and_position(
+    db_sessions: SessionFactory,
+    active_paper_canary: Any,
+) -> None:
+    signal_id = await _pending_signal(db_sessions)
+    with pytest.raises(DBAPIError, match="exactly one immutable intent"):
+        async with active_paper_canary.runtime.begin() as runtime:
+            runtime.add(
+                Order(
+                    signal_id=signal_id,
+                    mode=ExecutionMode.PAPER,
+                    clob_order_id=f"raw-paper-{signal_id}",
+                    token_id="yes-token",
+                    side=TradeSide.BUY_YES,
+                    price=Decimal("0.53"),
+                    size_usd=Decimal("20"),
+                    filled_usd=Decimal("0"),
+                    status="paper_pending",
+                )
+            )
+
+    async with db_sessions() as owner:
+        signal = await owner.get(Signal, signal_id)
+        assert signal is not None
+        market_id = signal.market_id
+    for close_same_transaction in (False, True):
+        message = (
+            "resolved-market settlement evidence|must remain an open fill projection"
+            if close_same_transaction
+            else "immutable fill-leg projection"
+        )
+        with pytest.raises(DBAPIError, match=message):
+            async with active_paper_canary.runtime.begin() as runtime:
+                position = Position(
+                    market_id=market_id,
+                    mode=ExecutionMode.PAPER,
+                    side=TradeSide.BUY_YES,
+                    avg_price=Decimal("0.53"),
+                    size_shares=Decimal("10"),
+                    size_usd=Decimal("5.30"),
+                    fee_usd=Decimal("0"),
+                    status=PositionStatus.OPEN,
+                    benchmark_protocol=CLOB_DUAL_PROTOCOL,
+                    token_id="yes-token",
+                )
+                runtime.add(position)
+                await runtime.flush()
+                if close_same_transaction:
+                    position.status = PositionStatus.CLOSED
+
+
+async def test_runtime_rejects_lifecycle_amount_and_bankroll_fabrication(
+    db_sessions: SessionFactory,
+    active_paper_canary: Any,
+) -> None:
+    target = await _seed_market(db_sessions, polymarket_id="pm-runtime-integrity")
+    async with db_sessions.begin() as owner:
+        signal = Signal(
+            market_id=target.market_id,
+            ts=NOW,
+            side=TradeSide.BUY_YES,
+            model_prob=Decimal("0.600000"),
+            market_price=Decimal("0.520000"),
+            edge=Decimal("0.080000"),
+            kelly_frac=Decimal("0.010000"),
+            size_usd=Decimal("20.0000"),
+            confidence=SignalConfidence.B,
+            status=SignalStatus.PENDING,
+            benchmark_protocol=LEGACY_MARKET_PROTOCOL,
+        )
+        owner.add(signal)
+        await owner.flush()
+        order = Order(
+            signal_id=signal.id,
+            mode=ExecutionMode.PAPER,
+            side=signal.side,
+            price=Decimal("0.53"),
+            size_usd=Decimal("20"),
+            filled_usd=Decimal("10"),
+            fee_usd=Decimal("0.10"),
+            status="paper_resting",
+            filled_at=None,
+        )
+        owner.add(order)
+        await owner.flush()
+        position = Position(
+            market_id=signal.market_id,
+            mode=ExecutionMode.PAPER,
+            side=signal.side,
+            avg_price=Decimal("0.53"),
+            size_shares=Decimal("10"),
+            size_usd=Decimal("5.30"),
+            fee_usd=Decimal("0.10"),
+            status=PositionStatus.OPEN,
+            benchmark_protocol=LEGACY_MARKET_PROTOCOL,
+        )
+        owner.add(position)
+        await owner.flush()
+        signal_id = signal.id
+        order_id = order.id
+        position_id = position.id
+
+    cases = (
+        (
+            "UPDATE signals SET model_prob=0.9 WHERE id=:row_id",
+            signal_id,
+            "signal decision or provenance is immutable",
+        ),
+        (
+            "UPDATE orders SET status='garbage' WHERE id=:row_id",
+            order_id,
+            "PAPER order status is invalid",
+        ),
+        (
+            "UPDATE orders SET filled_usd=1 WHERE id=:row_id",
+            order_id,
+            "cumulative amounts cannot decrease",
+        ),
+        (
+            "UPDATE positions SET size_usd=1 WHERE id=:row_id",
+            position_id,
+            "cumulative amounts cannot decrease",
+        ),
+        (
+            "UPDATE positions SET status='closed', pnl_usd=999, "
+            "closed_at=clock_timestamp(), market_closed_at=clock_timestamp() "
+            "WHERE id=:row_id",
+            position_id,
+            "resolved-market settlement evidence",
+        ),
+    )
+    for statement, row_id, message in cases:
+        with pytest.raises(DBAPIError, match=message):
+            async with active_paper_canary.runtime.begin() as runtime:
+                await runtime.execute(text(statement), {"row_id": row_id})
+
+    with pytest.raises(DBAPIError, match="settlement identity"):
+        async with active_paper_canary.runtime.begin() as runtime:
+            runtime.add(
+                BankrollLog(
+                    ts=datetime.now(UTC),
+                    mode=ExecutionMode.PAPER,
+                    balance_usd=Decimal("999999"),
+                    event="raw bankroll inflation",
+                )
+            )
+    async with db_sessions.begin() as owner:
+        owner.add(
+            BankrollLog(
+                ts=NOW - timedelta(days=1),
+                mode=ExecutionMode.PAPER,
+                balance_usd=Decimal("1000"),
+                event="owner legacy fixture",
+            )
+        )
+    for statement in (
+        "UPDATE bankroll_log SET balance_usd=999999 WHERE mode='paper'",
+        "DELETE FROM bankroll_log WHERE mode='paper'",
+    ):
+        with pytest.raises(DBAPIError, match="deletion|append-only"):
+            async with active_paper_canary.runtime.begin() as runtime:
+                await runtime.execute(text(statement))
+
+
+async def test_runtime_metadata_update_and_exposure_cannot_deadlock_stop(
+    db_sessions: SessionFactory,
+    active_paper_canary: Any,
+) -> None:
+    signal_id = await _pending_signal(db_sessions)
+    runtime = active_paper_canary.runtime()
+    await runtime.begin()
+    await runtime.execute(
+        text("UPDATE runtime_control SET updated_at=clock_timestamp() WHERE id=1")
+    )
+    await runtime.execute(
+        text(
+            "UPDATE venue_runtime_control SET last_reconciled_at=clock_timestamp() "
+            "WHERE venue::text='polymarket'"
+        )
+    )
+    await _stage_runtime_paper_order(runtime, signal_id)
+    stop_task = asyncio.create_task(
+        stop_polymarket_atomically(
+            active_paper_canary.safety,
+            request_id="paper-metadata-exposure-stop",
+            actor="integration-suite",
+            reason="Metadata and exposure transaction must serialize before STOP.",
+        )
+    )
+    await asyncio.sleep(0.05)
+    await runtime.commit()
+    await runtime.close()
+    stopped = await asyncio.wait_for(stop_task, timeout=5)
+    assert stopped.command.status == "succeeded"
+
+
+async def test_empty_live_poll_is_a_true_noop(
+    db_sessions: SessionFactory,
+    migrated_database_url: str,
+) -> None:
+    class MustNotConnect(FakeTrader):
+        async def collateral_balance(self) -> Decimal:
+            raise AssertionError("empty LIVE inventory must not snapshot balance")
+
+    assert await poll_live_fills(
+        _settings(migrated_database_url),
+        db_sessions,
+        trader=MustNotConnect(),
+    ) == (0, 0)
+    async with db_sessions() as owner:
+        assert (
+            await owner.scalar(
+                select(func.count())
+                .select_from(BankrollLog)
+                .where(BankrollLog.mode == ExecutionMode.LIVE)
+            )
+            == 0
+        )

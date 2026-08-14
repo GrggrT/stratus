@@ -16,6 +16,7 @@ from stratus.config import (
 from stratus.db import session as database_session
 from stratus.db.session import (
     RuntimeDatabaseBoundaryError,
+    _assert_runtime_checkout,
     _assert_runtime_connection,
     _runtime_server_settings,
     create_engine,
@@ -23,13 +24,21 @@ from stratus.db.session import (
 
 
 class _Cursor:
-    def __init__(self, row: tuple[object, ...] | None) -> None:
+    def __init__(
+        self,
+        row: tuple[object, ...] | None,
+        *,
+        execute_error: Exception | None = None,
+    ) -> None:
         self.row = row
+        self.execute_error = execute_error
         self.statement: str | None = None
         self.closed = False
 
     def execute(self, statement: str) -> object:
         self.statement = statement
+        if self.execute_error is not None:
+            raise self.execute_error
         return None
 
     def fetchone(self) -> tuple[object, ...] | None:
@@ -45,6 +54,19 @@ class _Connection:
 
     def cursor(self) -> _Cursor:
         return self._cursor
+
+
+class _ConnectionRecord:
+    def __init__(self) -> None:
+        self.invalidated_with: BaseException | None = None
+
+    def invalidate(
+        self,
+        exception: BaseException | None = None,
+        soft: bool = False,
+    ) -> None:
+        assert soft is False
+        self.invalidated_with = exception
 
 
 def _write_password(path: Path) -> None:
@@ -69,16 +91,12 @@ def test_runtime_url_uses_database_scoped_role_and_secret_file(tmp_path: Path) -
 
 
 def test_runtime_role_names_are_isolated_by_database() -> None:
-    assert runtime_database_role_name("stratus") != runtime_database_role_name(
+    assert runtime_database_role_name("stratus") != runtime_database_role_name("stratus_test")
+    assert runtime_database_group_role_name("stratus") != runtime_database_group_role_name(
         "stratus_test"
     )
-    assert runtime_database_group_role_name(
-        "stratus"
-    ) != runtime_database_group_role_name("stratus_test")
     assert runtime_database_role_name("stratus").startswith("stratus_app_")
-    assert runtime_database_group_role_name("stratus").startswith(
-        "stratus_runtime_"
-    )
+    assert runtime_database_group_role_name("stratus").startswith("stratus_runtime_")
 
 
 def test_generic_database_url_environment_is_ignored(
@@ -135,6 +153,38 @@ def test_physical_connection_boundary_is_fail_closed() -> None:
     assert rejected.closed is True
 
 
+def test_every_runtime_checkout_rechecks_and_invalidates_drift() -> None:
+    accepted = _Cursor((True,))
+    accepted_record = _ConnectionRecord()
+    _assert_runtime_checkout(_Connection(accepted), accepted_record, object())
+    assert accepted_record.invalidated_with is None
+
+    rejected = _Cursor((False,))
+    rejected_record = _ConnectionRecord()
+    with pytest.raises(RuntimeDatabaseBoundaryError, match="rejected") as caught:
+        _assert_runtime_checkout(_Connection(rejected), rejected_record, object())
+
+    assert rejected.closed is True
+    assert rejected_record.invalidated_with is caught.value
+
+
+def test_runtime_checkout_normalizes_driver_failure_after_invalidation() -> None:
+    driver_error = RuntimeError("driver leaked catalog assertion detail")
+    rejected = _Cursor(None, execute_error=driver_error)
+    rejected_record = _ConnectionRecord()
+
+    with pytest.raises(
+        RuntimeDatabaseBoundaryError,
+        match="runtime database boundary assertion failed",
+    ) as caught:
+        _assert_runtime_checkout(_Connection(rejected), rejected_record, object())
+
+    assert rejected.closed is True
+    assert rejected_record.invalidated_with is driver_error
+    assert caught.value.__cause__ is driver_error
+    assert "catalog assertion detail" not in str(caught.value)
+
+
 def test_runtime_database_defaults_preserve_long_worker_queries() -> None:
     settings = Settings(_env_file=None)
 
@@ -186,10 +236,7 @@ def test_runtime_engine_installs_server_side_timeout_settings(
     role = runtime_database_role_name(database_name)
     settings = Settings(
         _env_file=None,
-        database_url=(
-            f"postgresql+asyncpg://{role}:runtime-password@localhost/"
-            f"{database_name}"
-        ),
+        database_url=(f"postgresql+asyncpg://{role}:runtime-password@localhost/{database_name}"),
         stratus_database_statement_timeout_ms=2_400,
         stratus_database_lock_timeout_ms=800,
         stratus_database_idle_transaction_timeout_ms=4_500,
@@ -213,7 +260,7 @@ def test_runtime_engine_installs_server_side_timeout_settings(
         return cast(AsyncEngine, fake_engine)
 
     def fake_listen(target: object, name: str, listener: object) -> None:
-        captured["listen"] = (target, name, listener)
+        captured.setdefault("listeners", []).append((target, name, listener))
 
     monkeypatch.setattr(
         database_session,
@@ -238,11 +285,10 @@ def test_runtime_engine_installs_server_side_timeout_settings(
             "idle_in_transaction_session_timeout": "4500ms",
         }
     }
-    assert captured["listen"] == (
-        sync_engine,
-        "connect",
-        _assert_runtime_connection,
-    )
+    assert captured["listeners"] == [
+        (sync_engine, "connect", _assert_runtime_connection),
+        (sync_engine, "checkout", _assert_runtime_checkout),
+    ]
 
     captured.clear()
     read_engine = create_engine(
@@ -252,11 +298,13 @@ def test_runtime_engine_installs_server_side_timeout_settings(
         read_only=True,
     )
     assert read_engine is fake_engine
+    assert captured["listeners"] == [
+        (sync_engine, "connect", _assert_runtime_connection),
+        (sync_engine, "checkout", _assert_runtime_checkout),
+    ]
     assert captured["pool_size"] == 3
     assert captured["max_overflow"] == 0
-    assert captured["connect_args"]["server_settings"][
-        "default_transaction_read_only"
-    ] == "on"
+    assert captured["connect_args"]["server_settings"]["default_transaction_read_only"] == "on"
 
 
 def test_migration_settings_remain_separate_from_runtime_timeouts(
@@ -271,16 +319,12 @@ def test_migration_settings_remain_separate_from_runtime_timeouts(
     migration_settings = MigrationSettings(_env_file=None)
 
     assert migration_settings.model_dump() == {
-        "migration_database_url": (
-            "postgresql+asyncpg://owner:secret@localhost/stratus"
-        )
+        "migration_database_url": ("postgresql+asyncpg://owner:secret@localhost/stratus")
     }
 
 
 def test_compose_applies_strict_database_budget_only_to_api() -> None:
-    compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text(
-        encoding="utf-8"
-    )
+    compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
     worker = compose.split("\n  worker:\n", maxsplit=1)[1].split(
         "\n  binance-market-stream:\n",
         maxsplit=1,
