@@ -277,7 +277,21 @@ cat >/dev/null
 } >> "$STRATUS_STOP_BARRIER_EVENT_LOG"
 cat "$STRATUS_STOP_BARRIER_DOCKER_JSON"
 '@
+    $dockerShell = $dockerShell.Replace("`r`n", "`n")
     [IO.File]::WriteAllText($dockerPath, $dockerShell, $utf8)
+    $dockerBytes = [IO.File]::ReadAllBytes($dockerPath)
+    $expectedShebang = [Text.Encoding]::ASCII.GetBytes("#!/bin/sh`n")
+    if (
+        $dockerBytes.Length -lt $expectedShebang.Length -or
+        $dockerBytes -contains [byte]0x0D
+    ) {
+        throw 'Unix Docker fixture does not have strict LF-only script bytes.'
+    }
+    for ($index = 0; $index -lt $expectedShebang.Length; $index++) {
+        if ($dockerBytes[$index] -ne $expectedShebang[$index]) {
+            throw 'Unix Docker fixture does not have an executable /bin/sh shebang.'
+        }
+    }
     & chmod 700 $dockerPath
     if ($LASTEXITCODE -ne 0) {
         throw 'Could not make the Unix Docker fixture executable.'
