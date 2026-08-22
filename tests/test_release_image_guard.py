@@ -34,11 +34,21 @@ def test_release_image_guard_binds_image_revision_environment_and_services() -> 
         assert f"'{service_name}'" in guard
     assert "$service.image -ne $Image" in guard
     assert "environment.RELEASE_IMAGE_DIGEST" in guard
-    assert "worker = 3221225472L" in guard
-    assert "api = 1073741824L" in guard
-    assert "'safety-control' = 268435456L" in guard
-    assert "$memoryLimit -isnot [long]" in guard
-    assert "[int64]$memoryLimit -ne [int64]$expectedMemoryLimits[$serviceName]" in guard
+    assert (
+        "$expectedMemoryLimits = [ordered]@{\n"
+        "    worker = '3221225472'\n"
+        "    api = '1073741824'\n"
+        "    'safety-control' = '268435456'\n"
+        "}"
+    ) in guard
+    assert "if ($memoryLimit -isnot [string]) {" in guard
+    assert (
+        "if (-not [string]::Equals(\n"
+        "        $memoryLimit,\n"
+        "        [string]$expectedMemoryLimits[$serviceName],\n"
+        "        [StringComparison]::Ordinal\n"
+        "    )) {"
+    ) in guard
     assert "$expectedOperatorApiKeyServices = @('api', 'validate-safety-credentials')" in guard
     assert "Candidate image bakes OPERATOR_API_KEY" in guard
     assert "same non-empty credential" in guard
