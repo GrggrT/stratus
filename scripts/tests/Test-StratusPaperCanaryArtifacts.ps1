@@ -22,6 +22,10 @@ $source = Get-Content -LiteralPath $scriptPath -Raw
 foreach ($required in @(
     '[IO.File]::ReadAllBytes($absolutePath)',
     '$payloadJson = $envelope.payload | ConvertTo-Json -Depth 30 -Compress',
+    'ConvertFrom-StrictArtifactJson',
+    "-Name 'Microsoft.PowerShell.Utility\ConvertFrom-Json'",
+    "Parameters.ContainsKey('DateKind')",
+    "`$convertParameters['DateKind'] = 'String'",
     'Assert-NoReparsePath',
     'Assert-ExactEvidenceRecord',
     'Assert-RawOperationalSafetyEvidence',
@@ -70,6 +74,21 @@ function Get-TestSha256 {
     finally {
         $hasher.Dispose()
     }
+}
+
+function Read-TestArtifactJson {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $convertFromJson = Get-Command `
+        -Name 'Microsoft.PowerShell.Utility\ConvertFrom-Json' `
+        -CommandType Cmdlet -ErrorAction Stop
+    $convertParameters = @{
+        InputObject = Get-Content -LiteralPath $Path -Raw
+    }
+    if ($convertFromJson.Parameters.ContainsKey('DateKind')) {
+        $convertParameters['DateKind'] = 'String'
+    }
+    return Microsoft.PowerShell.Utility\ConvertFrom-Json @convertParameters
 }
 
 function Get-TestMd5 {
@@ -1201,7 +1220,7 @@ function Update-TestSnapshotChain {
         $path = Join-Path $Fixture.run_directory (
             'snapshot-{0:D3}m.json' -f $offset
         )
-        $envelope = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $envelope = Read-TestArtifactJson -Path $path
         if ($TargetOffset -eq -1 -or $offset -eq $TargetOffset) {
             [void](& $Mutation $envelope.payload)
         }
@@ -1211,8 +1230,7 @@ function Update-TestSnapshotChain {
         $previousHash = $record.sha256
     }
 
-    $manifestEnvelope = Get-Content -LiteralPath $Fixture.manifest_path -Raw |
-        ConvertFrom-Json
+    $manifestEnvelope = Read-TestArtifactJson -Path $Fixture.manifest_path
     $manifestEnvelope.payload.snapshots = @($records)
     $manifestEnvelope.payload.final_snapshot_sha256 = $previousHash
     $Fixture.manifest_record = Write-TestEnvelope -Path $Fixture.manifest_path `
@@ -1226,19 +1244,18 @@ function Update-TestPreflightChain {
     )
 
     $preflightPath = Join-Path $Fixture.run_directory 'preflight.json'
-    $preflightEnvelope = Get-Content -LiteralPath $preflightPath -Raw |
-        ConvertFrom-Json
+    $preflightEnvelope = Read-TestArtifactJson -Path $preflightPath
     [void](& $Mutation $preflightEnvelope.payload)
     $preflightRecord = Write-TestEnvelope -Path $preflightPath `
         -Payload $preflightEnvelope.payload
 
     $leasePath = Join-Path $Fixture.run_directory 'lease-acquire.json'
-    $leaseEnvelope = Get-Content -LiteralPath $leasePath -Raw | ConvertFrom-Json
+    $leaseEnvelope = Read-TestArtifactJson -Path $leasePath
     $leaseEnvelope.payload.preflight_artifact_sha256 = $preflightRecord.sha256
     $leaseRecord = Write-TestEnvelope -Path $leasePath -Payload $leaseEnvelope.payload
 
     $readyPath = Join-Path $Fixture.run_directory 'ready.json'
-    $readyEnvelope = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
+    $readyEnvelope = Read-TestArtifactJson -Path $readyPath
     $readyEnvelope.payload.preflight_artifact_sha256 = $preflightRecord.sha256
     $readyEnvelope.payload.lease.artifact_sha256 = $leaseRecord.sha256
     $readyRecord = Write-TestEnvelope -Path $readyPath -Payload $readyEnvelope.payload
@@ -1249,16 +1266,14 @@ function Update-TestPreflightChain {
         $path = Join-Path $Fixture.run_directory (
             'snapshot-{0:D3}m.json' -f $offset
         )
-        $snapshotEnvelope = Get-Content -LiteralPath $path -Raw |
-            ConvertFrom-Json
+        $snapshotEnvelope = Read-TestArtifactJson -Path $path
         $snapshotEnvelope.payload.previous_snapshot_sha256 = $previousHash
         $record = Write-TestEnvelope -Path $path `
             -Payload $snapshotEnvelope.payload
         $records.Add($record)
         $previousHash = $record.sha256
     }
-    $manifestEnvelope = Get-Content -LiteralPath $Fixture.manifest_path -Raw |
-        ConvertFrom-Json
+    $manifestEnvelope = Read-TestArtifactJson -Path $Fixture.manifest_path
     $manifestEnvelope.payload.evidence_chain.preflight = $preflightRecord
     $manifestEnvelope.payload.evidence_chain.lease_acquire = $leaseRecord
     $manifestEnvelope.payload.evidence_chain.ready = $readyRecord
@@ -1533,8 +1548,7 @@ try {
     $outerArrayEnvelope = New-ValidFixture -RunId ('0f' * 16)
     $outerPreflightPath = Join-Path $outerArrayEnvelope.run_directory `
         'preflight.json'
-    $outerPreflight = Get-Content -LiteralPath $outerPreflightPath -Raw |
-        ConvertFrom-Json
+    $outerPreflight = Read-TestArtifactJson -Path $outerPreflightPath
     $outerJson = ConvertTo-Json -InputObject @($outerPreflight) -Depth 32
     [IO.File]::WriteAllText(
         $outerPreflightPath,
@@ -1544,13 +1558,12 @@ try {
     $outerPreflightRecord = Get-TestFileRecord -Path $outerPreflightPath
     $outerLeasePath = Join-Path $outerArrayEnvelope.run_directory `
         'lease-acquire.json'
-    $outerLease = Get-Content -LiteralPath $outerLeasePath -Raw |
-        ConvertFrom-Json
+    $outerLease = Read-TestArtifactJson -Path $outerLeasePath
     $outerLease.payload.preflight_artifact_sha256 = $outerPreflightRecord.sha256
     $outerLeaseRecord = Write-TestEnvelope -Path $outerLeasePath `
         -Payload $outerLease.payload
     $outerReadyPath = Join-Path $outerArrayEnvelope.run_directory 'ready.json'
-    $outerReady = Get-Content -LiteralPath $outerReadyPath -Raw | ConvertFrom-Json
+    $outerReady = Read-TestArtifactJson -Path $outerReadyPath
     $outerReady.payload.preflight_artifact_sha256 = $outerPreflightRecord.sha256
     $outerReady.payload.lease.artifact_sha256 = $outerLeaseRecord.sha256
     [void](Write-TestEnvelope -Path $outerReadyPath -Payload $outerReady.payload)
@@ -1560,14 +1573,12 @@ try {
     $nullLeaseHeartbeat = New-ValidFixture -RunId ('10' * 16)
     $nullLeasePath = Join-Path $nullLeaseHeartbeat.run_directory `
         'lease-acquire.json'
-    $nullLeaseEnvelope = Get-Content -LiteralPath $nullLeasePath -Raw |
-        ConvertFrom-Json
+    $nullLeaseEnvelope = Read-TestArtifactJson -Path $nullLeasePath
     $nullLeaseEnvelope.payload.confirmed.lease.heartbeat_at = $null
     $nullLeaseRecord = Write-TestEnvelope -Path $nullLeasePath `
         -Payload $nullLeaseEnvelope.payload
     $nullLeaseReadyPath = Join-Path $nullLeaseHeartbeat.run_directory 'ready.json'
-    $nullLeaseReady = Get-Content -LiteralPath $nullLeaseReadyPath -Raw |
-        ConvertFrom-Json
+    $nullLeaseReady = Read-TestArtifactJson -Path $nullLeaseReadyPath
     $nullLeaseReady.payload.lease.artifact_sha256 = $nullLeaseRecord.sha256
     [void](Write-TestEnvelope -Path $nullLeaseReadyPath `
         -Payload $nullLeaseReady.payload)
@@ -1680,8 +1691,7 @@ try {
 
     $tampered = New-ValidFixture -RunId ('2' * 32)
     $preflightPath = Join-Path $tampered.run_directory 'preflight.json'
-    $tamperedEnvelope = Get-Content -LiteralPath $preflightPath -Raw |
-        ConvertFrom-Json
+    $tamperedEnvelope = Read-TestArtifactJson -Path $preflightPath
     $tamperedEnvelope.payload.safety.passed = $false
     [IO.File]::WriteAllText(
         $preflightPath,
@@ -1703,8 +1713,7 @@ try {
 
     $identityMismatch = New-ValidFixture -RunId ('4' * 32)
     $identityPath = Join-Path $identityMismatch.run_directory 'snapshot-000m.json'
-    $identityEnvelope = Get-Content -LiteralPath $identityPath -Raw |
-        ConvertFrom-Json
+    $identityEnvelope = Read-TestArtifactJson -Path $identityPath
     $identityEnvelope.payload.expected_identity.cohort = 'wrong-cohort'
     [void](Write-TestEnvelope -Path $identityPath -Payload $identityEnvelope.payload)
     Assert-InvalidFixture -Fixture $identityMismatch -Mode 'Terminal' `
@@ -1720,8 +1729,7 @@ try {
         -Label 'divergence evidence'
 
     $stopMismatch = New-ValidFixture -RunId ('6' * 32)
-    $stopEnvelope = Get-Content -LiteralPath $stopMismatch.manifest_path -Raw |
-        ConvertFrom-Json
+    $stopEnvelope = Read-TestArtifactJson -Path $stopMismatch.manifest_path
     $stopEnvelope.payload.emergency_stop.stop_command.actor = 'wrong-actor'
     [void](Write-TestEnvelope -Path $stopMismatch.manifest_path `
         -Payload $stopEnvelope.payload)
@@ -1729,8 +1737,8 @@ try {
         -Label 'release STOP identity mismatch'
 
     $releasePostInvariant = New-ValidFixture -RunId ('11' * 16)
-    $releasePostEnvelope = Get-Content `
-        -LiteralPath $releasePostInvariant.manifest_path -Raw | ConvertFrom-Json
+    $releasePostEnvelope = Read-TestArtifactJson `
+        -Path $releasePostInvariant.manifest_path
     $releasePostEnvelope.payload.emergency_stop.created = $false
     $releasePostEnvelope.payload.emergency_stop.post_attempts = 2
     $releasePostEnvelope.payload.emergency_stop.ambiguous_first_post = $false
@@ -1740,8 +1748,7 @@ try {
         -Label 'release POST producer invariant mismatch'
 
     $nonceMismatch = New-ValidFixture -RunId ('7' * 32)
-    $nonceEnvelope = Get-Content -LiteralPath $nonceMismatch.manifest_path -Raw |
-        ConvertFrom-Json
+    $nonceEnvelope = Read-TestArtifactJson -Path $nonceMismatch.manifest_path
     $nonceEnvelope.payload.emergency_stop.lease.nonce_sha256 = 'f' * 64
     [void](Write-TestEnvelope -Path $nonceMismatch.manifest_path `
         -Payload $nonceEnvelope.payload)
@@ -1751,20 +1758,19 @@ try {
     $resumeIdentityMismatch = New-ValidFixture -RunId ('8' * 32)
     $leasePath = Join-Path $resumeIdentityMismatch.run_directory `
         'lease-acquire.json'
-    $leaseEnvelope = Get-Content -LiteralPath $leasePath -Raw | ConvertFrom-Json
+    $leaseEnvelope = Read-TestArtifactJson -Path $leasePath
     $leaseEnvelope.payload.confirmed.lease.resume_actor = 'wrong-resume-actor'
     $leaseRecord = Write-TestEnvelope -Path $leasePath `
         -Payload $leaseEnvelope.payload
     $readyPath = Join-Path $resumeIdentityMismatch.run_directory 'ready.json'
-    $readyEnvelope = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
+    $readyEnvelope = Read-TestArtifactJson -Path $readyPath
     $readyEnvelope.payload.lease.artifact_sha256 = $leaseRecord.sha256
     [void](Write-TestEnvelope -Path $readyPath -Payload $readyEnvelope.payload)
     Assert-InvalidFixture -Fixture $resumeIdentityMismatch -Mode 'Ready' `
         -Label 'resume actor mismatch'
 
     $pathMismatch = New-ValidFixture -RunId ('9' * 32)
-    $pathEnvelope = Get-Content -LiteralPath $pathMismatch.manifest_path -Raw |
-        ConvertFrom-Json
+    $pathEnvelope = Read-TestArtifactJson -Path $pathMismatch.manifest_path
     $pathEnvelope.payload.evidence_chain.ready.path = (
         Join-Path $pathMismatch.run_directory '..\ready.json'
     )

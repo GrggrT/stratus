@@ -120,6 +120,27 @@ function Get-NormalizedFullPath {
     return $fullPath
 }
 
+function ConvertFrom-StrictArtifactJson {
+    param(
+        [Parameter(Mandatory = $true)][string] $Json,
+        [Parameter(Mandatory = $true)][string] $Label
+    )
+
+    try {
+        $convertFromJson = Get-Command `
+            -Name 'Microsoft.PowerShell.Utility\ConvertFrom-Json' `
+            -CommandType Cmdlet -ErrorAction Stop
+        $convertParameters = @{ InputObject = $Json }
+        if ($convertFromJson.Parameters.ContainsKey('DateKind')) {
+            $convertParameters['DateKind'] = 'String'
+        }
+        return Microsoft.PowerShell.Utility\ConvertFrom-Json @convertParameters
+    }
+    catch {
+        throw "$Label is not valid JSON."
+    }
+}
+
 function Assert-ExactProperties {
     param(
         [Parameter(Mandatory = $true)][object] $Value,
@@ -464,12 +485,7 @@ function Read-ImmutableEnvelope {
     if ($json -cnotmatch '^\s*\{') {
         throw "$Label outer JSON value is not an object."
     }
-    try {
-        $envelope = $json | ConvertFrom-Json
-    }
-    catch {
-        throw "$Label is not valid JSON."
-    }
+    $envelope = ConvertFrom-StrictArtifactJson -Json $json -Label $Label
     Assert-ExactProperties -Value $envelope `
         -Expected @('schema_version', 'payload_sha256', 'payload') `
         -Label "$Label envelope"
