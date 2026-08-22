@@ -126,11 +126,11 @@ Evidence: execution-cost planner/repository unit and PostgreSQL integration test
       implementation paths changed from baseline revision
       `9123d85013af8b15a3f816c9ba70875b2a9973b6`, excluding only this self-referential checklist;
       the test container remained healthy with restart count zero and `OOMKilled=false`.
-- [x] After successive exact-SHA CI runs exposed and the candidate fixed cross-version external-proof
-      parsing, native ISO timestamp preservation across backup and canary evidence, and Windows
-      native-application resolution, the
-      current implementation-content digest is
-      `556e910f1e2fd6015825fe88ff33dcf9c43a42561bb37972c012c9ca7e8bc2a7` across the same 78
+- [x] Successive exact-SHA CI runs exposed and the candidate fixed cross-version external-proof
+      parsing, native ISO timestamp preservation across backup and canary evidence, Windows
+      native-application resolution, and expected child-process exit-code containment in release
+      contracts. The current implementation-content digest is
+      `28beaee520c1fe504c683b489e582374b53fbf6cc2f6bac357383234b40e3af1` across the same 78
       implementation paths. All affected contracts pass locally in PowerShell 7.6 and Windows
       PowerShell 5.1; all ten Windows PowerShell 5.1 release contracts pass. Exact-candidate full CI
       and clean-PostgreSQL acceptance remain explicitly pending below.

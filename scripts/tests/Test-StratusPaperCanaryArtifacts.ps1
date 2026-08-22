@@ -1310,6 +1310,9 @@ function Invoke-ArtifactValidator {
     }
     finally {
         $ErrorActionPreference = $previousPreference
+        # The child exit code is captured in the result above. Do not leak an
+        # expected negative-fixture failure into the GitHub Actions pwsh wrapper.
+        $global:LASTEXITCODE = 0
     }
     return [pscustomobject]@{
         exit_code = $exitCode
@@ -1382,6 +1385,9 @@ function Assert-InvalidFixture {
     )
 
     $result = Invoke-ArtifactValidator -Fixture $Fixture -Mode $Mode
+    if ($global:LASTEXITCODE -ne 0) {
+        throw "$Label fixture leaked its captured child exit code."
+    }
     if ($result.exit_code -eq 0) {
         throw "$Label fixture was accepted."
     }
@@ -1822,5 +1828,6 @@ finally {
     released_lease_nonce_mismatch_rejected = $true
     resume_identity_mismatch_rejected = $true
     evidence_path_mismatch_rejected = $true
+    expected_child_exit_codes_consumed = $true
     validator_local_read_only = $true
 } | ConvertTo-Json -Compress
