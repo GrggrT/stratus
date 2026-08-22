@@ -1118,6 +1118,10 @@ run ID:
 
 ```powershell
 $httpExit = 2
+$observerExit = 2
+$httpInvocationFailed = $false
+$observerTimedOut = $false
+$observerStopFailed = $false
 try {
   & $hostPowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass `
     -File (Join-Path $buildContext "scripts\Invoke-StratusDashboardLoadGate.ps1") `
@@ -1127,32 +1131,195 @@ try {
     -OutputPath $httpArtifact
   $httpExit = $LASTEXITCODE
 }
+catch {
+  $httpExit = 125
+  $httpInvocationFailed = $true
+}
 finally {
   if (-not $observer.WaitForExit(150000)) {
-    Stop-GateObserver -Process $observer
-    throw "Runtime observer exceeded its bounded post-HTTP completion window."
+    $observerTimedOut = $true
+    $observerExit = 124
+    try {
+      Stop-GateObserver -Process $observer
+    }
+    catch {
+      $observerStopFailed = $true
+      $observerExit = 125
+    }
+  }
+  else {
+    $observerExit = [int]$observer.ExitCode
   }
 }
-if ($httpExit -ne 0) {
-    throw "Candidate Dashboard HTTP subgate failed with exit code $httpExit."
-}
-if ($observer.ExitCode -ne 0) {
-    throw "Candidate runtime observation failed with exit code $($observer.ExitCode)."
+# STRATUS_LOAD_GATE_COMPOSITE_FINALIZATION_BEGIN
+$rawArtifactsComplete = (
+  (Test-Path -LiteralPath $httpArtifact -PathType Leaf) -and
+  (Test-Path -LiteralPath $runtimeArtifact -PathType Leaf)
+)
+$assertionExit = 2
+$compositeAttempted = $false
+$compositeArtifactRecorded = $false
+$compositeContractValid = $false
+$compositePassed = $false
+$compositeSha256 = $null
+
+# Even a failed HTTP or runtime subgate must be composited when both raw
+# artifacts exist. The assertion writes the durable rejected artifact before
+# this wrapper reports the preserved subgate exit codes and stops the cutover.
+if ($rawArtifactsComplete) {
+  $compositeAttempted = $true
+  try {
+    & $hostPowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+      -File (Join-Path $buildContext "scripts\Assert-StratusLoadGateArtifacts.ps1") `
+      -HttpArtifactPath $httpArtifact `
+      -RuntimeArtifactPath $runtimeArtifact `
+      -ExpectedRunId $runId `
+      -ExpectedApiImageId "sha256:$digest" `
+      -ExpectedRevision $revision `
+      -ExpectedReleaseDigest $digest `
+      -OutputPath $acceptedArtifact
+    $assertionExit = $LASTEXITCODE
+  }
+  catch {
+    $assertionExit = 125
+  }
+  $compositeArtifactRecorded = Test-Path -LiteralPath $acceptedArtifact -PathType Leaf
+  if ($compositeArtifactRecorded) {
+    try {
+      $compositeSha256 = (
+        Get-FileHash -LiteralPath $acceptedArtifact -Algorithm SHA256 -ErrorAction Stop
+      ).Hash.ToLowerInvariant()
+      $compositeJson = (
+        Get-Content -LiteralPath $acceptedArtifact -Raw -ErrorAction Stop
+      ).Trim()
+      if (-not $compositeJson.StartsWith('{') -or -not $compositeJson.EndsWith('}')) {
+        throw "Composite load-gate artifact root is not a JSON object."
+      }
+      $convertFromJson = Get-Command `
+        -Name 'Microsoft.PowerShell.Utility\ConvertFrom-Json' `
+        -CommandType Cmdlet `
+        -ErrorAction Stop
+      $convertParameters = @{
+        InputObject = $compositeJson
+        ErrorAction = 'Stop'
+      }
+      if ($convertFromJson.Parameters.ContainsKey('DateKind')) {
+        $convertParameters['DateKind'] = 'String'
+      }
+      if ($convertFromJson.Parameters.ContainsKey('NoEnumerate')) {
+        $convertParameters['NoEnumerate'] = $true
+      }
+      $composite = Microsoft.PowerShell.Utility\ConvertFrom-Json @convertParameters
+      if (
+        $null -eq $composite -or
+        $composite.GetType().FullName -cne
+          'System.Management.Automation.PSCustomObject'
+      ) {
+        throw "Composite load-gate artifact root is not a native JSON object."
+      }
+      $schemaProperty = $composite.PSObject.Properties['schema_version']
+      $gateProperty = $composite.PSObject.Properties['gate']
+      $passedProperty = $composite.PSObject.Properties['production_gate_passed']
+      $exitProperty = $composite.PSObject.Properties['exit_code']
+      $runProperty = $composite.PSObject.Properties['run_id']
+      if (
+        $null -ne $schemaProperty -and
+        ($schemaProperty.Value -is [int] -or $schemaProperty.Value -is [long]) -and
+        [long]$schemaProperty.Value -eq 1 -and
+        $null -ne $gateProperty -and
+        [string]$gateProperty.Value -ceq 'stratus_candidate_production_load' -and
+        $null -ne $passedProperty -and $passedProperty.Value -is [bool] -and
+        $null -ne $exitProperty -and
+        ($exitProperty.Value -is [int] -or $exitProperty.Value -is [long]) -and
+        [long]$exitProperty.Value -eq $assertionExit -and
+        $null -ne $runProperty -and [string]$runProperty.Value -ceq $runId
+      ) {
+        $compositeContractValid = $true
+        $compositePassed = [bool]$passedProperty.Value
+      }
+      if ($compositePassed) {
+        $candidateProperty = $composite.PSObject.Properties['candidate']
+        $candidate = if ($null -ne $candidateProperty) {
+          $candidateProperty.Value
+        }
+        else {
+          $null
+        }
+        $compositeContractValid = (
+          $null -ne $candidate -and
+          $candidate.GetType().FullName -ceq
+            'System.Management.Automation.PSCustomObject' -and
+          [string]$candidate.api_image_id -ceq "sha256:$digest" -and
+          [string]$candidate.revision -ceq $revision -and
+          [string]$candidate.release_digest -ceq $digest
+        )
+        if (-not $compositeContractValid) {
+          $compositePassed = $false
+        }
+      }
+    }
+    catch {
+      # Preserve the finalization milestone and all child exits; the invalid
+      # composite contract is rejected below without masking that evidence.
+      $compositeContractValid = $false
+      $compositePassed = $false
+    }
+  }
 }
 
-& $hostPowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-  -File (Join-Path $buildContext "scripts\Assert-StratusLoadGateArtifacts.ps1") `
-  -HttpArtifactPath $httpArtifact `
-  -RuntimeArtifactPath $runtimeArtifact `
-  -ExpectedRunId $runId `
-  -ExpectedApiImageId "sha256:$digest" `
-  -ExpectedRevision $revision `
-  -ExpectedReleaseDigest $digest `
-  -OutputPath $acceptedArtifact
-if ($LASTEXITCODE -ne 0) {
-    throw "Composite candidate load gate rejected the evidence."
+$loadGateOutcome = [pscustomobject]@{
+  milestone = "LOAD_GATE_COMPOSITE_FINALIZED"
+  run_id = $runId
+  http_exit = $httpExit
+  runtime_exit = $observerExit
+  assertion_exit = $assertionExit
+  http_invocation_failed = $httpInvocationFailed
+  observer_timed_out = $observerTimedOut
+  observer_stop_failed = $observerStopFailed
+  raw_artifacts_complete = $rawArtifactsComplete
+  composite_attempted = $compositeAttempted
+  composite_artifact_recorded = $compositeArtifactRecorded
+  composite_contract_valid = $compositeContractValid
+  production_gate_passed = $compositePassed
+  http_artifact = $httpArtifact
+  runtime_artifact = $runtimeArtifact
+  composite_artifact = $acceptedArtifact
+  composite_sha256 = $compositeSha256
 }
+$loadGateOutcome | ConvertTo-Json -Compress | Write-Output
+
+if (-not $rawArtifactsComplete) {
+  throw (
+    "Candidate load gate raw evidence is incomplete; " +
+    "http_exit=$httpExit; runtime_exit=$observerExit."
+  )
+}
+if (-not $compositeArtifactRecorded -or -not $compositeContractValid) {
+  throw (
+    "Composite candidate load gate did not record a valid result; " +
+    "http_exit=$httpExit; runtime_exit=$observerExit; assertion_exit=$assertionExit."
+  )
+}
+if (
+  $httpExit -ne 0 -or
+  $observerExit -ne 0 -or
+  $assertionExit -ne 0 -or
+  -not $compositePassed
+) {
+  throw (
+    "Composite candidate load gate rejected the evidence; " +
+    "http_exit=$httpExit; runtime_exit=$observerExit; " +
+    "assertion_exit=$assertionExit; artifact=$acceptedArtifact."
+  )
+}
+# STRATUS_LOAD_GATE_COMPOSITE_FINALIZATION_END
 ```
+
+The finalization block above deliberately runs the composite assertion before raising a subgate
+failure whenever both raw artifacts exist. A rejected `*-accepted.json` is therefore retained as
+the durable composite decision, and the emitted `LOAD_GATE_COMPOSITE_FINALIZED` record preserves
+the HTTP, runtime-observer, and assertion exit codes. Missing raw evidence, a missing or malformed
+composite artifact, any non-zero exit, or `production_gate_passed=false` remains fail closed.
 
 Do not run the harness against the predecessor API or while the worker is being started/stopped.
 The JSON artifact contains every endpoint status/latency/error plus per-endpoint aggregates; it

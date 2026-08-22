@@ -388,6 +388,12 @@ class _SafetyBoundaryCursor(Protocol):
 
 
 class _SafetyBoundaryConnection(Protocol):
+    @property
+    def autocommit(self) -> bool: ...
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None: ...
+
     def cursor(self) -> _SafetyBoundaryCursor: ...
 
 
@@ -424,8 +430,16 @@ def _assert_safety_connection(
     dbapi_connection: object,
     _connection_record: object,
 ) -> None:
-    cursor = cast(_SafetyBoundaryConnection, dbapi_connection).cursor()
+    connection = cast(_SafetyBoundaryConnection, dbapi_connection)
+    original_autocommit = connection.autocommit
+    cursor: _SafetyBoundaryCursor | None = None
     try:
+        # Keep the per-checkout proof transaction-neutral.  The pool checkout
+        # event precedes SQLAlchemy's borrower-specific transaction setup, so a
+        # normal SELECT here would otherwise open a transaction before either
+        # the safety session or an AUTOCOMMIT read facade receives the handle.
+        connection.autocommit = True
+        cursor = connection.cursor()
         cursor.execute(_SAFETY_CONNECTION_BOUNDARY_SQL)
         row = cursor.fetchone()
         if row is None or len(row) != 1 or row[0] is not True:
@@ -433,7 +447,11 @@ def _assert_safety_connection(
                 "database rejected the STRATUS safety boundary"
             )
     finally:
-        cursor.close()
+        try:
+            if cursor is not None:
+                cursor.close()
+        finally:
+            connection.autocommit = original_autocommit
 
 
 def _assert_safety_checkout(

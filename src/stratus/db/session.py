@@ -92,6 +92,12 @@ class _BoundaryCursor(Protocol):
 
 
 class _BoundaryConnection(Protocol):
+    @property
+    def autocommit(self) -> bool: ...
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None: ...
+
     def cursor(self) -> _BoundaryCursor: ...
 
 
@@ -107,14 +113,26 @@ def _assert_runtime_connection(
     dbapi_connection: object,
     _connection_record: object,
 ) -> None:
-    cursor = cast(_BoundaryConnection, dbapi_connection).cursor()
+    connection = cast(_BoundaryConnection, dbapi_connection)
+    original_autocommit = connection.autocommit
+    cursor: _BoundaryCursor | None = None
     try:
+        # Pool checkout listeners run before an OptionEngine applies its
+        # per-borrower isolation level.  Execute the boundary proof itself in
+        # DBAPI autocommit so this SELECT can never expose a transient
+        # ``idle in transaction`` backend before the read lane takes over.
+        connection.autocommit = True
+        cursor = connection.cursor()
         cursor.execute("SELECT public.assert_stratus_runtime_boundary(true)")
         row = cursor.fetchone()
         if row is None or len(row) != 1 or row[0] is not True:
             raise RuntimeDatabaseBoundaryError("database rejected the STRATUS runtime boundary")
     finally:
-        cursor.close()
+        try:
+            if cursor is not None:
+                cursor.close()
+        finally:
+            connection.autocommit = original_autocommit
 
 
 def _assert_runtime_checkout(

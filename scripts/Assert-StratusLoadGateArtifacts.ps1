@@ -72,6 +72,42 @@ function Write-GateArtifact {
     Move-Item -LiteralPath $temporary -Destination $Path -Force
 }
 
+function ConvertFrom-ArtifactJsonObject {
+    param(
+        [Parameter(Mandatory = $true)][string] $Json,
+        [Parameter(Mandatory = $true)][string] $Label
+    )
+
+    $trimmed = $Json.Trim()
+    if (-not $trimmed.StartsWith('{') -or -not $trimmed.EndsWith('}')) {
+        throw "$Label must have a native JSON object at its root."
+    }
+    try {
+        $convertFromJson = Get-Command `
+            -Name 'Microsoft.PowerShell.Utility\ConvertFrom-Json' `
+            -CommandType Cmdlet `
+            -ErrorAction Stop
+        $convertParameters = @{ InputObject = $trimmed }
+        if ($convertFromJson.Parameters.ContainsKey('DateKind')) {
+            $convertParameters['DateKind'] = 'String'
+        }
+        if ($convertFromJson.Parameters.ContainsKey('NoEnumerate')) {
+            $convertParameters['NoEnumerate'] = $true
+        }
+        $value = Microsoft.PowerShell.Utility\ConvertFrom-Json @convertParameters
+    }
+    catch {
+        throw "$Label is not valid JSON."
+    }
+    if (
+        $null -eq $value -or
+        $value.GetType().FullName -cne 'System.Management.Automation.PSCustomObject'
+    ) {
+        throw "$Label must have a native JSON object at its root."
+    }
+    return $value
+}
+
 function Test-HasProperties {
     param(
         [object] $Value,
@@ -175,6 +211,47 @@ function Get-RawMaximum {
     return ($Rows | Measure-Object -Property $Property -Maximum).Maximum
 }
 
+function Get-TimestampedRollingMaximum {
+    param(
+        [Parameter(Mandatory = $true)][object[]] $Rows,
+        [Parameter(Mandatory = $true)][string] $TimestampProperty,
+        [Parameter(Mandatory = $true)][string] $ValueProperty,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 3600)][int] $WindowSeconds
+    )
+
+    if ($Rows.Count -eq 0) {
+        return 0.0
+    }
+    $times = @(
+        $Rows | ForEach-Object {
+            [DateTimeOffset]::Parse(
+                [string]$_.$TimestampProperty,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            )
+        }
+    )
+    $maximum = 0.0
+    for ($endIndex = 0; $endIndex -lt $Rows.Count; $endIndex += 1) {
+        if (($times[$endIndex] - $times[0]).TotalSeconds -lt $WindowSeconds) {
+            continue
+        }
+        $windowStartedAt = $times[$endIndex].AddSeconds(-$WindowSeconds)
+        $values = @(
+            for ($index = 0; $index -le $endIndex; $index += 1) {
+                if ($times[$index] -ge $windowStartedAt) {
+                    [double]$Rows[$index].$ValueProperty
+                }
+            }
+        )
+        if ($values.Count -ne 0) {
+            $average = [double](($values | Measure-Object -Average).Average)
+            $maximum = [Math]::Max($maximum, $average)
+        }
+    }
+    return $maximum
+}
+
 function Test-ExactStringSet {
     param(
         [AllowNull()][object[]] $Actual,
@@ -240,8 +317,12 @@ try {
     $runtimeBytes = [IO.File]::ReadAllBytes($absoluteRuntime)
     $httpSha256 = Get-BytesSha256 -Bytes $httpBytes
     $runtimeSha256 = Get-BytesSha256 -Bytes $runtimeBytes
-    $http = $strictUtf8.GetString($httpBytes) | ConvertFrom-Json
-    $runtime = $strictUtf8.GetString($runtimeBytes) | ConvertFrom-Json
+    $http = ConvertFrom-ArtifactJsonObject `
+        -Json ($strictUtf8.GetString($httpBytes)) `
+        -Label 'HTTP load artifact'
+    $runtime = ConvertFrom-ArtifactJsonObject `
+        -Json ($strictUtf8.GetString($runtimeBytes)) `
+        -Label 'Runtime observation artifact'
     $violations = [Collections.Generic.List[string]]::new()
 
     $expectedEndpoints = @(
@@ -1100,13 +1181,15 @@ try {
             break
         }
     }
-    $rolling30Max = 0.0
-    if ($postgresCpu.Count -ge 7) {
-        for ($index = 6; $index -lt $postgresCpu.Count; $index += 1) {
-            $window = @($postgresCpu[($index - 6)..$index])
-            $average = [double](($window | Measure-Object -Average).Average)
-            $rolling30Max = [Math]::Max($rolling30Max, $average)
-        }
+    $rolling30Max = if (-not $resourceMalformed) {
+        Get-TimestampedRollingMaximum `
+            -Rows $resourceSamples `
+            -TimestampProperty 'at' `
+            -ValueProperty 'postgres_cpu_percent' `
+            -WindowSeconds 30
+    }
+    else {
+        0.0
     }
     if ($twoConsecutiveAt150 -or $rolling30Max -ge 140) {
         Add-UniqueViolation $violations 'runtime_resource_threshold'
@@ -1168,6 +1251,8 @@ try {
             $firstDatabaseSampleAt -gt $httpStarted -or
             $firstResourceSampleAt -gt $httpStarted -or
             $firstTopologySampleAt -gt $httpStarted -or
+            $lastDatabaseSampleAt -lt $httpCompleted -or
+            $lastResourceSampleAt -lt $httpCompleted -or
             $lastDatabaseSampleAt -gt $drainAt -or
             $lastResourceSampleAt -gt $drainAt -or
             $lastTopologySampleAt -lt $drainAt -or
@@ -1394,7 +1479,7 @@ try {
             drain_at = $drainAt.ToString('O')
             runtime_completed_at = $runtimeCompleted.ToString('O')
             actual_observation_seconds = [Math]::Round($actualObservationSeconds, 3)
-            runtime_covers_http_and_drain = -not ($violations -contains 'runtime_overlap')
+            runtime_covers_http_and_drain = -not ($violations -contains 'runtime_timestamps')
         }
         evidence = [pscustomobject]@{
             http_artifact = $absoluteHttp

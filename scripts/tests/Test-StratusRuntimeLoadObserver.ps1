@@ -26,7 +26,9 @@ foreach ($forbidden in @(
     'Get-Content[^\r\n]+\.env',
     'Invoke-RestMethod',
     'Invoke-WebRequest',
-    'docker\s+(start|stop|restart|rm|compose\s+up)'
+    'docker\s+(start|stop|restart|rm|compose\s+up)',
+    '\$nextResourceAt\s*=\s*\[DateTimeOffset\]::UtcNow\.AddSeconds',
+    '\$sampleStarted\s*=\s*\[DateTimeOffset\]::UtcNow'
 )) {
     if ($source -match $forbidden) {
         throw "Runtime observer contains a forbidden pattern: $forbidden"
@@ -43,15 +45,15 @@ foreach ($required in @(
     'baselineApi\.HostConfig\.Memory -ne \$ExpectedApiMemoryLimitBytes',
     'finalApi\.HostConfig\.Memory -eq \$ExpectedApiMemoryLimitBytes',
     'global_idle_in_tx -ne 0',
-    'firstDatabaseSample\.api_sessions -gt \$MaxApiSessions',
-    'firstDatabaseSample\.api_idle_in_tx -ne 0',
-    'firstDatabaseSample\.lock_waiters -ne 0',
-    'firstResourceSample\.api_memory_percent -ge 90',
-    'firstResourceSample\.api_memory_limit_bytes -ne',
+    'Sample\.api_sessions -le \$MaxApiSessions',
+    'Sample\.api_idle_in_tx -eq 0',
+    'Sample\.lock_waiters -eq 0',
+    'Sample\.api_memory_percent -lt 90',
+    'Sample\.api_memory_limit_bytes -eq \$ExpectedApiMemoryLimitBytes',
     'api_memory_limit_changed',
     'api_operator_key_entry_count',
     'api_operator_credential_changed',
-    'firstResourceSample\.postgres_cpu_percent -ge 200',
+    'Sample\.postgres_cpu_percent -lt 200',
     'candidate_identity_changed',
     'application_writer_started',
     'container_topology_changed',
@@ -74,7 +76,30 @@ foreach ($required in @(
     'topology_sample_coverage',
     'database_sample_coverage',
     'stratus_dashboard_runtime_observation_ready',
-    'Write-ObserverArtifact -Path \$absoluteOutput -Artifact \$fatal'
+    'Write-ObserverArtifact -Path \$absoluteOutput -Artifact \$fatal',
+    'Collections\.Concurrent\.ConcurrentQueue',
+    'Get-NextAnchoredSampleAt',
+    'Start-ObserverSampler',
+    'Complete-ObserverSampler',
+    'Stop-ObserverSamplerSafely',
+    'Receive-ObserverSamplerMessages',
+    '\$nextDatabaseAt = \$observationStartedAt',
+    '\$nextSampleAt = \$ObservationStartedAt',
+    '\$topologySamples\.Count -gt 1',
+    '\$sampleErrors\.Count -ne 0',
+    '\[bool\]\$resourceSampler\.async_result\.IsCompleted',
+    '\[bool\]\$topologySampler\.async_result\.IsCompleted',
+    'Test-DatabasePreflightSample',
+    'Test-ResourcePreflightSample',
+    'Test-TopologyPreflightSample',
+    '\$unsafeDatabaseSamples\.Count -ne 0',
+    '\$unsafeResourceSamples\.Count -ne 0',
+    '\$unsafeTopologySamples\.Count -ne 0',
+    'first_dynamic_topology_sample_at = \[string\]\$topologySamples\[1\]\.at',
+    '\$pipeline\.BeginInvoke\(\)',
+    '\$Sampler\.pipeline\.BeginStop\(\$null, \$null\)',
+    '\.WaitOne\(5000\)',
+    'finally\s*\{\s*Stop-ObserverSamplerSafely -Sampler \$resourceSampler\s*Stop-ObserverSamplerSafely -Sampler \$topologySampler'
 )) {
     if ($source -notmatch $required) {
         throw "Runtime observer is missing a required evidence control: $required"
@@ -84,10 +109,27 @@ if ($source -match "application_name LIKE 'stratus-%'") {
     throw 'Runtime observer still trusts application_name as a writer inventory.'
 }
 $topologyCallCount = @(
-    [regex]::Matches($source, 'Get-RunningProjectTopology\s+-ProjectName')
+    [regex]::Matches(
+        $source,
+        'Get-RunningProjectTopology\s*(?:`\r?\n\s*)?-ProjectName'
+    )
 ).Count
 if ($topologyCallCount -lt 3) {
     throw 'Runtime observer does not prove project topology before, during, and after load.'
+}
+$independentSamplerNames = @(
+    [regex]::Matches(
+        $source,
+        "Start-ObserverSampler\s+``\r?\n\s+-Name '(resource|topology)'"
+    ) | ForEach-Object { $_.Groups[1].Value }
+)
+if (
+    $independentSamplerNames.Count -ne 2 -or
+    @($independentSamplerNames | Sort-Object -Unique).Count -ne 2 -or
+    $independentSamplerNames -notcontains 'resource' -or
+    $independentSamplerNames -notcontains 'topology'
+) {
+    throw 'Resource and topology probes must run in separate sampler runspaces.'
 }
 $runtimeRole = 'stratus_app_752875213a111f12d876fef68bbf8259'
 $apiAddresses = @('172.20.0.4')
@@ -175,12 +217,151 @@ if (
     throw 'Runtime observer validation thresholds were relaxed.'
 }
 
+$null = . $scriptPath -ValidateOnly
+$safeDatabasePreflight = [pscustomobject]@{
+    schema_head = '20260730_0047'
+    controls_ok = $true
+    api_sessions = 3
+    api_idle_in_tx = 0
+    global_idle_in_tx = 0
+    lock_waiters = 0
+    pending_commands = 0
+    live_orders = 0
+    live_positions = 0
+    live_intents = 0
+    live_fill_legs = 0
+    live_enrollments = 0
+    runtime_writer_sessions = 0
+}
+$unsafeDatabasePreflight = $safeDatabasePreflight | Select-Object *
+$unsafeDatabasePreflight.api_idle_in_tx = 1
+$databasePreflightRows = @($safeDatabasePreflight, $unsafeDatabasePreflight)
+$rejectedDatabasePreflight = @(
+    $databasePreflightRows | Where-Object {
+        -not (Test-DatabasePreflightSample `
+            -Sample $_ `
+            -ExpectedSchemaHead '20260730_0047' `
+            -MaxApiSessions 4)
+    }
+)
+
+$safeResourcePreflight = [pscustomobject]@{
+    api_memory_percent = 20.0
+    api_memory_limit_bytes = 1073741824L
+    api_operator_key_entry_count = 1
+    postgres_cpu_percent = 30.0
+}
+$unsafeResourcePreflight = $safeResourcePreflight | Select-Object *
+$unsafeResourcePreflight.postgres_cpu_percent = 210.0
+$resourcePreflightRows = @($safeResourcePreflight, $unsafeResourcePreflight)
+$rejectedResourcePreflight = @(
+    $resourcePreflightRows | Where-Object {
+        -not (Test-ResourcePreflightSample `
+            -Sample $_ `
+            -ExpectedApiMemoryLimitBytes 1073741824L)
+    }
+)
+
+$topologyPreflightRows = @(
+    [pscustomobject]@{ safe = $true },
+    [pscustomobject]@{ safe = $false }
+)
+$rejectedTopologyPreflight = @(
+    $topologyPreflightRows | Where-Object {
+        -not (Test-TopologyPreflightSample -Sample $_)
+    }
+)
+if (
+    $rejectedDatabasePreflight.Count -ne 1 -or
+    $rejectedResourcePreflight.Count -ne 1 -or
+    $rejectedTopologyPreflight.Count -ne 1
+) {
+    throw 'Cumulative preflight validation ignored a later unsafe sample.'
+}
+$anchor = [DateTimeOffset]::Parse('2026-08-23T00:00:00Z')
+$nextAnchored = Get-NextAnchoredSampleAt `
+    -PreviousAt $anchor `
+    -Now $anchor.AddSeconds(3.4) `
+    -IntervalSeconds 1
+if ($nextAnchored -ne $anchor.AddSeconds(4)) {
+    throw 'Delayed sampling did not advance to the next absolute anchored slot.'
+}
+$rollingRows = @(
+    [pscustomobject]@{ at = $anchor.ToString('O'); postgres_cpu_percent = 0.0 }
+    1..6 | ForEach-Object {
+        [pscustomobject]@{
+            at = $anchor.AddSeconds(30 + $_).ToString('O')
+            postgres_cpu_percent = 145.0
+        }
+    }
+)
+$rollingMaximum = Get-TimestampedRollingMaximum `
+    -Rows $rollingRows `
+    -TimestampProperty 'at' `
+    -ValueProperty 'postgres_cpu_percent' `
+    -WindowSeconds 30
+if ($rollingMaximum -ne 145.0) {
+    throw 'Rolling PostgreSQL CPU calculation still assumes seven adjacent samples.'
+}
+
+$samplerQueue = [Collections.Concurrent.ConcurrentQueue[object]]::new()
+$samplerErrors = [Collections.Generic.List[object]]::new()
+$testNetworks = [string[]]@('weatherpoly_default', 'weatherpoly_safety-plane')
+$testComposeArguments = [object[]]@('compose', '--project-name', 'weatherpoly')
+$samplerWorker = {
+    param(
+        [object] $Queue,
+        [DateTimeOffset] $StartedAt,
+        [string[]] $Networks,
+        [object[]] $ComposeArguments
+    )
+
+    $nextAt = Get-NextAnchoredSampleAt `
+        -PreviousAt $StartedAt `
+        -Now $StartedAt.AddSeconds(3.4) `
+        -IntervalSeconds 1
+    $Queue.Enqueue([pscustomobject]@{
+        kind = 'sample'
+        source = 'resource'
+        value = [pscustomobject]@{
+            at = $nextAt.ToString('O')
+            networks = @($Networks)
+            compose_arguments = @($ComposeArguments)
+        }
+    })
+}
+$sampler = Start-ObserverSampler `
+    -Name 'test' `
+    -FunctionNames @('Get-NextAnchoredSampleAt') `
+    -WorkerScript $samplerWorker `
+    -Arguments @(
+        $samplerQueue,
+        $anchor,
+        $testNetworks,
+        $testComposeArguments
+    )
+Complete-ObserverSampler -Sampler $sampler -Errors $samplerErrors
+$samplerMessage = $null
+if (
+    $samplerErrors.Count -ne 0 -or
+    -not $samplerQueue.TryDequeue([ref]$samplerMessage) -or
+    [string]$samplerMessage.source -ne 'resource' -or
+    [DateTimeOffset]::Parse([string]$samplerMessage.value.at) -ne $anchor.AddSeconds(4) -or
+    (@($samplerMessage.value.networks) -join ',') -cne ($testNetworks -join ',') -or
+    (@($samplerMessage.value.compose_arguments) -join ',') -cne
+        ($testComposeArguments -join ',')
+) {
+    throw 'Cross-runspace anchored sampler transport or array binding failed.'
+}
+
 [pscustomobject]@{
     script = $scriptPath
     syntax_valid = $true
     read_only = $true
     one_second_database_sampling = $true
     five_second_resource_sampling = $true
+    independent_sampling = $true
+    absolute_deadline_sampling = $true
     post_load_drain_required = $true
     validated = $true
 } | ConvertTo-Json -Compress

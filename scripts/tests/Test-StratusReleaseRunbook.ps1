@@ -190,6 +190,16 @@ foreach ($required in @(
     '& \$hostPowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass',
     'Join-Path \$buildContext "scripts\\Invoke-StratusDashboardLoadGate\.ps1"',
     'Join-Path \$buildContext "scripts\\Assert-StratusLoadGateArtifacts\.ps1"',
+    '# STRATUS_LOAD_GATE_COMPOSITE_FINALIZATION_BEGIN',
+    '\$rawArtifactsComplete = \(',
+    '\$compositeArtifactRecorded = Test-Path -LiteralPath \$acceptedArtifact -PathType Leaf',
+    'milestone = "LOAD_GATE_COMPOSITE_FINALIZED"',
+    'http_exit=\$httpExit; runtime_exit=\$observerExit; assertion_exit=\$assertionExit',
+    '\$observerExit = 124',
+    '\$observerTimedOut = \$true',
+    '\$observerStopFailed = \$true',
+    'observer_timed_out = \$observerTimedOut',
+    'observer_stop_failed = \$observerStopFailed',
     '\$recomputedPlan = Invoke-RestMethod',
     '\$successorEpochId = \[long\]\$activation\.activated\.id',
     '\$cohort = \[string\]\$activation\.activated\.cohort',
@@ -271,6 +281,262 @@ foreach ($required in @(
     if ($source -notmatch $required) {
         throw "Release runbook is missing a required safety command: $required"
     }
+}
+
+$loadGateFinalizationMatch = [regex]::Match(
+    $source,
+    '(?s)# STRATUS_LOAD_GATE_COMPOSITE_FINALIZATION_BEGIN\s*\r?\n' +
+        '(?<body>.*?)# STRATUS_LOAD_GATE_COMPOSITE_FINALIZATION_END'
+)
+if (-not $loadGateFinalizationMatch.Success) {
+    throw 'Release runbook is missing the load-gate composite finalization block.'
+}
+$loadGateFinalizationBlock = [scriptblock]::Create(
+    $loadGateFinalizationMatch.Groups['body'].Value
+)
+
+$script:LoadGateFixtureAssertionExit = 0
+$script:LoadGateFixtureCompositePassed = $true
+$script:LoadGateFixtureSuppressArtifact = $false
+$script:LoadGateFixtureMalformedArtifact = $false
+$script:LoadGateFixtureArrayArtifact = $false
+$script:LoadGateFixtureAssertionCalls = 0
+
+function Invoke-LoadGateFixtureHost {
+    [CmdletBinding()]
+    param(
+        [switch] $NoProfile,
+        [switch] $NonInteractive,
+        [string] $ExecutionPolicy,
+        [string] $File,
+        [string] $HttpArtifactPath,
+        [string] $RuntimeArtifactPath,
+        [string] $ExpectedRunId,
+        [string] $ExpectedApiImageId,
+        [string] $ExpectedRevision,
+        [string] $ExpectedReleaseDigest,
+        [string] $OutputPath
+    )
+
+    $script:LoadGateFixtureAssertionCalls += 1
+    if (-not $script:LoadGateFixtureSuppressArtifact) {
+        if ($script:LoadGateFixtureMalformedArtifact) {
+            [IO.File]::WriteAllText($OutputPath, '{"production_gate_passed":')
+        }
+        else {
+            $artifact = [pscustomobject]@{
+                schema_version = 1
+                gate = 'stratus_candidate_production_load'
+                production_gate_passed = $script:LoadGateFixtureCompositePassed
+                exit_code = $script:LoadGateFixtureAssertionExit
+                run_id = $ExpectedRunId
+                candidate = [pscustomobject]@{
+                    api_image_id = $ExpectedApiImageId
+                    revision = $ExpectedRevision
+                    release_digest = $ExpectedReleaseDigest
+                }
+            }
+            $json = $artifact | ConvertTo-Json -Depth 4 -Compress
+            if ($script:LoadGateFixtureArrayArtifact) {
+                $json = '[' + $json + ']'
+            }
+            [IO.File]::WriteAllText(
+                $OutputPath,
+                $json,
+                [Text.UTF8Encoding]::new($false)
+            )
+        }
+    }
+    $global:LASTEXITCODE = $script:LoadGateFixtureAssertionExit
+}
+
+function Invoke-LoadGateFinalizationFixture {
+    param(
+        [int] $HttpExit,
+        [int] $RuntimeExit,
+        [int] $AssertionExit,
+        [bool] $CompositePassed,
+        [switch] $MissingHttpArtifact,
+        [switch] $MissingRuntimeArtifact,
+        [switch] $SuppressCompositeArtifact,
+        [switch] $MalformedCompositeArtifact,
+        [switch] $ArrayCompositeArtifact,
+        [switch] $ObserverTimedOut,
+        [switch] $ObserverStopFailed
+    )
+
+    $fixtureRoot = Join-Path (
+        [IO.Path]::GetTempPath()
+    ) ("stratus-load-gate-finalization-" + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $fixtureRoot)
+    try {
+        $httpArtifact = Join-Path $fixtureRoot 'candidate-http.json'
+        $runtimeArtifact = Join-Path $fixtureRoot 'candidate-runtime.json'
+        $acceptedArtifact = Join-Path $fixtureRoot 'candidate-accepted.json'
+        if (-not $MissingHttpArtifact) {
+            [IO.File]::WriteAllText($httpArtifact, '{"http_passed":false}')
+        }
+        if (-not $MissingRuntimeArtifact) {
+            [IO.File]::WriteAllText($runtimeArtifact, '{"runtime_passed":false}')
+        }
+
+        $observer = [pscustomobject]@{ ExitCode = $RuntimeExit }
+        $observerExit = $RuntimeExit
+        $httpInvocationFailed = $false
+        $observerTimedOut = [bool]$ObserverTimedOut
+        $observerStopFailed = [bool]$ObserverStopFailed
+        $hostPowerShell = 'Invoke-LoadGateFixtureHost'
+        $buildContext = $fixtureRoot
+        $runId = 'a' * 32
+        $digest = 'b' * 64
+        $revision = 'c' * 40
+        $script:LoadGateFixtureAssertionExit = $AssertionExit
+        $script:LoadGateFixtureCompositePassed = $CompositePassed
+        $script:LoadGateFixtureSuppressArtifact = [bool]$SuppressCompositeArtifact
+        $script:LoadGateFixtureMalformedArtifact = [bool]$MalformedCompositeArtifact
+        $script:LoadGateFixtureArrayArtifact = [bool]$ArrayCompositeArtifact
+        $script:LoadGateFixtureAssertionCalls = 0
+        $failure = $null
+        $loadGateOutcome = $null
+        try {
+            $null = . $loadGateFinalizationBlock
+        }
+        catch {
+            $failure = $_.Exception.Message
+        }
+
+        $compositeArtifact = $null
+        if (Test-Path -LiteralPath $acceptedArtifact -PathType Leaf) {
+            try {
+                $compositeArtifact = Get-Content -LiteralPath $acceptedArtifact -Raw |
+                    ConvertFrom-Json -ErrorAction Stop
+            }
+            catch {
+                $compositeArtifact = $null
+            }
+        }
+        return [pscustomobject]@{
+            failure = $failure
+            assertion_calls = $script:LoadGateFixtureAssertionCalls
+            composite_artifact_exists = Test-Path -LiteralPath $acceptedArtifact -PathType Leaf
+            composite_artifact = $compositeArtifact
+            outcome = $loadGateOutcome
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+$rejectedLoadGate = Invoke-LoadGateFinalizationFixture `
+    -HttpExit 1 -RuntimeExit 1 -AssertionExit 1 -CompositePassed $false
+if (
+    $rejectedLoadGate.assertion_calls -ne 1 -or
+    -not $rejectedLoadGate.composite_artifact_exists -or
+    [bool]$rejectedLoadGate.composite_artifact.production_gate_passed -or
+    $rejectedLoadGate.failure -notlike '*http_exit=1; runtime_exit=1; assertion_exit=1*' -or
+    $rejectedLoadGate.outcome.http_exit -ne 1 -or
+    $rejectedLoadGate.outcome.runtime_exit -ne 1 -or
+    $rejectedLoadGate.outcome.assertion_exit -ne 1 -or
+    -not $rejectedLoadGate.outcome.raw_artifacts_complete -or
+    -not $rejectedLoadGate.outcome.composite_attempted -or
+    -not $rejectedLoadGate.outcome.composite_artifact_recorded -or
+    -not $rejectedLoadGate.outcome.composite_contract_valid -or
+    $rejectedLoadGate.outcome.production_gate_passed
+) {
+    throw (
+        'A failed load subgate did not retain its exits and durable rejected ' +
+        'composite artifact.'
+    )
+}
+
+$independentlyFailedLoadGate = Invoke-LoadGateFinalizationFixture `
+    -HttpExit 1 -RuntimeExit 0 -AssertionExit 0 -CompositePassed $true
+if (
+    $independentlyFailedLoadGate.assertion_calls -ne 1 -or
+    -not $independentlyFailedLoadGate.composite_artifact_exists -or
+    $independentlyFailedLoadGate.failure -notlike '*http_exit=1; runtime_exit=0; assertion_exit=0*'
+) {
+    throw 'A non-zero subgate exit was not independently preserved fail closed.'
+}
+
+$timedOutObserverLoadGate = Invoke-LoadGateFinalizationFixture `
+    -HttpExit 0 -RuntimeExit 124 -AssertionExit 1 -CompositePassed $false `
+    -ObserverTimedOut
+if (
+    $timedOutObserverLoadGate.assertion_calls -ne 1 -or
+    -not $timedOutObserverLoadGate.composite_artifact_exists -or
+    $timedOutObserverLoadGate.failure -notlike
+        '*http_exit=0; runtime_exit=124; assertion_exit=1*' -or
+    -not $timedOutObserverLoadGate.outcome.observer_timed_out -or
+    $timedOutObserverLoadGate.outcome.observer_stop_failed
+) {
+    throw 'A timed-out observer bypassed durable composite finalization.'
+}
+
+$missingRawLoadGate = Invoke-LoadGateFinalizationFixture `
+    -HttpExit 1 -RuntimeExit 2 -AssertionExit 0 -CompositePassed $true `
+    -MissingRuntimeArtifact
+if (
+    $missingRawLoadGate.assertion_calls -ne 0 -or
+    $missingRawLoadGate.composite_artifact_exists -or
+    $missingRawLoadGate.failure -notlike '*raw evidence is incomplete*' -or
+    $missingRawLoadGate.outcome.raw_artifacts_complete -or
+    $missingRawLoadGate.outcome.composite_attempted
+) {
+    throw 'Incomplete raw evidence did not remain fail closed without assertion.'
+}
+
+$missingCompositeLoadGate = Invoke-LoadGateFinalizationFixture `
+    -HttpExit 0 -RuntimeExit 0 -AssertionExit 2 -CompositePassed $false `
+    -SuppressCompositeArtifact
+if (
+    $missingCompositeLoadGate.assertion_calls -ne 1 -or
+    $missingCompositeLoadGate.composite_artifact_exists -or
+    $missingCompositeLoadGate.failure -notlike '*did not record a valid result*'
+) {
+    throw 'A missing composite result artifact did not remain fail closed.'
+}
+
+$malformedCompositeLoadGate = Invoke-LoadGateFinalizationFixture `
+    -HttpExit 0 -RuntimeExit 0 -AssertionExit 2 -CompositePassed $false `
+    -MalformedCompositeArtifact
+if (
+    $malformedCompositeLoadGate.assertion_calls -ne 1 -or
+    -not $malformedCompositeLoadGate.composite_artifact_exists -or
+    $malformedCompositeLoadGate.failure -notlike '*did not record a valid result*' -or
+    -not $malformedCompositeLoadGate.outcome.composite_artifact_recorded -or
+    $malformedCompositeLoadGate.outcome.composite_contract_valid -or
+    [string]::IsNullOrWhiteSpace(
+        [string]$malformedCompositeLoadGate.outcome.composite_sha256
+    )
+) {
+    throw 'A malformed composite result did not retain its fail-closed milestone.'
+}
+
+$arrayCompositeLoadGate = Invoke-LoadGateFinalizationFixture `
+    -HttpExit 0 -RuntimeExit 0 -AssertionExit 0 -CompositePassed $true `
+    -ArrayCompositeArtifact
+if (
+    $arrayCompositeLoadGate.assertion_calls -ne 1 -or
+    -not $arrayCompositeLoadGate.composite_artifact_exists -or
+    $arrayCompositeLoadGate.failure -notlike '*did not record a valid result*' -or
+    -not $arrayCompositeLoadGate.outcome.composite_artifact_recorded -or
+    $arrayCompositeLoadGate.outcome.composite_contract_valid -or
+    $arrayCompositeLoadGate.outcome.production_gate_passed
+) {
+    throw 'A singleton-array composite root was not rejected consistently.'
+}
+
+$acceptedLoadGate = Invoke-LoadGateFinalizationFixture `
+    -HttpExit 0 -RuntimeExit 0 -AssertionExit 0 -CompositePassed $true
+if (
+    $null -ne $acceptedLoadGate.failure -or
+    $acceptedLoadGate.assertion_calls -ne 1 -or
+    -not $acceptedLoadGate.composite_artifact_exists -or
+    -not $acceptedLoadGate.outcome.production_gate_passed
+) {
+    throw 'A fully accepted load gate did not complete composite finalization.'
 }
 
 $externalProofValidatorsMatch = [regex]::Match(
@@ -1555,6 +1821,7 @@ if (
     dependency_safe_migration_staging = $true
     portable_background_host = $true
     runtime_preflight_marker_required = $true
+    failed_load_gate_composite_recorded = $true
     continuity_plan_recomputed = $true
     rollback_container_resolved = $true
     safety_control_required = $true

@@ -74,11 +74,6 @@ $validation = [pscustomobject]@{
         live_rows = 0
     }
 }
-if ($ValidateOnly) {
-    $validation | ConvertTo-Json -Depth 6 -Compress
-    return
-}
-
 function Convert-Percent {
     param([Parameter(Mandatory = $true)][string] $Value)
 
@@ -98,6 +93,92 @@ function Get-Maximum {
         return $null
     }
     return ($Rows | Measure-Object -Property $Property -Maximum).Maximum
+}
+
+function Test-DatabasePreflightSample {
+    param(
+        [Parameter(Mandatory = $true)][object] $Sample,
+        [Parameter(Mandatory = $true)][string] $ExpectedSchemaHead,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 100)][int] $MaxApiSessions
+    )
+
+    return (
+        [string]$Sample.schema_head -ceq $ExpectedSchemaHead -and
+        $Sample.controls_ok -is [bool] -and
+        [bool]$Sample.controls_ok -and
+        [int]$Sample.api_sessions -le $MaxApiSessions -and
+        [int]$Sample.api_idle_in_tx -eq 0 -and
+        [int]$Sample.global_idle_in_tx -eq 0 -and
+        [int]$Sample.lock_waiters -eq 0 -and
+        [int]$Sample.pending_commands -eq 0 -and
+        [int]$Sample.live_orders -eq 0 -and
+        [int]$Sample.live_positions -eq 0 -and
+        [int]$Sample.live_intents -eq 0 -and
+        [int]$Sample.live_fill_legs -eq 0 -and
+        [int]$Sample.live_enrollments -eq 0 -and
+        [int]$Sample.runtime_writer_sessions -eq 0
+    )
+}
+
+function Test-ResourcePreflightSample {
+    param(
+        [Parameter(Mandatory = $true)][object] $Sample,
+        [Parameter(Mandatory = $true)][int64] $ExpectedApiMemoryLimitBytes
+    )
+
+    return (
+        [double]$Sample.api_memory_percent -lt 90 -and
+        [int64]$Sample.api_memory_limit_bytes -eq $ExpectedApiMemoryLimitBytes -and
+        [int]$Sample.api_operator_key_entry_count -eq 1 -and
+        [double]$Sample.postgres_cpu_percent -lt 200
+    )
+}
+
+function Test-TopologyPreflightSample {
+    param([Parameter(Mandatory = $true)][object] $Sample)
+
+    return ($Sample.safe -is [bool] -and [bool]$Sample.safe)
+}
+
+function Get-TimestampedRollingMaximum {
+    param(
+        [Parameter(Mandatory = $true)][object[]] $Rows,
+        [Parameter(Mandatory = $true)][string] $TimestampProperty,
+        [Parameter(Mandatory = $true)][string] $ValueProperty,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 3600)][int] $WindowSeconds
+    )
+
+    if ($Rows.Count -eq 0) {
+        return 0.0
+    }
+    $times = @(
+        $Rows | ForEach-Object {
+            [DateTimeOffset]::Parse(
+                [string]$_.$TimestampProperty,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            )
+        }
+    )
+    $maximum = 0.0
+    for ($endIndex = 0; $endIndex -lt $Rows.Count; $endIndex += 1) {
+        if (($times[$endIndex] - $times[0]).TotalSeconds -lt $WindowSeconds) {
+            continue
+        }
+        $windowStartedAt = $times[$endIndex].AddSeconds(-$WindowSeconds)
+        $values = @(
+            for ($index = 0; $index -le $endIndex; $index += 1) {
+                if ($times[$index] -ge $windowStartedAt) {
+                    [double]$Rows[$index].$ValueProperty
+                }
+            }
+        )
+        if ($values.Count -ne 0) {
+            $average = [double](($values | Measure-Object -Average).Average)
+            $maximum = [Math]::Max($maximum, $average)
+        }
+    }
+    return $maximum
 }
 
 function Invoke-DatabaseSnapshot {
@@ -377,6 +458,204 @@ function Get-RunningProjectTopology {
     }
 }
 
+function Get-NextAnchoredSampleAt {
+    param(
+        [Parameter(Mandatory = $true)][DateTimeOffset] $PreviousAt,
+        [Parameter(Mandatory = $true)][DateTimeOffset] $Now,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 3600)][int] $IntervalSeconds
+    )
+
+    $nextAt = $PreviousAt.AddSeconds($IntervalSeconds)
+    while ($nextAt -le $Now) {
+        $nextAt = $nextAt.AddSeconds($IntervalSeconds)
+    }
+    return $nextAt
+}
+
+function Start-ObserverSampler {
+    param(
+        [Parameter(Mandatory = $true)][string] $Name,
+        [Parameter(Mandatory = $true)][string[]] $FunctionNames,
+        [Parameter(Mandatory = $true)][scriptblock] $WorkerScript,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Arguments
+    )
+
+    $initialSessionState = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    foreach ($functionName in $FunctionNames) {
+        $command = Get-Command -Name $functionName -CommandType Function -ErrorAction Stop
+        $entry = [Management.Automation.Runspaces.SessionStateFunctionEntry]::new(
+            $functionName,
+            $command.Definition
+        )
+        $initialSessionState.Commands.Add($entry)
+    }
+
+    $runspace = [Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace(
+        $initialSessionState
+    )
+    $pipeline = $null
+    try {
+        $runspace.Open()
+        $pipeline = [Management.Automation.PowerShell]::Create()
+        $pipeline.Runspace = $runspace
+        [void]$pipeline.AddScript($WorkerScript.ToString())
+        foreach ($argument in $Arguments) {
+            [void]$pipeline.AddArgument($argument)
+        }
+        $asyncResult = $pipeline.BeginInvoke()
+        return [pscustomobject]@{
+            name = $Name
+            pipeline = $pipeline
+            runspace = $runspace
+            async_result = $asyncResult
+            disposed = $false
+        }
+    }
+    catch {
+        if ($null -ne $pipeline) {
+            $pipeline.Dispose()
+        }
+        $runspace.Dispose()
+        throw
+    }
+}
+
+function Stop-ObserverSamplerSafely {
+    param([AllowNull()][object] $Sampler)
+
+    if ($null -eq $Sampler) {
+        return
+    }
+    try {
+        if ([bool]$Sampler.disposed) {
+            return
+        }
+        $safeToDispose = [bool]$Sampler.async_result.IsCompleted
+        if (-not $safeToDispose) {
+            try {
+                $stopResult = $Sampler.pipeline.BeginStop($null, $null)
+                if ($stopResult.AsyncWaitHandle.WaitOne(5000)) {
+                    try {
+                        $Sampler.pipeline.EndStop($stopResult)
+                    }
+                    catch {
+                        # Cleanup must preserve the original observer failure.
+                    }
+                    $safeToDispose = $true
+                }
+            }
+            catch {
+                # The top-level trap owns the original fail-closed evidence.
+            }
+        }
+        if ($safeToDispose) {
+            try {
+                $Sampler.pipeline.Dispose()
+            }
+            catch {
+                # Cleanup must never replace the original observer failure.
+            }
+            try {
+                $Sampler.runspace.Dispose()
+            }
+            catch {
+                # Cleanup must never replace the original observer failure.
+            }
+            $Sampler.disposed = $true
+        }
+    }
+    catch {
+        # Process exit remains the final bound if a runspace cannot be stopped.
+    }
+}
+
+function Complete-ObserverSampler {
+    param(
+        [Parameter(Mandatory = $true)][object] $Sampler,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [Collections.Generic.List[object]] $Errors
+    )
+
+    if (-not $Sampler.async_result.AsyncWaitHandle.WaitOne(30000)) {
+        $Errors.Add([pscustomobject]@{
+            at = [DateTimeOffset]::UtcNow.ToString('O')
+            source = [string]$Sampler.name
+            error = 'Sampler did not stop within its bounded completion window.'
+        })
+        Stop-ObserverSamplerSafely -Sampler $Sampler
+        return
+    }
+    try {
+        [void]$Sampler.pipeline.EndInvoke($Sampler.async_result)
+    }
+    catch {
+        $Errors.Add([pscustomobject]@{
+            at = [DateTimeOffset]::UtcNow.ToString('O')
+            source = [string]$Sampler.name
+            error = $_.Exception.GetBaseException().Message
+        })
+    }
+    foreach ($streamError in $Sampler.pipeline.Streams.Error) {
+        $Errors.Add([pscustomobject]@{
+            at = [DateTimeOffset]::UtcNow.ToString('O')
+            source = [string]$Sampler.name
+            error = $streamError.Exception.GetBaseException().Message
+        })
+    }
+    Stop-ObserverSamplerSafely -Sampler $Sampler
+}
+
+function Receive-ObserverSamplerMessages {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Collections.Concurrent.ConcurrentQueue[object]] $Queue,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [Collections.Generic.List[object]] $ResourceSamples,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [Collections.Generic.List[object]] $TopologySamples,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [Collections.Generic.List[object]] $Errors
+    )
+
+    $message = $null
+    while ($Queue.TryDequeue([ref]$message)) {
+        if ([string]$message.kind -eq 'sample') {
+            if ([string]$message.source -eq 'resource') {
+                $ResourceSamples.Add($message.value)
+            }
+            elseif ([string]$message.source -eq 'topology') {
+                $TopologySamples.Add($message.value)
+            }
+            else {
+                $Errors.Add([pscustomobject]@{
+                    at = [DateTimeOffset]::UtcNow.ToString('O')
+                    source = 'observer'
+                    error = 'Sampler returned an unknown sample source.'
+                })
+            }
+        }
+        elseif ([string]$message.kind -eq 'error') {
+            $Errors.Add([pscustomobject]@{
+                at = [string]$message.at
+                source = [string]$message.source
+                error = [string]$message.error
+            })
+        }
+        else {
+            $Errors.Add([pscustomobject]@{
+                at = [DateTimeOffset]::UtcNow.ToString('O')
+                source = 'observer'
+                error = 'Sampler returned a malformed message.'
+            })
+        }
+        $message = $null
+    }
+}
+
 function Write-ObserverArtifact {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -392,6 +671,11 @@ function Write-ObserverArtifact {
         [Text.UTF8Encoding]::new($false)
     )
     Move-Item -LiteralPath $temporaryOutput -Destination $Path -Force
+}
+
+if ($ValidateOnly) {
+    $validation | ConvertTo-Json -Depth 6 -Compress
+    return
 }
 
 $startedAt = [DateTimeOffset]::UtcNow
@@ -569,11 +853,172 @@ if (-not [bool]$baselineTopology.safe) {
     throw 'Runtime gate requires the exact API/PostgreSQL project topology only.'
 }
 $deadline = $observationStartedAt.AddSeconds($DurationSeconds)
-$nextResourceAt = $observationStartedAt
+$samplerMessages = [Collections.Concurrent.ConcurrentQueue[object]]::new()
+$resourceWorkerScript = {
+    param(
+        [object] $Queue,
+        [DateTimeOffset] $ObservationStartedAt,
+        [DateTimeOffset] $Deadline,
+        [int] $IntervalSeconds,
+        [string] $ApiContainer,
+        [string] $PostgresContainer
+    )
+
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+    $nextSampleAt = $ObservationStartedAt
+    while ([DateTimeOffset]::UtcNow -lt $Deadline) {
+        $now = [DateTimeOffset]::UtcNow
+        if ($now -lt $nextSampleAt) {
+            $remainingMilliseconds = [Math]::Min(
+                ($nextSampleAt - $now).TotalMilliseconds,
+                ($Deadline - $now).TotalMilliseconds
+            )
+            if ($remainingMilliseconds -gt 0) {
+                Start-Sleep -Milliseconds ([Math]::Max(
+                    1,
+                    [int][Math]::Ceiling($remainingMilliseconds)
+                ))
+            }
+            continue
+        }
+        try {
+            $sample = Get-ResourceSnapshot `
+                -ApiContainer $ApiContainer `
+                -PostgresContainer $PostgresContainer
+            $Queue.Enqueue([pscustomobject]@{
+                kind = 'sample'
+                source = 'resource'
+                value = $sample
+            })
+        }
+        catch {
+            $Queue.Enqueue([pscustomobject]@{
+                kind = 'error'
+                at = [DateTimeOffset]::UtcNow.ToString('O')
+                source = 'docker'
+                error = $_.Exception.GetBaseException().Message
+            })
+        }
+        $nextSampleAt = Get-NextAnchoredSampleAt `
+            -PreviousAt $nextSampleAt `
+            -Now ([DateTimeOffset]::UtcNow) `
+            -IntervalSeconds $IntervalSeconds
+    }
+}
+$topologyWorkerScript = {
+    param(
+        [object] $Queue,
+        [DateTimeOffset] $ObservationStartedAt,
+        [DateTimeOffset] $Deadline,
+        [int] $IntervalSeconds,
+        [string] $ProjectName,
+        [string] $ApiContainerId,
+        [string] $PostgresContainerId,
+        [string[]] $AllowedNetworks,
+        [object[]] $ComposeArguments
+    )
+
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+    $script:StratusReleaseComposeArguments = @($ComposeArguments)
+    $nextSampleAt = $ObservationStartedAt
+    while ([DateTimeOffset]::UtcNow -lt $Deadline) {
+        $now = [DateTimeOffset]::UtcNow
+        if ($now -lt $nextSampleAt) {
+            $remainingMilliseconds = [Math]::Min(
+                ($nextSampleAt - $now).TotalMilliseconds,
+                ($Deadline - $now).TotalMilliseconds
+            )
+            if ($remainingMilliseconds -gt 0) {
+                Start-Sleep -Milliseconds ([Math]::Max(
+                    1,
+                    [int][Math]::Ceiling($remainingMilliseconds)
+                ))
+            }
+            continue
+        }
+        try {
+            $sample = Get-RunningProjectTopology `
+                -ProjectName $ProjectName `
+                -ApiContainerId $ApiContainerId `
+                -PostgresContainerId $PostgresContainerId `
+                -AllowedNetworks $AllowedNetworks
+            $Queue.Enqueue([pscustomobject]@{
+                kind = 'sample'
+                source = 'topology'
+                value = $sample
+            })
+        }
+        catch {
+            $Queue.Enqueue([pscustomobject]@{
+                kind = 'error'
+                at = [DateTimeOffset]::UtcNow.ToString('O')
+                source = 'topology'
+                error = $_.Exception.GetBaseException().Message
+            })
+        }
+        $nextSampleAt = Get-NextAnchoredSampleAt `
+            -PreviousAt $nextSampleAt `
+            -Now ([DateTimeOffset]::UtcNow) `
+            -IntervalSeconds $IntervalSeconds
+    }
+}
+$resourceSampler = $null
+$topologySampler = $null
+try {
+$resourceSampler = Start-ObserverSampler `
+    -Name 'resource' `
+    -FunctionNames @(
+        'Convert-Percent',
+        'Get-ResourceSnapshot',
+        'Get-NextAnchoredSampleAt'
+    ) `
+    -WorkerScript $resourceWorkerScript `
+    -Arguments @(
+        $samplerMessages,
+        $observationStartedAt,
+        $deadline,
+        $ResourceIntervalSeconds,
+        $apiName,
+        $postgresName
+    )
+$topologySampler = Start-ObserverSampler `
+    -Name 'topology' `
+    -FunctionNames @(
+        'Get-RunningProjectTopology',
+        'Get-NextAnchoredSampleAt'
+    ) `
+    -WorkerScript $topologyWorkerScript `
+    -Arguments @(
+        $samplerMessages,
+        $observationStartedAt,
+        $deadline,
+        $ResourceIntervalSeconds,
+        $projectName,
+        [string]$baselineApi.Id,
+        [string]$baselinePostgres.Id,
+        $allowedNetworkNames,
+        $script:StratusReleaseComposeArguments
+    )
+$nextDatabaseAt = $observationStartedAt
 $readyWritten = $false
 
 while ([DateTimeOffset]::UtcNow -lt $deadline) {
-    $sampleStarted = [DateTimeOffset]::UtcNow
+    $now = [DateTimeOffset]::UtcNow
+    if ($now -lt $nextDatabaseAt) {
+        $remainingMilliseconds = [Math]::Min(
+            ($nextDatabaseAt - $now).TotalMilliseconds,
+            ($deadline - $now).TotalMilliseconds
+        )
+        if ($remainingMilliseconds -gt 0) {
+            Start-Sleep -Milliseconds ([Math]::Max(
+                1,
+                [int][Math]::Ceiling($remainingMilliseconds)
+            ))
+        }
+        continue
+    }
     try {
         $databaseSamples.Add(
             (Invoke-DatabaseSnapshot -PostgresContainer $postgresName `
@@ -587,66 +1032,60 @@ while ([DateTimeOffset]::UtcNow -lt $deadline) {
             error = $_.Exception.GetBaseException().Message
         })
     }
+    $nextDatabaseAt = Get-NextAnchoredSampleAt `
+        -PreviousAt $nextDatabaseAt `
+        -Now ([DateTimeOffset]::UtcNow) `
+        -IntervalSeconds $DatabaseIntervalSeconds
+    Receive-ObserverSamplerMessages `
+        -Queue $samplerMessages `
+        -ResourceSamples $resourceSamples `
+        -TopologySamples $topologySamples `
+        -Errors $sampleErrors
 
-    if ([DateTimeOffset]::UtcNow -ge $nextResourceAt) {
-        try {
-            $resourceSamples.Add(
-                (Get-ResourceSnapshot -ApiContainer $apiName -PostgresContainer $postgresName)
-            )
-        }
-        catch {
-            $sampleErrors.Add([pscustomobject]@{
-                at = [DateTimeOffset]::UtcNow.ToString('O')
-                source = 'docker'
-                error = $_.Exception.GetBaseException().Message
-            })
-        }
-        try {
-            $topologySamples.Add(
-                (Get-RunningProjectTopology -ProjectName $projectName `
-                    -ApiContainerId ([string]$baselineApi.Id) `
-                    -PostgresContainerId ([string]$baselinePostgres.Id) `
-                    -AllowedNetworks $allowedNetworkNames)
-            )
-        }
-        catch {
-            $sampleErrors.Add([pscustomobject]@{
-                at = [DateTimeOffset]::UtcNow.ToString('O')
-                source = 'topology'
-                error = $_.Exception.GetBaseException().Message
-            })
-        }
-        $nextResourceAt = [DateTimeOffset]::UtcNow.AddSeconds($ResourceIntervalSeconds)
+    if (-not $readyWritten -and $sampleErrors.Count -ne 0) {
+        throw 'Runtime observer sampler failed before the safe preflight marker.'
     }
-
+    if (
+        -not $readyWritten -and
+        (
+            [bool]$resourceSampler.async_result.IsCompleted -or
+            [bool]$topologySampler.async_result.IsCompleted
+        )
+    ) {
+        throw 'Runtime observer sampler exited before the safe preflight marker.'
+    }
     if (
         -not $readyWritten -and
         $databaseSamples.Count -gt 0 -and
         $resourceSamples.Count -gt 0 -and
-        $topologySamples.Count -gt 0
+        $topologySamples.Count -gt 1
     ) {
         $firstDatabaseSample = $databaseSamples[0]
         $firstResourceSample = $resourceSamples[0]
+        $unsafeDatabaseSamples = @(
+            $databaseSamples | Where-Object {
+                -not (Test-DatabasePreflightSample `
+                    -Sample $_ `
+                    -ExpectedSchemaHead $ExpectedSchemaHead `
+                    -MaxApiSessions $MaxApiSessions)
+            }
+        )
+        $unsafeResourceSamples = @(
+            $resourceSamples | Where-Object {
+                -not (Test-ResourcePreflightSample `
+                    -Sample $_ `
+                    -ExpectedApiMemoryLimitBytes $ExpectedApiMemoryLimitBytes)
+            }
+        )
+        $unsafeTopologySamples = @(
+            $topologySamples | Where-Object {
+                -not (Test-TopologyPreflightSample -Sample $_)
+            }
+        )
         if (
-            [string]$firstDatabaseSample.schema_head -ne $ExpectedSchemaHead -or
-            -not [bool]$firstDatabaseSample.controls_ok -or
-            [int]$firstDatabaseSample.api_sessions -gt $MaxApiSessions -or
-            [int]$firstDatabaseSample.api_idle_in_tx -ne 0 -or
-            [int]$firstDatabaseSample.global_idle_in_tx -ne 0 -or
-            [int]$firstDatabaseSample.lock_waiters -ne 0 -or
-            [int]$firstDatabaseSample.pending_commands -ne 0 -or
-            [int]$firstDatabaseSample.live_orders -ne 0 -or
-            [int]$firstDatabaseSample.live_positions -ne 0 -or
-            [int]$firstDatabaseSample.live_intents -ne 0 -or
-            [int]$firstDatabaseSample.live_fill_legs -ne 0 -or
-            [int]$firstDatabaseSample.live_enrollments -ne 0 -or
-            [int]$firstDatabaseSample.runtime_writer_sessions -ne 0 -or
-            -not [bool]$topologySamples[0].safe -or
-            [double]$firstResourceSample.api_memory_percent -ge 90 -or
-            [int64]$firstResourceSample.api_memory_limit_bytes -ne
-                $ExpectedApiMemoryLimitBytes -or
-            [int]$firstResourceSample.api_operator_key_entry_count -ne 1 -or
-            [double]$firstResourceSample.postgres_cpu_percent -ge 200
+            $unsafeDatabaseSamples.Count -ne 0 -or
+            $unsafeResourceSamples.Count -ne 0 -or
+            $unsafeTopologySamples.Count -ne 0
         ) {
             throw 'Runtime observer preflight is not fail-closed, writer-free, and contention-free.'
         }
@@ -657,6 +1096,10 @@ while ([DateTimeOffset]::UtcNow -lt $deadline) {
             ready_at = [DateTimeOffset]::UtcNow.ToString('O')
             first_database_sample_at = [string]$firstDatabaseSample.at
             first_resource_sample_at = [string]$resourceSamples[0].at
+            first_dynamic_topology_sample_at = [string]$topologySamples[1].at
+            preflight_database_sample_count = $databaseSamples.Count
+            preflight_resource_sample_count = $resourceSamples.Count
+            preflight_topology_sample_count = $topologySamples.Count
             api_image_id = $ExpectedApiImageId
             revision = $ExpectedRevision
             release_digest = $ExpectedReleaseDigest
@@ -677,13 +1120,19 @@ while ([DateTimeOffset]::UtcNow -lt $deadline) {
         Write-ObserverArtifact -Path $absoluteReady -Artifact $readyMarker
         $readyWritten = $true
     }
+}
 
-    $remaining = $DatabaseIntervalSeconds - (
-        [DateTimeOffset]::UtcNow - $sampleStarted
-    ).TotalSeconds
-    if ($remaining -gt 0 -and [DateTimeOffset]::UtcNow -lt $deadline) {
-        Start-Sleep -Milliseconds ([int]($remaining * 1000))
-    }
+Complete-ObserverSampler -Sampler $resourceSampler -Errors $sampleErrors
+Complete-ObserverSampler -Sampler $topologySampler -Errors $sampleErrors
+Receive-ObserverSamplerMessages `
+    -Queue $samplerMessages `
+    -ResourceSamples $resourceSamples `
+    -TopologySamples $topologySamples `
+    -Errors $sampleErrors
+}
+finally {
+    Stop-ObserverSamplerSafely -Sampler $resourceSampler
+    Stop-ObserverSamplerSafely -Sampler $topologySampler
 }
 
 Start-Sleep -Seconds $DrainSeconds
@@ -707,14 +1156,11 @@ for ($index = 1; $index -lt $pgCpu.Count; $index += 1) {
         break
     }
 }
-$rolling30Max = 0.0
-if ($pgCpu.Count -ge 7) {
-    for ($index = 6; $index -lt $pgCpu.Count; $index += 1) {
-        $window = @($pgCpu[($index - 6)..$index])
-        $average = [double](($window | Measure-Object -Average).Average)
-        $rolling30Max = [Math]::Max($rolling30Max, $average)
-    }
-}
+$rolling30Max = Get-TimestampedRollingMaximum `
+    -Rows $resourceRows `
+    -TimestampProperty 'at' `
+    -ValueProperty 'postgres_cpu_percent' `
+    -WindowSeconds 30
 
 $identityChanged = (
     $finalApi.Id -ne $baselineApi.Id -or

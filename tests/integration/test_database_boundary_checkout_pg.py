@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -16,7 +18,11 @@ from stratus.config import (
     runtime_database_role_name,
     safety_database_role_name,
 )
-from stratus.db.session import RuntimeDatabaseBoundaryError, create_engine
+from stratus.db.session import (
+    RuntimeDatabaseBoundaryError,
+    create_engine,
+    create_read_session_factory,
+)
 from stratus.safety_api import (
     SafetyDatabaseBoundaryError,
     create_safety_engine,
@@ -35,6 +41,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 SessionFactory = async_sessionmaker[AsyncSession]
+
+
 @pytest.fixture
 async def checkout_boundary_engines(
     db_sessions: SessionFactory,
@@ -148,6 +156,82 @@ async def test_runtime_warm_pool_rejects_disabled_trigger_on_next_checkout(
     async with boundary.runtime_engine.connect() as connection:
         replacement_pid = await connection.scalar(text("SELECT pg_backend_pid()"))
     assert replacement_pid != boundary.runtime_pid
+
+
+async def test_runtime_checkout_boundary_is_transaction_neutral(
+    db_sessions: SessionFactory,
+    checkout_boundary_engines: object,
+) -> None:
+    boundary = checkout_boundary_engines
+    application_name = "stratus-checkout-autocommit-test"
+    settings = boundary.runtime_settings.model_copy(
+        update={"stratus_database_application_name": application_name}
+    )
+    checkout_entered = threading.Event()
+    checkout_release = threading.Event()
+    thread_errors: list[BaseException] = []
+    warm_backend_pid: list[int] = []
+
+    def hold_after_boundary(
+        _dbapi_connection: object,
+        _connection_record: object,
+        _connection_proxy: object,
+    ) -> None:
+        checkout_entered.set()
+        if not checkout_release.wait(timeout=10):
+            raise TimeoutError("test checkout hold was not released")
+
+    async def borrow_read_session() -> None:
+        engine = create_engine(settings, pool_size=1, max_overflow=0, read_only=True)
+        read_sessions = create_read_session_factory(engine, max_concurrent=1)
+        try:
+            async with read_sessions() as session:
+                backend_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+            assert isinstance(backend_pid, int)
+            warm_backend_pid.append(backend_pid)
+
+            # Attach after the first borrow/check-in so the hold observes the
+            # same warm connection immediately after its next boundary proof.
+            event.listen(engine.sync_engine, "checkout", hold_after_boundary)
+            async with read_sessions() as session:
+                assert await session.scalar(text("SELECT pg_backend_pid()")) == backend_pid
+        finally:
+            await engine.dispose()
+
+    def run_borrower() -> None:
+        try:
+            asyncio.run(borrow_read_session())
+        except BaseException as exc:  # pragma: no cover - re-raised in test thread
+            thread_errors.append(exc)
+
+    borrower = threading.Thread(target=run_borrower, daemon=True)
+    borrower.start()
+    try:
+        assert await asyncio.to_thread(checkout_entered.wait, 10)
+        async with db_sessions() as observer:
+            rows = (
+                await observer.execute(
+                    text(
+                        "SELECT pid, state FROM pg_stat_activity "
+                        "WHERE datname=current_database() "
+                        "AND usename=:runtime_role "
+                        "AND application_name=:application_name"
+                    ),
+                    {
+                        "runtime_role": boundary.runtime_role,
+                        "application_name": application_name,
+                    },
+                )
+            ).all()
+        assert warm_backend_pid
+        assert rows == [(warm_backend_pid[0], "idle")]
+    finally:
+        checkout_release.set()
+        await asyncio.to_thread(borrower.join, 10)
+
+    assert not borrower.is_alive()
+    if thread_errors:
+        raise thread_errors[0]
 
 
 async def test_runtime_http_sanitizes_warm_checkout_boundary_failure(

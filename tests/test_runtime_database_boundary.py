@@ -29,19 +29,27 @@ class _Cursor:
         row: tuple[object, ...] | None,
         *,
         execute_error: Exception | None = None,
+        fetch_error: Exception | None = None,
     ) -> None:
         self.row = row
         self.execute_error = execute_error
+        self.fetch_error = fetch_error
         self.statement: str | None = None
         self.closed = False
+        self.connection: _Connection | None = None
+        self.autocommit_at_execute: bool | None = None
 
     def execute(self, statement: str) -> object:
         self.statement = statement
+        assert self.connection is not None
+        self.autocommit_at_execute = self.connection.autocommit
         if self.execute_error is not None:
             raise self.execute_error
         return None
 
     def fetchone(self) -> tuple[object, ...] | None:
+        if self.fetch_error is not None:
+            raise self.fetch_error
         return self.row
 
     def close(self) -> None:
@@ -49,8 +57,20 @@ class _Cursor:
 
 
 class _Connection:
-    def __init__(self, cursor: _Cursor) -> None:
+    def __init__(self, cursor: _Cursor, *, autocommit: bool = False) -> None:
         self._cursor = cursor
+        self._autocommit = autocommit
+        self.autocommit_history: list[bool] = []
+        cursor.connection = self
+
+    @property
+    def autocommit(self) -> bool:
+        return self._autocommit
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None:
+        self.autocommit_history.append(value)
+        self._autocommit = value
 
     def cursor(self) -> _Cursor:
         return self._cursor
@@ -143,28 +163,63 @@ def test_test_database_environment_cannot_bypass_runtime_role(
 
 def test_physical_connection_boundary_is_fail_closed() -> None:
     accepted = _Cursor((True,))
-    _assert_runtime_connection(_Connection(accepted), object())
+    accepted_connection = _Connection(accepted)
+    _assert_runtime_connection(accepted_connection, object())
     assert accepted.statement == "SELECT public.assert_stratus_runtime_boundary(true)"
+    assert accepted.autocommit_at_execute is True
     assert accepted.closed is True
+    assert accepted_connection.autocommit is False
+    assert accepted_connection.autocommit_history == [True, False]
 
     rejected = _Cursor((False,))
+    rejected_connection = _Connection(rejected)
     with pytest.raises(RuntimeDatabaseBoundaryError, match="rejected"):
-        _assert_runtime_connection(_Connection(rejected), object())
+        _assert_runtime_connection(rejected_connection, object())
+    assert rejected.autocommit_at_execute is True
     assert rejected.closed is True
+    assert rejected_connection.autocommit is False
+    assert rejected_connection.autocommit_history == [True, False]
+
+
+@pytest.mark.parametrize(
+    ("cursor", "expected_error"),
+    [
+        (_Cursor(None), RuntimeDatabaseBoundaryError),
+        (_Cursor((True, False)), RuntimeDatabaseBoundaryError),
+        (_Cursor(None, execute_error=RuntimeError("execute failed")), RuntimeError),
+        (_Cursor(None, fetch_error=RuntimeError("fetch failed")), RuntimeError),
+    ],
+)
+def test_runtime_boundary_restores_autocommit_on_every_failure(
+    cursor: _Cursor,
+    expected_error: type[BaseException],
+) -> None:
+    connection = _Connection(cursor, autocommit=False)
+
+    with pytest.raises(expected_error):
+        _assert_runtime_connection(connection, object())
+
+    assert cursor.closed is True
+    assert connection.autocommit is False
+    assert connection.autocommit_history == [True, False]
 
 
 def test_every_runtime_checkout_rechecks_and_invalidates_drift() -> None:
     accepted = _Cursor((True,))
     accepted_record = _ConnectionRecord()
-    _assert_runtime_checkout(_Connection(accepted), accepted_record, object())
+    accepted_connection = _Connection(accepted)
+    _assert_runtime_checkout(accepted_connection, accepted_record, object())
     assert accepted_record.invalidated_with is None
+    assert accepted_connection.autocommit_history == [True, False]
 
     rejected = _Cursor((False,))
     rejected_record = _ConnectionRecord()
+    rejected_connection = _Connection(rejected)
     with pytest.raises(RuntimeDatabaseBoundaryError, match="rejected") as caught:
-        _assert_runtime_checkout(_Connection(rejected), rejected_record, object())
+        _assert_runtime_checkout(rejected_connection, rejected_record, object())
 
     assert rejected.closed is True
+    assert rejected_connection.autocommit_history == [True, False]
     assert rejected_record.invalidated_with is caught.value
 
 
@@ -172,14 +227,16 @@ def test_runtime_checkout_normalizes_driver_failure_after_invalidation() -> None
     driver_error = RuntimeError("driver leaked catalog assertion detail")
     rejected = _Cursor(None, execute_error=driver_error)
     rejected_record = _ConnectionRecord()
+    rejected_connection = _Connection(rejected)
 
     with pytest.raises(
         RuntimeDatabaseBoundaryError,
         match="runtime database boundary assertion failed",
     ) as caught:
-        _assert_runtime_checkout(_Connection(rejected), rejected_record, object())
+        _assert_runtime_checkout(rejected_connection, rejected_record, object())
 
     assert rejected.closed is True
+    assert rejected_connection.autocommit_history == [True, False]
     assert rejected_record.invalidated_with is driver_error
     assert caught.value.__cause__ is driver_error
     assert "catalog assertion detail" not in str(caught.value)

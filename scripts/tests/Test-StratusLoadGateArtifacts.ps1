@@ -4,6 +4,29 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function ConvertFrom-TestJsonText {
+    param([Parameter(Mandatory = $true)][string] $Json)
+
+    $convertFromJson = Get-Command `
+        -Name 'Microsoft.PowerShell.Utility\ConvertFrom-Json' `
+        -CommandType Cmdlet `
+        -ErrorAction Stop
+    $parameters = @{ InputObject = $Json }
+    if ($convertFromJson.Parameters.ContainsKey('DateKind')) {
+        $parameters['DateKind'] = 'String'
+    }
+    if ($convertFromJson.Parameters.ContainsKey('NoEnumerate')) {
+        $parameters['NoEnumerate'] = $true
+    }
+    return Microsoft.PowerShell.Utility\ConvertFrom-Json @parameters
+}
+
+function Read-TestJson {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    return ConvertFrom-TestJsonText -Json (Get-Content -LiteralPath $Path -Raw)
+}
+
 $scriptPath = [IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot '..\Assert-StratusLoadGateArtifacts.ps1')
 )
@@ -22,7 +45,8 @@ foreach ($requiredSourcePattern in @(
     '[IO.File]::ReadAllBytes($absoluteHttp)',
     '[IO.File]::ReadAllBytes($absoluteRuntime)',
     'Get-BytesSha256 -Bytes $httpBytes',
-    'Get-BytesSha256 -Bytes $runtimeBytes'
+    'Get-BytesSha256 -Bytes $runtimeBytes',
+    "runtime_covers_http_and_drain = -not (`$violations -contains 'runtime_timestamps')"
 )) {
     if (-not $source.Contains($requiredSourcePattern)) {
         throw "Composite load-gate lacks exact-byte evidence binding: $requiredSourcePattern"
@@ -30,6 +54,9 @@ foreach ($requiredSourcePattern in @(
 }
 if ($source -match '(?im)\bGet-FileHash\b') {
     throw 'Composite load-gate re-reads an artifact while hashing it.'
+}
+if ($source -match "violations -contains 'runtime_overlap'") {
+    throw 'Composite load-gate still reports overlap from a nonexistent violation.'
 }
 
 $hostExecutable = (Get-Process -Id $PID).Path
@@ -46,7 +73,8 @@ $validationOutput = & $hostExecutable `
 if ($LASTEXITCODE -ne 0) {
     throw 'Composite load-gate validation mode failed.'
 }
-$validation = ($validationOutput -join [Environment]::NewLine) | ConvertFrom-Json
+$validation = ConvertFrom-TestJsonText `
+    -Json ($validationOutput -join [Environment]::NewLine)
 if (
     $validation.schema_version -ne 1 -or
     $validation.gate -ne 'stratus_candidate_production_load' -or
@@ -475,7 +503,7 @@ try {
         $diagnostic = Get-Content -LiteralPath $acceptedPath -Raw
         throw "Valid composite load-gate fixtures were rejected: $diagnostic"
     }
-    $accepted = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    $accepted = Read-TestJson -Path $acceptedPath
     if (
         -not $accepted.production_gate_passed -or
         $accepted.run_id -ne $runId -or
@@ -492,8 +520,8 @@ try {
         throw 'Composite load-gate did not bind valid evidence correctly.'
     }
 
-    $lightweightHttp = $validHttpJson | ConvertFrom-Json
-    $validRuntime = $validRuntimeJson | ConvertFrom-Json
+    $lightweightHttp = ConvertFrom-TestJsonText -Json $validHttpJson
+    $validRuntime = ConvertFrom-TestJsonText -Json $validRuntimeJson
     $lightweightHttp.configuration.max_concurrent_get = 1
     $exitCode = Invoke-TestGate `
         -Http $lightweightHttp `
@@ -509,7 +537,7 @@ try {
         $diagnostic = Get-Content -LiteralPath $acceptedPath -Raw
         throw "Lightweight HTTP concurrency evidence returned $exitCode`: $diagnostic"
     }
-    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    $rejected = Read-TestJson -Path $acceptedPath
     if (
         $rejected.production_gate_passed -or
         @($rejected.violations) -notcontains 'http_configuration'
@@ -517,8 +545,8 @@ try {
         throw 'Lightweight concurrency rejection did not preserve its violation.'
     }
 
-    $missingCadenceHttp = $validHttpJson | ConvertFrom-Json
-    $validRuntime = $validRuntimeJson | ConvertFrom-Json
+    $missingCadenceHttp = ConvertFrom-TestJsonText -Json $validHttpJson
+    $validRuntime = ConvertFrom-TestJsonText -Json $validRuntimeJson
     $missingCadenceHttp.requests = @(
         $missingCadenceHttp.requests | Where-Object {
             -not (
@@ -546,13 +574,13 @@ try {
     if ($exitCode -ne 1) {
         throw 'Missing raw cadence evidence did not fail the composite load gate.'
     }
-    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    $rejected = Read-TestJson -Path $acceptedPath
     if (@($rejected.violations) -notcontains 'http_endpoint_inventory') {
         throw 'Missing cadence rejection did not preserve its violation.'
     }
 
-    $malformedHttp = $validHttpJson | ConvertFrom-Json
-    $validRuntime = $validRuntimeJson | ConvertFrom-Json
+    $malformedHttp = ConvertFrom-TestJsonText -Json $validHttpJson
+    $validRuntime = ConvertFrom-TestJsonText -Json $validRuntimeJson
     $malformedHttp.requests[0].PSObject.Properties.Remove('elapsed_ms')
     $exitCode = Invoke-TestGate `
         -Http $malformedHttp `
@@ -567,13 +595,13 @@ try {
     if ($exitCode -ne 1) {
         throw 'Malformed raw HTTP evidence did not fail the composite load gate.'
     }
-    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    $rejected = Read-TestJson -Path $acceptedPath
     if (@($rejected.violations) -notcontains 'http_raw_requests') {
         throw 'Malformed raw HTTP rejection did not preserve its violation.'
     }
 
-    $validHttp = $validHttpJson | ConvertFrom-Json
-    $malformedRuntime = $validRuntimeJson | ConvertFrom-Json
+    $validHttp = ConvertFrom-TestJsonText -Json $validHttpJson
+    $malformedRuntime = ConvertFrom-TestJsonText -Json $validRuntimeJson
     $malformedRuntime.database_samples[0].PSObject.Properties.Remove('controls_ok')
     $exitCode = Invoke-TestGate `
         -Http $validHttp `
@@ -588,12 +616,12 @@ try {
     if ($exitCode -ne 1) {
         throw 'Malformed raw runtime evidence did not fail the composite load gate.'
     }
-    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    $rejected = Read-TestJson -Path $acceptedPath
     if (@($rejected.violations) -notcontains 'runtime_database_evidence') {
         throw 'Malformed raw runtime rejection did not preserve its violation.'
     }
 
-    $wrongMemoryRuntime = $validRuntimeJson | ConvertFrom-Json
+    $wrongMemoryRuntime = ConvertFrom-TestJsonText -Json $validRuntimeJson
     $wrongMemoryRuntime.resource_samples[10].api_memory_limit_bytes = 2147483648L
     $exitCode = Invoke-TestGate `
         -Http $validHttp -Runtime $wrongMemoryRuntime `
@@ -602,12 +630,12 @@ try {
     if ($exitCode -ne 1) {
         throw 'Transient API memory-cap inflation did not fail the composite load gate.'
     }
-    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    $rejected = Read-TestJson -Path $acceptedPath
     if (@($rejected.violations) -notcontains 'runtime_resource_evidence') {
         throw 'API memory-cap rejection did not preserve its violation.'
     }
 
-    $missingOperatorRuntime = $validRuntimeJson | ConvertFrom-Json
+    $missingOperatorRuntime = ConvertFrom-TestJsonText -Json $validRuntimeJson
     $missingOperatorRuntime.resource_samples[10].api_operator_key_entry_count = 0
     $exitCode = Invoke-TestGate `
         -Http $validHttp -Runtime $missingOperatorRuntime `
@@ -616,13 +644,80 @@ try {
     if ($exitCode -ne 1) {
         throw 'Transient API operator-credential removal did not fail the load gate.'
     }
-    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    $rejected = Read-TestJson -Path $acceptedPath
     if (@($rejected.violations) -notcontains 'runtime_resource_evidence') {
         throw 'API operator-credential rejection did not preserve its violation.'
     }
 
-    $validHttp = $validHttpJson | ConvertFrom-Json
-    $unsafeTopologyRuntime = $validRuntimeJson | ConvertFrom-Json
+    $timestampedCpuRuntime = ConvertFrom-TestJsonText -Json $validRuntimeJson
+    $resourceStartedAt = [DateTimeOffset]::Parse(
+        [string]$timestampedCpuRuntime.resource_samples[0].at
+    )
+    $timestampedCpuRuntime.resource_samples[0].postgres_cpu_percent = 0.0
+    for ($index = 1; $index -le 6; $index += 1) {
+        $timestampedCpuRuntime.resource_samples[$index].at = (
+            $resourceStartedAt.AddSeconds(30 + $index).ToString('O')
+        )
+        $timestampedCpuRuntime.resource_samples[$index].postgres_cpu_percent = 145.0
+    }
+    for ($index = 7; $index -lt 70; $index += 1) {
+        $timestampedCpuRuntime.resource_samples[$index].at = (
+            $resourceStartedAt.AddSeconds(36 + (($index - 6) * 5)).ToString('O')
+        )
+    }
+    $timestampedCpuRuntime.summary.max_postgres_cpu_percent = 145.0
+    $timestampedCpuRuntime.summary.rolling_30s_postgres_cpu_max = (
+        (6 * 145.0 + 30.0) / 7.0
+    )
+    $exitCode = Invoke-TestGate `
+        -Http $validHttp -Runtime $timestampedCpuRuntime `
+        -HttpPath $httpPath -RuntimePath $runtimePath -AcceptedPath $acceptedPath `
+        -RunId $runId -ImageId $imageId -Revision $revision -Digest $digest
+    if ($exitCode -ne 1) {
+        throw 'Timestamp-dense rolling PostgreSQL CPU breach did not fail.'
+    }
+    $rejected = Read-TestJson -Path $acceptedPath
+    if (@($rejected.violations) -notcontains 'runtime_resource_threshold') {
+        throw 'Timestamp-aware rolling CPU rejection lost its violation.'
+    }
+
+    $invalidOverlapRuntime = ConvertFrom-TestJsonText -Json $validRuntimeJson
+    $invalidOverlapRuntime.observation_started_at = '2026-07-29T10:00:01Z'
+    $exitCode = Invoke-TestGate `
+        -Http $validHttp -Runtime $invalidOverlapRuntime `
+        -HttpPath $httpPath -RuntimePath $runtimePath -AcceptedPath $acceptedPath `
+        -RunId $runId -ImageId $imageId -Revision $revision -Digest $digest
+    if ($exitCode -ne 1) {
+        throw 'Invalid runtime/HTTP overlap did not fail.'
+    }
+    $rejected = Read-TestJson -Path $acceptedPath
+    if (
+        @($rejected.violations) -notcontains 'runtime_timestamps' -or
+        [bool]$rejected.overlap.runtime_covers_http_and_drain
+    ) {
+        throw 'Rejected runtime overlap remained falsely marked as covered.'
+    }
+
+    $lateCompletedHttp = ConvertFrom-TestJsonText -Json $validHttpJson
+    $lateCompletedHttp.completed_at = '2026-07-29T10:06:00Z'
+    $truncatedRuntime = ConvertFrom-TestJsonText -Json $validRuntimeJson
+    $exitCode = Invoke-TestGate `
+        -Http $lateCompletedHttp -Runtime $truncatedRuntime `
+        -HttpPath $httpPath -RuntimePath $runtimePath -AcceptedPath $acceptedPath `
+        -RunId $runId -ImageId $imageId -Revision $revision -Digest $digest
+    if ($exitCode -ne 1) {
+        throw 'Runtime samples ending before HTTP completion did not fail.'
+    }
+    $rejected = Read-TestJson -Path $acceptedPath
+    if (
+        @($rejected.violations) -notcontains 'runtime_timestamps' -or
+        [bool]$rejected.overlap.runtime_covers_http_and_drain
+    ) {
+        throw 'Truncated runtime coverage remained falsely accepted.'
+    }
+
+    $validHttp = ConvertFrom-TestJsonText -Json $validHttpJson
+    $unsafeTopologyRuntime = ConvertFrom-TestJsonText -Json $validRuntimeJson
     $unsafeTopologyRuntime.topology_samples[10].all_running_containers += @(
         [pscustomobject]@{
             container_id = 'worker-container'
@@ -641,12 +736,12 @@ try {
     if ($exitCode -ne 1) {
         throw 'Forged safe topology hiding a protected-network container did not fail.'
     }
-    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    $rejected = Read-TestJson -Path $acceptedPath
     if (@($rejected.violations) -notcontains 'runtime_topology_evidence') {
         throw 'Unexpected-container topology rejection lost its violation.'
     }
 
-    $shortTopologyRuntime = $validRuntimeJson | ConvertFrom-Json
+    $shortTopologyRuntime = ConvertFrom-TestJsonText -Json $validRuntimeJson
     $shortTopologyRuntime.topology_samples = @(
         $shortTopologyRuntime.topology_samples | Select-Object -First 69
     )
@@ -658,12 +753,12 @@ try {
     if ($exitCode -ne 1) {
         throw 'Insufficient raw topology coverage did not fail.'
     }
-    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    $rejected = Read-TestJson -Path $acceptedPath
     if (@($rejected.violations) -notcontains 'runtime_sample_coverage') {
         throw 'Topology coverage rejection lost its violation.'
     }
 
-    $forgedSummaryRuntime = $validRuntimeJson | ConvertFrom-Json
+    $forgedSummaryRuntime = ConvertFrom-TestJsonText -Json $validRuntimeJson
     $forgedSummaryRuntime.summary.topology_sample_count = 80
     $forgedSummaryRuntime.summary.exact_project_topology_held = $false
     $exitCode = Invoke-TestGate `
@@ -673,7 +768,7 @@ try {
     if ($exitCode -ne 1) {
         throw 'Forged topology summary did not fail reconciliation.'
     }
-    $rejected = Get-Content -LiteralPath $acceptedPath -Raw | ConvertFrom-Json
+    $rejected = Read-TestJson -Path $acceptedPath
     if (@($rejected.violations) -notcontains 'runtime_summary_reconciliation') {
         throw 'Topology summary rejection lost its violation.'
     }

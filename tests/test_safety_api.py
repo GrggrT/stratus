@@ -35,15 +35,31 @@ _OPERATOR_KEY = "operator-control-key-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_xyz"
 
 
 class _BoundaryCursor:
-    def __init__(self, row: tuple[object, ...] | None) -> None:
+    def __init__(
+        self,
+        row: tuple[object, ...] | None,
+        *,
+        execute_error: Exception | None = None,
+        fetch_error: Exception | None = None,
+    ) -> None:
         self.row = row
+        self.execute_error = execute_error
+        self.fetch_error = fetch_error
         self.statement: str | None = None
         self.closed = False
+        self.connection: _BoundaryConnection | None = None
+        self.autocommit_at_execute: bool | None = None
 
     def execute(self, statement: str) -> None:
         self.statement = statement
+        assert self.connection is not None
+        self.autocommit_at_execute = self.connection.autocommit
+        if self.execute_error is not None:
+            raise self.execute_error
 
     def fetchone(self) -> tuple[object, ...] | None:
+        if self.fetch_error is not None:
+            raise self.fetch_error
         return self.row
 
     def close(self) -> None:
@@ -51,10 +67,37 @@ class _BoundaryCursor:
 
 
 class _BoundaryConnection:
-    def __init__(self, row: tuple[object, ...] | None) -> None:
-        self.boundary_cursor = _BoundaryCursor(row)
+    def __init__(
+        self,
+        row: tuple[object, ...] | None,
+        *,
+        autocommit: bool = False,
+        execute_error: Exception | None = None,
+        fetch_error: Exception | None = None,
+        cursor_error: Exception | None = None,
+    ) -> None:
+        self.boundary_cursor = _BoundaryCursor(
+            row,
+            execute_error=execute_error,
+            fetch_error=fetch_error,
+        )
+        self.boundary_cursor.connection = self
+        self._autocommit = autocommit
+        self.autocommit_history: list[bool] = []
+        self.cursor_error = cursor_error
+
+    @property
+    def autocommit(self) -> bool:
+        return self._autocommit
+
+    @autocommit.setter
+    def autocommit(self, value: bool) -> None:
+        self.autocommit_history.append(value)
+        self._autocommit = value
 
     def cursor(self) -> _BoundaryCursor:
+        if self.cursor_error is not None:
+            raise self.cursor_error
         return self.boundary_cursor
 
 
@@ -123,17 +166,25 @@ def test_every_physical_safety_connection_rechecks_migration_boundary() -> None:
     assert accepted.boundary_cursor.statement == (
         "SELECT public.assert_stratus_safety_boundary(true)"
     )
+    assert accepted.boundary_cursor.autocommit_at_execute is True
     assert accepted.boundary_cursor.closed is True
+    assert accepted.autocommit is False
+    assert accepted.autocommit_history == [True, False]
 
     drifted_reconnect = _BoundaryConnection((False,))
     with pytest.raises(RuntimeError, match="safety boundary"):
         _assert_safety_connection(drifted_reconnect, object())
+    assert drifted_reconnect.boundary_cursor.autocommit_at_execute is True
     assert drifted_reconnect.boundary_cursor.closed is True
+    assert drifted_reconnect.autocommit is False
+    assert drifted_reconnect.autocommit_history == [True, False]
 
     missing_assertion = _BoundaryConnection(None)
     with pytest.raises(RuntimeError, match="safety boundary"):
         _assert_safety_connection(missing_assertion, object())
     assert missing_assertion.boundary_cursor.closed is True
+    assert missing_assertion.autocommit is False
+    assert missing_assertion.autocommit_history == [True, False]
 
 
 def test_every_safety_checkout_rechecks_and_invalidates_drift() -> None:
@@ -141,6 +192,7 @@ def test_every_safety_checkout_rechecks_and_invalidates_drift() -> None:
     accepted_record = _BoundaryConnectionRecord()
     _assert_safety_checkout(accepted, accepted_record, object())
     assert accepted_record.invalidated_with is None
+    assert accepted.autocommit_history == [True, False]
 
     drifted = _BoundaryConnection((False,))
     drifted_record = _BoundaryConnectionRecord()
@@ -148,7 +200,44 @@ def test_every_safety_checkout_rechecks_and_invalidates_drift() -> None:
         _assert_safety_checkout(drifted, drifted_record, object())
 
     assert drifted.boundary_cursor.closed is True
+    assert drifted.autocommit_history == [True, False]
     assert drifted_record.invalidated_with is caught.value
+
+
+@pytest.mark.parametrize(
+    "connection",
+    [
+        _BoundaryConnection(None, execute_error=RuntimeError("execute failed")),
+        _BoundaryConnection(None, fetch_error=RuntimeError("fetch failed")),
+        _BoundaryConnection(None, cursor_error=RuntimeError("cursor failed")),
+    ],
+)
+def test_safety_boundary_restores_autocommit_on_driver_failure(
+    connection: _BoundaryConnection,
+) -> None:
+    with pytest.raises(RuntimeError):
+        _assert_safety_connection(connection, object())
+
+    assert connection.autocommit is False
+    assert connection.autocommit_history == [True, False]
+
+
+def test_safety_checkout_normalizes_and_invalidates_driver_failure() -> None:
+    driver_error = RuntimeError("driver leaked catalog assertion detail")
+    connection = _BoundaryConnection(None, execute_error=driver_error)
+    record = _BoundaryConnectionRecord()
+
+    with pytest.raises(
+        SafetyDatabaseBoundaryError,
+        match="safety database boundary assertion failed",
+    ) as caught:
+        _assert_safety_checkout(connection, record, object())
+
+    assert connection.boundary_cursor.closed is True
+    assert connection.autocommit_history == [True, False]
+    assert record.invalidated_with is driver_error
+    assert caught.value.__cause__ is driver_error
+    assert "catalog assertion detail" not in str(caught.value)
 
 
 async def test_health_is_open_but_emergency_stop_requires_exact_authentication() -> None:
