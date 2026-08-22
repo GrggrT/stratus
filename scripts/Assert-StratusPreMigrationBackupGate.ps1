@@ -349,7 +349,14 @@ function ConvertFrom-StrictJsonObjectText {
         throw "$Label must have a native JSON object at its root, not a scalar or array."
     }
     try {
-        $value = $trimmed | ConvertFrom-Json
+        $convertFromJson = Get-Command `
+            -Name 'Microsoft.PowerShell.Utility\ConvertFrom-Json' `
+            -CommandType Cmdlet -ErrorAction Stop
+        $convertParameters = @{ InputObject = $trimmed }
+        if ($convertFromJson.Parameters.ContainsKey('DateKind')) {
+            $convertParameters['DateKind'] = 'String'
+        }
+        $value = Microsoft.PowerShell.Utility\ConvertFrom-Json @convertParameters
     }
     catch {
         throw "$Label did not return valid JSON."
