@@ -349,20 +349,24 @@ if (
 }
 
 $expectedMemoryLimits = [ordered]@{
-    worker = 3221225472L
-    api = 1073741824L
-    'safety-control' = 268435456L
+    worker = '3221225472'
+    api = '1073741824'
+    'safety-control' = '268435456'
 }
 $resourceLimitedServices = @($expectedMemoryLimits.Keys)
 foreach ($serviceName in $resourceLimitedServices) {
     $memoryLimit = $compose.services.$serviceName.mem_limit
-    if (
-        $memoryLimit -isnot [long] -and
-        $memoryLimit -isnot [int]
-    ) {
-        throw "Service $serviceName memory limit is not a rendered JSON integer."
+    if ($memoryLimit -isnot [string]) {
+        throw (
+            "Service $serviceName memory limit is not a canonical rendered " +
+            'Compose byte string.'
+        )
     }
-    if ([int64]$memoryLimit -ne [int64]$expectedMemoryLimits[$serviceName]) {
+    if (-not [string]::Equals(
+        $memoryLimit,
+        [string]$expectedMemoryLimits[$serviceName],
+        [StringComparison]::Ordinal
+    )) {
         throw (
             "Service $serviceName memory limit is $memoryLimit bytes; expected " +
             "$($expectedMemoryLimits[$serviceName]) bytes."

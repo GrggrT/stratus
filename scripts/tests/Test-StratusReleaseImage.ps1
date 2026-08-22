@@ -22,7 +22,7 @@ function New-MockService {
     param(
         [string] $Image = 'postgres:16-alpine@sha256:' + ('c' * 64),
         [string] $ReleaseDigest = '',
-        [long] $Memory = 0,
+        [AllowNull()][object] $Memory = $null,
         [switch] $OperatorApiKey
     )
 
@@ -37,7 +37,7 @@ function New-MockService {
         $service['environment']['OPERATOR_API_KEY'] = `
             'mock_operator_key_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
     }
-    if ($Memory -gt 0) {
+    if ($null -ne $Memory) {
         $service['mem_limit'] = $Memory
     }
     return $service
@@ -135,14 +135,37 @@ function New-MockComposeModel {
                 'api' { 1073741824L; break }
                 'safety-control' { 268435456L; break }
             }
+            $renderedMemory = if (
+                $global:StratusReleaseImageMockMode -eq 'numeric-memory'
+            ) {
+                $memory
+            }
+            else {
+                $memory.ToString([Globalization.CultureInfo]::InvariantCulture)
+            }
+            if ($name -eq 'worker') {
+                $renderedMemory = switch ($global:StratusReleaseImageMockMode) {
+                    'memory-leading-zero' { '03221225472'; break }
+                    'memory-unit-suffix' { '3g'; break }
+                    'memory-decimal' { '3221225472.0'; break }
+                    'memory-exponent' { '3.221225472e9'; break }
+                    'memory-whitespace' { ' 3221225472'; break }
+                    'memory-overflow' { '9223372036854775808'; break }
+                    'memory-ignorable-unicode' {
+                        "3$([char]0x00AD)221225472"
+                        break
+                    }
+                    default { $renderedMemory }
+                }
+            }
             $services[$name] = New-MockService `
-                -Image $candidate -ReleaseDigest $digest -Memory $memory `
+                -Image $candidate -ReleaseDigest $digest -Memory $renderedMemory `
                 -OperatorApiKey:($name -eq 'api')
             if (
                 $name -eq 'api' -and
                 $global:StratusReleaseImageMockMode -eq 'wrong-api-memory'
             ) {
-                $services[$name]['mem_limit'] = 2147483648L
+                $services[$name]['mem_limit'] = '2147483648'
             }
             continue
         }
@@ -323,6 +346,18 @@ try {
         throw 'Accepted release-image guard did not emit the exact profile evidence.'
     }
 
+    $global:StratusReleaseImageMockMode = 'numeric-memory'
+    Assert-Throws -ExpectedMessage (
+        'worker memory limit is not a canonical rendered Compose byte string'
+    ) -Action {
+        & $guardPath `
+            -Image $candidate `
+            -ExpectedDigest $digest `
+            -ExpectedRevision $revision `
+            -EnvFile $envPath `
+            -Root $tempRoot
+    }
+
     $global:StratusReleaseImageMockMode = 'unsafe-default'
     Assert-Throws -ExpectedMessage 'must contain no services' -Action {
         & $guardPath `
@@ -393,6 +428,28 @@ try {
             -Root $tempRoot
     }
 
+    foreach ($hostileMemoryMode in @(
+        'memory-leading-zero',
+        'memory-unit-suffix',
+        'memory-decimal',
+        'memory-exponent',
+        'memory-whitespace',
+        'memory-overflow',
+        'memory-ignorable-unicode'
+    )) {
+        $global:StratusReleaseImageMockMode = $hostileMemoryMode
+        Assert-Throws -ExpectedMessage (
+            'bytes; expected 3221225472 bytes'
+        ) -Action {
+            & $guardPath `
+                -Image $candidate `
+                -ExpectedDigest $digest `
+                -ExpectedRevision $revision `
+                -EnvFile $envPath `
+                -Root $tempRoot
+        }
+    }
+
     $global:StratusReleaseImageMockMode = 'operator-key-leak'
     Assert-Throws -ExpectedMessage 'OPERATOR_API_KEY exposure is not confined' -Action {
         & $guardPath `
@@ -458,6 +515,9 @@ try {
         default_model_fail_closed = $true
         explicit_profiles_complete = $true
         exact_image_guard_executed = $true
+        compose_string_memory_limits_verified = $true
+        native_integer_memory_limits_rejected = $true
+        hostile_memory_encodings_rejected = $true
     } | ConvertTo-Json -Compress
 }
 finally {
