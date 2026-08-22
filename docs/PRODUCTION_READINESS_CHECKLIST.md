@@ -131,7 +131,7 @@ Evidence: execution-cost planner/repository unit and PostgreSQL integration test
       native-application resolution, expected child-process exit-code containment, LF-normalized
       Unix test launchers, and exact Compose byte-string resource parsing in release contracts. The
       current implementation-content digest is
-      `772df653e7d131c9ebbba4b370cf46409f2f2f60ccd106aae43967597c84df21` across the same 78
+      `f5fe9fef06a42aeb33cda31d321d9c9a9e22bfa1e6b64cce491c640ad753c24a` across the same 78
       implementation paths. All affected contracts pass locally in PowerShell 7.6 and Windows
       PowerShell 5.1; all ten Windows PowerShell 5.1 release contracts pass. Exact-candidate full CI
       and clean-PostgreSQL acceptance remain explicitly pending below.
