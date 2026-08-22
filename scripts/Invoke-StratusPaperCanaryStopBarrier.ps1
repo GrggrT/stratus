@@ -218,8 +218,17 @@ function Invoke-BoundedDocker {
         [Parameter(Mandatory = $true)][string] $WorkingDirectory
     )
 
+    $dockerCommand = Get-Command -Name 'docker' -CommandType Application `
+        -ErrorAction Stop | Select-Object -First 1
+    if (
+        $null -eq $dockerCommand -or
+        [string]::IsNullOrWhiteSpace([string]$dockerCommand.Source)
+    ) {
+        throw 'Could not resolve the Docker application executable.'
+    }
+
     $start = [Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = 'docker'
+    $start.FileName = [string]$dockerCommand.Source
     $start.WorkingDirectory = $WorkingDirectory
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true

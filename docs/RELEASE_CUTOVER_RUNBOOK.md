@@ -1681,6 +1681,28 @@ foreach ($requiredCanaryScript in @(
 }
 $expectedCanaryStopRequestId = "paper-canary-stop-$canaryRunId"
 # STRATUS_CANARY_EXTERNAL_PROOF_VALIDATORS_BEGIN
+function ConvertFrom-ExactCanaryJson {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowNull()]
+    [object]$Json
+  )
+
+  if ($Json -isnot [string]) {
+    throw "Canary proof command must emit exactly one JSON string."
+  }
+
+  $convertFromJson = Get-Command `
+    -Name "Microsoft.PowerShell.Utility\ConvertFrom-Json" `
+    -CommandType Cmdlet -ErrorAction Stop
+  $convertParameters = @{ InputObject = $Json }
+  if ($convertFromJson.Parameters.ContainsKey("NoEnumerate")) {
+    $convertParameters["NoEnumerate"] = $true
+  }
+
+  return Microsoft.PowerShell.Utility\ConvertFrom-Json @convertParameters
+}
+
 function Test-NativeCanaryJsonInteger {
   param([AllowNull()][object]$Value)
 
@@ -1952,12 +1974,13 @@ function Test-ExactCanaryTerminalProof {
 # STRATUS_CANARY_EXTERNAL_PROOF_VALIDATORS_END
 
 function Invoke-VerifiedCanaryStopBarrier {
-  $proof = & $canaryStopBarrier `
+  $proofJson = & $canaryStopBarrier `
     -Root $canaryRoot `
     -RunId $canaryRunId `
     -ResumeRequestId $requestId `
     -PostgresContainerId $postgresContainer[0] `
-    -SafetyApiKey $safetyApiKey | ConvertFrom-Json
+    -SafetyApiKey $safetyApiKey
+  $proof = ConvertFrom-ExactCanaryJson -Json $proofJson
   if (-not (Test-ExactCanaryStopBarrierProof -Proof $proof)) {
     throw "PAPER canary STOP barrier returned a mismatched fail-closed proof."
   }
@@ -2157,7 +2180,7 @@ while (-not (Test-Path -LiteralPath $canaryReadyPath -PathType Leaf)) {
   Start-Sleep -Milliseconds 250
 }
 try {
-  $canaryReadyProof = & $canaryArtifactValidator `
+  $canaryReadyJson = & $canaryArtifactValidator `
     -Root $canaryRoot `
     -Mode Ready `
     -RunId $canaryRunId `
@@ -2168,7 +2191,8 @@ try {
     -Cohort $cohort `
     -ImageId $candidateImageId `
     -Revision $candidateRevision `
-    -ReleaseDigest $digest | ConvertFrom-Json
+    -ReleaseDigest $digest
+  $canaryReadyProof = ConvertFrom-ExactCanaryJson -Json $canaryReadyJson
   if (
     $canaryJob.State -ne "Running" -or
     -not (Test-ExactCanaryReadyProof -Proof $canaryReadyProof)
@@ -2505,7 +2529,7 @@ catch {
     -Failure "Terminal STOP barrier failed: $terminalBarrierError"
 }
 try {
-  $canaryTerminalProof = & $canaryArtifactValidator `
+  $canaryTerminalJson = & $canaryArtifactValidator `
     -Root $canaryRoot `
     -Mode Terminal `
     -RunId $canaryRunId `
@@ -2516,7 +2540,8 @@ try {
     -Cohort $cohort `
     -ImageId $candidateImageId `
     -Revision $candidateRevision `
-    -ReleaseDigest $digest | ConvertFrom-Json
+    -ReleaseDigest $digest
+  $canaryTerminalProof = ConvertFrom-ExactCanaryJson -Json $canaryTerminalJson
   if (-not (Test-ExactCanaryTerminalProof -Proof $canaryTerminalProof)) {
     throw "Terminal artifact validator returned a mismatched canary proof."
   }

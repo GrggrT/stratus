@@ -223,6 +223,13 @@ foreach ($required in @(
     'Remove-Job -Job \$canaryJob -Force -ErrorAction Stop',
     '\$expectedCanaryStopRequestId = "paper-canary-stop-\$canaryRunId"',
     '# STRATUS_CANARY_EXTERNAL_PROOF_VALIDATORS_BEGIN',
+    'function ConvertFrom-ExactCanaryJson',
+    '\$proofJson = & \$canaryStopBarrier',
+    '\$proof = ConvertFrom-ExactCanaryJson -Json \$proofJson',
+    '\$canaryReadyJson = & \$canaryArtifactValidator',
+    '\$canaryReadyProof = ConvertFrom-ExactCanaryJson -Json \$canaryReadyJson',
+    '\$canaryTerminalJson = & \$canaryArtifactValidator',
+    '\$canaryTerminalProof = ConvertFrom-ExactCanaryJson -Json \$canaryTerminalJson',
     'function Test-NativeCanaryJsonInteger',
     'function Test-NativeCanaryJsonBoolean',
     'Test-NativeCanaryJsonInteger -Value \$Proof\.live\.fill_legs',
@@ -389,6 +396,19 @@ function Invoke-ExternalProofTypeFixtures {
     $postgresContainer = @('c' * 64)
     . $externalProofValidatorsBlock
 
+    $multipleOutputRejected = $false
+    try {
+        [void](ConvertFrom-ExactCanaryJson -Json @('{"proof":1}', '{"proof":2}'))
+    }
+    catch {
+        $multipleOutputRejected = (
+            $_.Exception.Message -like '*must emit exactly one JSON string*'
+        )
+    }
+    if (-not $multipleOutputRejected) {
+        throw 'External proof parser accepted multiple success-output objects.'
+    }
+
     function Copy-ProofFixture {
         param([Parameter(Mandatory = $true)][object] $Proof)
         return $Proof | ConvertTo-Json -Depth 16 -Compress | ConvertFrom-Json
@@ -412,7 +432,7 @@ function Invoke-ExternalProofTypeFixtures {
                 Json = "[$proofJson]"
             }
         )) {
-            $malformedProof = ConvertFrom-Json -InputObject $rootCase.Json
+            $malformedProof = ConvertFrom-ExactCanaryJson -Json $rootCase.Json
             if (
                 $rootCase.Name -ceq 'singleton-array' -and
                 (
@@ -420,7 +440,7 @@ function Invoke-ExternalProofTypeFixtures {
                     @($malformedProof).Count -ne 1
                 )
             ) {
-                throw 'PowerShell 5.1 did not preserve the singleton-array fixture.'
+                throw 'External proof parser did not preserve the singleton-array fixture.'
             }
             try {
                 $rootAccepted = switch ($Name) {
@@ -810,18 +830,18 @@ function Invoke-ResumeSubmitFixture {
                     }
                 }
                 'AcceptanceNull' {
-                    return ConvertFrom-Json -InputObject 'null'
+                    return ConvertFrom-ExactCanaryJson -Json 'null'
                 }
                 'AcceptanceString' {
-                    return ConvertFrom-Json -InputObject '"proof"'
+                    return ConvertFrom-ExactCanaryJson -Json '"proof"'
                 }
                 'AcceptanceScalar' {
-                    return ConvertFrom-Json -InputObject '1'
+                    return ConvertFrom-ExactCanaryJson -Json '1'
                 }
                 'AcceptanceSingletonArray' {
                     $acceptanceJson = $validAcceptance |
                         ConvertTo-Json -Depth 8 -Compress
-                    return ConvertFrom-Json -InputObject "[$acceptanceJson]"
+                    return ConvertFrom-ExactCanaryJson -Json "[$acceptanceJson]"
                 }
                 'ItemNull' {
                     return ConvertFrom-Json -InputObject `
@@ -875,7 +895,7 @@ function Invoke-ResumeSubmitFixture {
                     )
                 }
                 $auditJson = $auditEnvelope | ConvertTo-Json -Depth 8 -Compress
-                return ConvertFrom-Json -InputObject "[$auditJson]"
+                return ConvertFrom-ExactCanaryJson -Json "[$auditJson]"
             }
             'Exception' {
                 throw [IO.IOException]::new('fixture audit read exception')
@@ -1323,7 +1343,7 @@ $collectorIndex = $source.IndexOf(
     [StringComparison]::Ordinal
 )
 $readyValidationIndex = $source.IndexOf(
-    '$canaryReadyProof = & $canaryArtifactValidator',
+    '$canaryReadyProof = ConvertFrom-ExactCanaryJson -Json $canaryReadyJson',
     $collectorIndex,
     [StringComparison]::Ordinal
 )
@@ -1502,7 +1522,7 @@ $terminalWaitIndex = $source.IndexOf(
     [StringComparison]::Ordinal
 )
 $terminalManifestIndex = $source.IndexOf(
-    '$canaryTerminalProof = & $canaryArtifactValidator',
+    '$canaryTerminalProof = ConvertFrom-ExactCanaryJson -Json $canaryTerminalJson',
     $terminalWaitIndex,
     [StringComparison]::Ordinal
 )

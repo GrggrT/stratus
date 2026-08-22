@@ -115,17 +115,23 @@ Evidence: execution-cost planner/repository unit and PostgreSQL integration test
 - [x] Focused safety-control verification passes: atomic emergency stop, DB-clock lease
       acquire/heartbeat/release, independent watchdog, exact resume identity, empty-active-set
       acquire-vs-stop serialization, and a long unrelated operator job that cannot block STOP.
-- [x] Final exact-working-tree clean-PostgreSQL suite passes on a fresh isolated,
+- [x] The pre-freeze working tree passed the clean-PostgreSQL suite on a fresh isolated,
       loopback-only PostgreSQL 16 container. On 2026-08-14, a newly recreated disposable
       PostgreSQL 16 container with exact image ID
       `sha256:20edbde7749f822887a1a022ad526fde0a47d6b2be9a8364433605cf65099416`, new data
       volume, and only `127.0.0.1:55435` exposed passed the full suite from migration `0001`
       through `0047`: `1324 passed, 3 skipped, 11 xfailed in 814.15s`. The implementation-content
-      digest before and after the run was exactly
+      digest before and after that run was exactly
       `c6a5af84681bc850d7a87574024d57f2bc3be9f51c53a2070253e686e60210c2` across 78
       implementation paths changed from baseline revision
       `9123d85013af8b15a3f816c9ba70875b2a9973b6`, excluding only this self-referential checklist;
       the test container remained healthy with restart count zero and `OOMKilled=false`.
+- [x] After the first exact-SHA CI run exposed and the candidate fixed cross-version external-proof
+      parsing plus Windows native-application resolution, the current implementation-content digest
+      is `2f9516eca9edae49f70ed45da6b0f453597ba27b1234307bc81093d9d84a1321` across the same 78
+      implementation paths. Both affected contracts pass locally in PowerShell 7.6 and Windows
+      PowerShell 5.1; all ten Windows PowerShell 5.1 release contracts pass. Exact-candidate full CI
+      and clean-PostgreSQL acceptance remain explicitly pending below.
 - [ ] Final exact-candidate Windows PowerShell 5.1 and PowerShell 7 release contracts pass in CI.
 
 Historical baseline evidence: Ruff clean; strict mypy clean over 173 source files;

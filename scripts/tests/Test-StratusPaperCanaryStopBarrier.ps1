@@ -26,6 +26,8 @@ foreach ($required in @(
     '$StopActor = ''codex-paper-canary''',
     '$StopReason = ''STRATUS PAPER canary terminal fail-closed stop.''',
     'Invoke-RestMethod -Uri $Uri -Method Post',
+    "Get-Command -Name 'docker' -CommandType Application",
+    '$start.FileName = [string]$dockerCommand.Source',
     "'X-API-Key'",
     "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;",
     "SET LOCAL statement_timeout = '3s';",
@@ -185,7 +187,9 @@ $goodStatePath = Join-Path $temporaryRoot 'good.json'
 $absentStatePath = Join-Path $temporaryRoot 'absent.json'
 $partialStatePath = Join-Path $temporaryRoot 'partial.json'
 $pendingStatePath = Join-Path $temporaryRoot 'pending.json'
-$dockerPath = Join-Path $fakeBin 'docker.exe'
+$runningOnWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+$dockerFileName = if ($runningOnWindows) { 'docker.exe' } else { 'docker' }
+$dockerPath = Join-Path $fakeBin $dockerFileName
 $runId = '0123456789abcdef0123456789abcdef'
 $resumeRequestId = 'resume-0123456789abcdef'
 $postgresContainerId = 'a' * 64
@@ -238,11 +242,68 @@ public static class $mockTypeName
     }
 }
 "@
-Add-Type -TypeDefinition $dockerSource -Language CSharp `
-    -OutputAssembly $dockerPath -OutputType ConsoleApplication
+if ($runningOnWindows) {
+    $dockerSourcePath = Join-Path $temporaryRoot 'DockerMock.cs'
+    [IO.File]::WriteAllText($dockerSourcePath, $dockerSource, $utf8)
+    $compiler = @(
+        (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
+        (Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe')
+    ) | Where-Object {
+        Test-Path -LiteralPath $_ -PathType Leaf
+    } | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace([string]$compiler)) {
+        throw 'Could not find the Windows C# compiler for the Docker fixture.'
+    }
+    $compilerOutput = @(
+        & $compiler '/nologo' '/target:exe' "/out:$dockerPath" $dockerSourcePath 2>&1
+    )
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $dockerPath -PathType Leaf)) {
+        throw (
+            'Could not compile the Windows Docker fixture: ' +
+            ($compilerOutput -join [Environment]::NewLine)
+        )
+    }
+}
+else {
+    $dockerShell = @'
+#!/bin/sh
+cat >/dev/null
+{
+  printf 'DOCKER'
+  for argument in "$@"; do
+    printf ' %s' "$argument"
+  done
+  printf '\n'
+} >> "$STRATUS_STOP_BARRIER_EVENT_LOG"
+cat "$STRATUS_STOP_BARRIER_DOCKER_JSON"
+'@
+    [IO.File]::WriteAllText($dockerPath, $dockerShell, $utf8)
+    & chmod 700 $dockerPath
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not make the Unix Docker fixture executable.'
+    }
+}
 
 $originalPath = $env:PATH
-$env:PATH = "$fakeBin;$originalPath"
+$env:PATH = "$fakeBin$([IO.Path]::PathSeparator)$originalPath"
+$resolvedDocker = Get-Command -Name 'docker' -CommandType Application `
+    -ErrorAction Stop | Select-Object -First 1
+$pathComparison = if ($runningOnWindows) {
+    [StringComparison]::OrdinalIgnoreCase
+}
+else {
+    [StringComparison]::Ordinal
+}
+if (
+    $null -eq $resolvedDocker -or
+    -not [string]::Equals(
+        [IO.Path]::GetFullPath([string]$resolvedDocker.Source),
+        [IO.Path]::GetFullPath($dockerPath),
+        $pathComparison
+    )
+) {
+    throw 'Docker fixture was not the first application resolved from PATH.'
+}
 $env:STRATUS_STOP_BARRIER_EVENT_LOG = $eventLog
 $env:STRATUS_STOP_BARRIER_DOCKER_JSON = $goodStatePath
 $global:StratusStopBarrierScenario = 'safe'
