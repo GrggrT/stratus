@@ -20,9 +20,19 @@ jobs:
           .\scripts\tests\Test-StratusPreStartTopology.ps1
           .\scripts\tests\Test-StratusReleaseRunbook.ps1
           .\scripts\tests\Test-StratusPreMigrationBackupGate.ps1
+          .\scripts\tests\Test-StratusPostMigrationSuccessorGate.ps1
+          .\scripts\tests\Test-StratusStoppedPostgresNetworkRepair.ps1
+          .\scripts\tests\Test-StratusSuccessorTransitionWatchdog.ps1
           .\scripts\tests\Test-StratusPaperCanary.ps1
           .\scripts\tests\Test-StratusPaperCanaryArtifacts.ps1
           .\scripts\tests\Test-StratusPaperCanaryStopBarrier.ps1
+
+      - name: Validate Windows-only successor contracts on PowerShell 7
+        shell: pwsh
+        run: |
+          .\scripts\tests\Test-StratusPostMigrationSuccessorGate.ps1
+          .\scripts\tests\Test-StratusStoppedPostgresNetworkRepair.ps1
+          .\scripts\tests\Test-StratusSuccessorTransitionWatchdog.ps1
 
   checks:
     runs-on: ubuntu-latest

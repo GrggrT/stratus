@@ -15,10 +15,11 @@ $powerShellBlocks = @(
 if ($powerShellBlocks.Count -eq 0) {
     throw 'Release runbook contains no executable PowerShell blocks.'
 }
+$powerShellAsts = [Collections.Generic.List[Management.Automation.Language.ScriptBlockAst]]::new()
 for ($blockIndex = 0; $blockIndex -lt $powerShellBlocks.Count; $blockIndex++) {
     $tokens = $null
     $parseErrors = $null
-    [void][Management.Automation.Language.Parser]::ParseInput(
+    $blockAst = [Management.Automation.Language.Parser]::ParseInput(
         $powerShellBlocks[$blockIndex].Groups[1].Value,
         [ref]$tokens,
         [ref]$parseErrors
@@ -29,6 +30,7 @@ for ($blockIndex = 0; $blockIndex -lt $powerShellBlocks.Count; $blockIndex++) {
             (@($parseErrors | ForEach-Object { $_.Message }) -join '; ')
         )
     }
+    $powerShellAsts.Add($blockAst)
 }
 
 foreach ($forbidden in @(
@@ -39,7 +41,9 @@ foreach ($forbidden in @(
     '\$secureApiKey',
     '(?m)^\s*\.\\scripts\\Invoke-StratusDashboardLoadGate\.ps1',
     '(?m)^\s*\.\\scripts\\Assert-StratusLoadGateArtifacts\.ps1',
-    '(?m)^\s*\.\\scripts\\Assert-StratusReleaseImage\.ps1'
+    '(?m)^\s*\.\\scripts\\Assert-StratusReleaseImage\.ps1',
+    '\-Mode Resume',
+    '(?m)^\s+-Mode (?:PreStart|Live)\s+`\r?$'
 )) {
     if ($source -match $forbidden) {
         throw "Release runbook contains an unsafe or non-portable command: $forbidden"
@@ -71,11 +75,17 @@ foreach ($required in @(
     '--tag \$image \$buildContext',
     'Join-Path \$buildContext "scripts\\Assert-StratusReleaseImage\.ps1"',
     'Exact candidate image build failed',
-    '\$preMigrationHead -notin @\(',
+    'STRATUS_CUTOVER_SCHEMA_PATH',
+    '\$cutoverSchemaPath -cnotin @\(',
     '"20260730_0046"',
     '"20260730_0047"',
-    '\$preMigrationHead -eq "20260730_0046"',
-    'Schema 0047 is already accepted; skip migration service',
+    '\$cutoverSchemaPath -ceq "20260730_0046"',
+    '\$cutoverSchemaPath -ceq "20260730_0047"',
+    'Test-Path -LiteralPath "Env:\$_"',
+    'The 0046 path requires every successor lineage/evidence value to be unset',
+    'The 0047 Transition path requires all four immutable lineage/evidence paths',
+    'Every attempt-scoped repair/Transition evidence path must be absent',
+    'Schema 0047 successor is accepted; no migrate container was staged or started',
     'paper_canary_safety_leases',
     'uq_paper_canary_single_active_lease',
     'ix_paper_canary_active_expiry',
@@ -110,11 +120,94 @@ foreach ($required in @(
     'Compose could not stage the exact-candidate migrate service',
     'Assert-StratusPreMigrationBackupGate\.ps1',
     '-Mode Create',
-    '-Mode Resume',
+    'Assert-StratusPostMigrationSuccessorGate\.ps1',
+    '-Mode Transition',
     'Create-new pre-0047 backup failed',
     'Full isolated PostgreSQL 16 restore acceptance failed',
     'STRATUS_PRE_MIGRATION_BACKUP_DIRECTORY',
     'STRATUS_PRE_MIGRATION_ATTESTATION',
+    'STRATUS_SUCCESSOR_LINEAGE_DIRECTORY',
+    'STRATUS_SUCCESSOR_EVIDENCE_DIRECTORY',
+    '\$cutoverAttemptId = \[guid\]::NewGuid\(\)\.ToString\("N"\)',
+    'stopped-postgres-network-repair-\$\(\$revision\.Substring\(0, 12\)\)-\$cutoverAttemptId\.json',
+    'post-migration-successor-prestart-\$\(\$revision\.Substring\(0, 12\)\)-\$cutoverAttemptId\.json',
+    'post-migration-successor-live-\$\(\$revision\.Substring\(0, 12\)\)-\$cutoverAttemptId\.json',
+    '\$successorPreStartAttestation \+ "\.watchdog-lease\.json"',
+    '\$successorPreStartAttestation \+ "\.watchdog-terminal\.json"',
+    '\$successorPreStartAttestation \+ "\.watchdog-heartbeat\.json"',
+    '\$successorPreStartAttestation \+ "\.watchdog-commit\.json"',
+    'Attempt-scoped repair/Transition evidence paths must be pairwise distinct',
+    'Attempt-scoped evidence path escaped the production root',
+    'Invoke-StratusStoppedPostgresNetworkRepair\.ps1',
+    '-NetworkRepairAttestationPath \$networkRepairAttestation',
+    'stratus-stopped-postgres-safety-plane-repair-v1',
+    'stratus-post-migration-successor-transition-live-v2',
+    '-PreStartAttestationPath \$successorPreStartAttestation',
+    '-LiveAcceptancePath \$successorLiveAcceptance',
+    'bounded exact\s+PostgreSQL stop and re-inspection',
+    'terminal failure lineage',
+    'new\s+transition session',
+    'functions_exact',
+    'transition_session\.mode',
+    'event_witness\.postgres_start_count',
+    'event_witness\.postgres_restart_policy_update_count',
+    'event_witness\.healthy_status_event_count',
+    'event_witness\.postgres_attach_count',
+    'event_witness\.network_connect_count',
+    'event_witness\.data_volume_mount_count',
+    'event_witness\.gate_exec_triplets',
+    'event_witness\.health_exec_triplets',
+    'event_witness\.reconnect_count',
+    'event_witness\.eof_before_seal',
+    'event_witness\.truncated',
+    'rollback\.on_failure',
+    'rollback\.stop_timeout_seconds',
+    'rollback\.executed',
+    'rollback\.emergency_containment',
+    'restart_policy_transition',
+    'restore_on_success',
+    'watchdog_program',
+    '334970d3f86da1a07da3f701a8349741440285b69206874fc20d63733793152a',
+    'watchdog_handoff',
+    'watchdog_lease',
+    'heartbeat_at_live',
+    'Live heartbeat_at_live" -Expected @\("sequence", "written_at", "sha256"\)',
+    'start_proof',
+    'stratus-successor-transition-watchdog-handoff-v1',
+    'stratus-successor-transition-watchdog-binding-v1',
+    'stratus-successor-transition-watchdog-lease-v1',
+    'stratus-successor-transition-watchdog-heartbeat-v1',
+    'stratus-successor-transition-watchdog-commit-v1',
+    'stratus-successor-transition-watchdog-terminal-v1',
+    'accepted_live_commit',
+    'Authoritative watchdog terminal receipt did not accept the exact Live commit',
+    'PreStart/Live network_repair is not byte-identically bound to disk evidence',
+    '\$successorLiveRepairBinding\.accepted_at -cne',
+    '\$networkRepairExpiresAt -ne \$networkRepairAcceptedAt\.AddSeconds\(600\)',
+    'compose_executable_sha256',
+    'v2\.38\.2-desktop\.1',
+    'Successor owner/watchdog Docker engine contracts are not exactly cross-bound',
+    '\$successorWatchdogTerminalProof\.status -cne "success"',
+    '\$successorWatchdogTerminalProof\.trigger -cne "accepted_live_commit"',
+    '\$successorWatchdogTerminalProof\.authorization\.api_stage_permitted -ne \$true',
+    '\$successorTransitionGate\.payload\.authorization\.api_stage_permitted -ne \$false',
+    '\$successorWatchdogTerminalProof\.commit\.postgres_started_at -cne',
+    '\$successorWatchdogTerminalProof\.commit\.docker_engine_contract_sha256 -cne',
+    '\$successorEventWitness\.postgres_restart_policy_update_count -ne 1',
+    '\$successorEventWitness\.postgres_start_count -ne 1',
+    '\$successorEventWitness\.healthy_status_event_count -ne 1',
+    '\$successorExpectedGateSequence = @\(',
+    '\$successorApiStagePermitted = \[bool\]\(',
+    'Assert-SuccessorTerminalApiAuthorizationUnchanged',
+    'Live-only consumption is forbidden; terminal composite API authorization drifted',
+    'Terminal API authorization requires an exact PostgreSQL-only topology',
+    '\$currentAuthorizedPostgres\[0\]\.State\.StartedAt -cne',
+    '\$successorWatchdogTerminalProof\.commit\.postgres_started_at',
+    'weatherpoly_default", "weatherpoly_safety-plane',
+    'reload_acknowledged',
+    'fresh_loaded_state\.conf_load_time',
+    'final_boundary\.fresh_hba_state\.conf_load_time',
+    'migration_container_permitted',
     'docker compose @releaseComposeArguments --profile release run --rm --no-deps provision-runtime-role',
     'ix_signals_pending_stop_cleanup',
     'ix_orders_live_open_stop_cleanup',
@@ -145,9 +238,9 @@ foreach ($required in @(
     '164276f8a7337705c3933e3201cb53a5a10e354ec7627768c4ac8b3e951380a4',
     '\$immediateHbaBytesBeforeReload = Get-ImmediateReleaseHbaByteProof',
     '\$immediateHbaBytesAfterRules = Get-ImmediateReleaseHbaByteProof',
-    '0115ddeb48f40fd145eaf53a7dee524f609e8a4e28eee46d300a3993b4695df5',
+    'e6b26bdffeba11e892100ce05f855db8ede8ce407a24fbef6144d2a458cc3567',
     'first post-start loaded HBA inventory did not match the fixed release proof',
-    'SELECT pg_reload_conf\(\)',
+    "SELECT 'RELOAD\|' \|\| pg_reload_conf\(\)::text",
     '\$hbaBytesBeforeReload = Get-FixedReleaseHbaByteProof',
     '\$hbaBytesAfterReload = Get-FixedReleaseHbaByteProof',
     '\$hbaBytesAfterRules = Get-FixedReleaseHbaByteProof',
@@ -168,7 +261,7 @@ foreach ($required in @(
     'docker network inspect \$expectedSafetyNetworks\[0\]',
     '\$safetyNetworks\[0\] -cne \[string\]\$expectedSafetyNetworks\[0\]',
     'com\.docker\.compose\.network'' -ne\s+"safety-plane"',
-    'docker network connect --alias postgres',
+    'Retained PostgreSQL safety-plane attachment or identity proof failed',
     '\$expectedPostgresNetworks = @\(',
     '\$postgresNetworkInspect\.Image -ne \$postgresImageId',
     '@\(\$postgresSafetyEndpoint\.Aliases\) -notcontains "postgres"',
@@ -1469,20 +1562,542 @@ $apiStageIndex = $source.IndexOf(
     'docker compose @releaseComposeArguments --profile release up --no-start --no-build --pull never --no-deps --force-recreate api',
     [StringComparison]::Ordinal
 )
+$apiStartIndex = $source.IndexOf(
+    'docker start $apiContainer[0] | Out-Null',
+    [StringComparison]::Ordinal
+)
+$compositeApiAuthorizationCallMatches = @(
+    [regex]::Matches(
+        $source,
+        '(?m)^\s*Assert-SuccessorTerminalApiAuthorizationUnchanged\s*$'
+    )
+)
 if (
     $runtimeProvisionIndex -lt 0 -or
-    $apiStageIndex -le $runtimeProvisionIndex
+    $apiStageIndex -le $runtimeProvisionIndex -or
+    $apiStartIndex -le $apiStageIndex
 ) {
     throw (
         'Release runbook must activate and prove the runtime database role ' +
         'before staging the candidate API.'
     )
 }
-$hbaReloadIndex = $source.IndexOf('SELECT pg_reload_conf()', [StringComparison]::Ordinal)
+$hbaReloadIndex = $source.IndexOf(
+    "SELECT 'RELOAD|' || pg_reload_conf()::text;",
+    [StringComparison]::Ordinal
+)
 $postgresStartIndex = $source.IndexOf(
     'docker start $postgresContainer[0]',
     [StringComparison]::Ordinal
 )
+
+function Test-AstInsideExactIfClause {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Management.Automation.Language.Ast] $Node,
+
+        [Parameter(Mandatory = $true)]
+        [Management.Automation.Language.ScriptBlockAst] $Root,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ConditionPattern
+    )
+
+    $matchingIfs = @(
+        $Root.FindAll({
+            param($candidate)
+            $candidate -is [Management.Automation.Language.IfStatementAst]
+        }, $true)
+    )
+    foreach ($ifAst in $matchingIfs) {
+        foreach ($clause in $ifAst.Clauses) {
+            $condition = $clause.Item1
+            $body = $clause.Item2
+            if (
+                $condition.Extent.Text -match $ConditionPattern -and
+                $Node.Extent.StartOffset -ge $body.Extent.StartOffset -and
+                $Node.Extent.EndOffset -le $body.Extent.EndOffset
+            ) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+$cutoverBlocks = @(
+    for ($index = 0; $index -lt $powerShellBlocks.Count; $index++) {
+        $blockText = $powerShellBlocks[$index].Groups[1].Value
+        if (
+            $blockText -match '\$cutoverSchemaPath\s*=' -and
+            $blockText -match '\$successorTransitionOutput\s*=\s*@\(\s*&'
+        ) {
+            [pscustomobject]@{
+                Text = $blockText
+                Ast = $powerShellAsts[$index]
+            }
+        }
+    }
+)
+if ($cutoverBlocks.Count -ne 1) {
+    throw 'Expected exactly one fenced PowerShell cutover block with Transition admission.'
+}
+$cutoverBlock = $cutoverBlocks[0]
+$cutoverAst = $cutoverBlock.Ast
+$cutoverAssignments = @(
+    $cutoverAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst]
+    }, $true)
+)
+$cutoverIfs = @(
+    $cutoverAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.IfStatementAst]
+    }, $true)
+)
+$cutoverCommands = @(
+    $cutoverAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst]
+    }, $true)
+)
+$cutoverFunctions = @(
+    $cutoverAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst]
+    }, $true)
+)
+
+$schemaSelectionGuards = @(
+    $cutoverIfs | Where-Object {
+        $_.Extent.Text -match (
+            '\$cutoverSchemaPath\s+-cnotin\s+@\(\s*"20260730_0046"' +
+            '\s*,\s*"20260730_0047"\s*\)'
+        ) -and
+        $_.Extent.Text -match 'STRATUS_CUTOVER_SCHEMA_PATH must explicitly select'
+    }
+)
+$containerStartCommands = @(
+    $cutoverCommands | Where-Object {
+        $_.Extent.Text -match '(?s)^docker\s+(?:start|run)\b' -or
+        $_.Extent.Text -match '(?s)^docker\s+compose\b.*\s(?:run|up)\b'
+    }
+)
+$firstContainerStartOffset = if ($containerStartCommands.Count -gt 0) {
+    [int]@(
+        $containerStartCommands |
+            ForEach-Object { $_.Extent.StartOffset } |
+            Sort-Object
+    )[0]
+}
+else { -1 }
+if (
+    $schemaSelectionGuards.Count -ne 1 -or
+    $firstContainerStartOffset -lt 0 -or
+    $schemaSelectionGuards[0].Extent.EndOffset -ge $firstContainerStartOffset
+) {
+    throw 'Exact 0046/0047 path selection must fail closed before every container start.'
+}
+
+$path0046Pattern = '\$cutoverSchemaPath\s+-ceq\s+"20260730_0046"'
+$path0047Pattern = '\$cutoverSchemaPath\s+-ceq\s+"20260730_0047"'
+$successorUnsetGuards = @(
+    $cutoverIfs | Where-Object {
+        $_.Clauses[0].Item1.Extent.Text -match '\$successorPathNames' -and
+        $_.Extent.Text -match '0046 path requires every successor lineage/evidence value to be unset'
+    }
+)
+$successorRequiredGuards = @(
+    $cutoverIfs | Where-Object {
+        $_.Clauses[0].Item1.Extent.Text -match '\$successorPathNames' -and
+        $_.Extent.Text -match '0047 Transition path requires all four immutable lineage/evidence paths'
+    }
+)
+if (
+    $successorUnsetGuards.Count -ne 1 -or
+    $successorRequiredGuards.Count -ne 1 -or
+    -not (Test-AstInsideExactIfClause -Node $successorUnsetGuards[0] `
+        -Root $cutoverAst -ConditionPattern $path0046Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $successorRequiredGuards[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    $successorUnsetGuards[0].Extent.EndOffset -ge $firstContainerStartOffset -or
+    $successorRequiredGuards[0].Extent.EndOffset -ge $firstContainerStartOffset
+) {
+    throw 'Successor paths must be absent for 0046 and complete for 0047 before any start.'
+}
+
+$transitionAssignments = @(
+    $cutoverAssignments | Where-Object {
+        $_.Extent.Text -match '^\s*\$successorTransitionOutput\s*=\s*@\(\s*&' -and
+        $_.Extent.Text -match '(?m)^\s+-Mode Transition\s+`\r?$'
+    }
+)
+$transitionAcceptanceGuards = @(
+    $cutoverIfs | Where-Object {
+        $_.Clauses[0].Item1.Extent.Text -match '\$successorTransitionGate\.accepted' -and
+        $_.Extent.Text -match 'Post-migration successor Transition gate was not accepted'
+    }
+)
+$transitionSchemaAdmissions = @(
+    $cutoverAssignments | Where-Object {
+        $_.Extent.Text -match (
+            '^\s*\$preMigrationHead\s*=\s*\[string\]' +
+            '\$successorTransitionGate\.payload\.database\.schema_head\s*$'
+        )
+    }
+)
+$outputCreateNewGuards = @(
+    $cutoverIfs | Where-Object {
+        $_.Clauses[0].Item1.Extent.Text -match '\$attemptScopedEvidencePaths' -and
+        $_.Extent.Text -match 'Every attempt-scoped repair/Transition evidence path must be absent'
+    }
+)
+$attemptAssignments = @(
+    $cutoverAssignments | Where-Object {
+        $_.Extent.Text -match (
+            '^\s*\$cutoverAttemptId\s*=\s*\[guid\]::NewGuid\(\)' +
+            '\.ToString\("N"\)\s*$'
+        )
+    }
+)
+$preStartPathAssignments = @(
+    $cutoverAssignments | Where-Object {
+        $_.Extent.Text -match '^\s*\$successorPreStartAttestation\s*=\s*Join-Path' -and
+        $_.Extent.Text -match (
+            'post-migration-successor-prestart-\$\(\$revision\.Substring\(0, 12\)\)' +
+            '-\$cutoverAttemptId\.json'
+        )
+    }
+)
+$networkRepairPathAssignments = @(
+    $cutoverAssignments | Where-Object {
+        $_.Extent.Text -match '^\s*\$networkRepairAttestation\s*=\s*Join-Path' -and
+        $_.Extent.Text -match (
+            'stopped-postgres-network-repair-\$\(\$revision\.Substring\(0, 12\)\)' +
+            '-\$cutoverAttemptId\.json'
+        )
+    }
+)
+$livePathAssignments = @(
+    $cutoverAssignments | Where-Object {
+        $_.Extent.Text -match '^\s*\$successorLiveAcceptance\s*=\s*Join-Path' -and
+        $_.Extent.Text -match (
+            'post-migration-successor-live-\$\(\$revision\.Substring\(0, 12\)\)' +
+            '-\$cutoverAttemptId\.json'
+        )
+    }
+)
+$watchdogLeasePathAssignments = @(
+    $cutoverAssignments | Where-Object {
+        $_.Extent.Text -match (
+            '^\s*\$successorWatchdogLease\s*=\s*' +
+            '\$successorPreStartAttestation\s*\+\s*"\.watchdog-lease\.json"\s*$'
+        )
+    }
+)
+$watchdogTerminalPathAssignments = @(
+    $cutoverAssignments | Where-Object {
+        $_.Extent.Text -match (
+            '^\s*\$successorWatchdogTerminal\s*=\s*' +
+            '\$successorPreStartAttestation\s*\+\s*"\.watchdog-terminal\.json"\s*$'
+        )
+    }
+)
+$watchdogHeartbeatPathAssignments = @(
+    $cutoverAssignments | Where-Object {
+        $_.Extent.Text -match (
+            '^\s*\$successorWatchdogHeartbeat\s*=\s*' +
+            '\$successorPreStartAttestation\s*\+\s*"\.watchdog-heartbeat\.json"\s*$'
+        )
+    }
+)
+$watchdogCommitPathAssignments = @(
+    $cutoverAssignments | Where-Object {
+        $_.Extent.Text -match (
+            '^\s*\$successorWatchdogCommit\s*=\s*' +
+            '\$successorPreStartAttestation\s*\+\s*"\.watchdog-commit\.json"\s*$'
+        )
+    }
+)
+$watchdogAttemptPathSets = @(
+    $cutoverAssignments | Where-Object {
+        $_.Extent.Text -match '^\s*\$attemptScopedEvidencePaths\s*\+=' -and
+        $_.Extent.Text -match '\$successorPreStartAttestation' -and
+        $_.Extent.Text -match '\$successorLiveAcceptance' -and
+        $_.Extent.Text -match '\$successorWatchdogLease' -and
+        $_.Extent.Text -match '\$successorWatchdogTerminal' -and
+        $_.Extent.Text -match '\$successorWatchdogHeartbeat' -and
+        $_.Extent.Text -match '\$successorWatchdogCommit'
+    }
+)
+$terminalAcceptanceGuards = @(
+    $cutoverIfs | Where-Object {
+        $_.Clauses[0].Item1.Extent.Text -match '\$successorWatchdogTerminalProof\.status' -and
+        $_.Extent.Text -match (
+            'Authoritative watchdog terminal receipt did not accept the exact Live commit'
+        )
+    }
+)
+$apiStageEffectAssignments = @(
+    $cutoverAssignments | Where-Object {
+        $_.Extent.Text -match (
+            '^\s*\$successorApiStagePermitted\s*=\s*\[bool\]\(\s*' +
+            '\$successorWatchdogTerminalProof\.authorization\.' +
+            'api_stage_permitted\s*\)\s*$'
+        )
+    }
+)
+$compositeApiAuthorizationCalls = @(
+    $cutoverCommands | Where-Object {
+        $_.GetCommandName() -ceq 'Assert-SuccessorTerminalApiAuthorizationUnchanged'
+    } | Sort-Object -Property { $_.Extent.StartOffset }
+)
+$runtimeProvisionCommands = @(
+    $cutoverCommands | Where-Object {
+        $_.Extent.Text -match (
+            '^docker\s+compose\s+@releaseComposeArguments\s+--profile\s+release\s+' +
+            'run\s+--rm\s+--no-deps\s+provision-runtime-role$'
+        )
+    }
+)
+$apiStageCommands = @(
+    $cutoverCommands | Where-Object {
+        $_.Extent.Text -match (
+            '^docker\s+compose\s+@releaseComposeArguments\s+--profile\s+release\s+' +
+            'up\s+--no-start\s+--no-build\s+--pull\s+never\s+--no-deps\s+' +
+            '--force-recreate\s+api$'
+        )
+    }
+)
+$apiStartCommands = @(
+    $cutoverCommands | Where-Object {
+        $_.Extent.Text -match '^docker\s+start\s+\$apiContainer\[0\]'
+    }
+)
+$terminalApiAuthorizationFunctions = @(
+    $cutoverFunctions | Where-Object {
+        $_.Name -ceq 'Assert-SuccessorTerminalApiAuthorizationUnchanged'
+    }
+)
+$terminalApiAuthorizationFunctionComplete = $false
+if ($terminalApiAuthorizationFunctions.Count -eq 1) {
+    $functionText = $terminalApiAuthorizationFunctions[0].Extent.Text
+    $terminalApiAuthorizationFunctionComplete = @(
+        @(
+            '&\s+\$currentDockerExecutable\s+context\s+show',
+            '&\s+\$currentDockerExecutable\s+info\s+--format',
+            '&\s+\$currentDockerExecutable\s+ps\s+--no-trunc\s+--format',
+            '&\s+\$currentDockerExecutable\s+inspect\s+\$postgresContainer\[0\]\s+--format',
+            '\$currentCoreEngineProof\s*\|\s*ConvertTo-Json',
+            '\$successorCoreEngineProof\s*\|\s*ConvertTo-Json',
+            '\$currentLegacyEngineProof\s*\|\s*ConvertTo-Json',
+            '\$successorWatchdogEngineProof\s*\|\s*ConvertTo-Json',
+            '\$currentRunningContainerIds\.Count\s+-ne\s+1',
+            '\.State\.StartedAt\s+-cne',
+            '\.State\.Health\.Status\s+-cne\s+"healthy"',
+            '\.HostConfig\.RestartPolicy\.Name\s+-cne\s+"no"',
+            '\.HostConfig\.NetworkMode\s+-cne',
+            '77551e8d1119201f778fdb90e151ec26f1d9cc23832ba7b88c4db6203e3d8ba2',
+            '0d1ad122718694dbc5e6714f69a601a7d429e23a0b74eecdb10ace944e5c8620',
+            '\$currentLiveProof\.payload\.authorization\.api_stage_permitted\s+-ne\s+\$false',
+            '\$currentTerminalProof\.authorization\.api_stage_permitted\s+-ne\s+\$true',
+            'Get-CutoverFileSha256\s+-LiteralPath\s+\$networkRepairAttestation',
+            'Get-CutoverFileSha256\s+-LiteralPath\s+\$successorLiveAcceptance',
+            'Get-CutoverFileSha256\s+-LiteralPath\s+\$successorPreStartAttestation',
+            'Get-CutoverFileSha256\s+-LiteralPath\s+\$successorWatchdogLease',
+            'Get-CutoverFileSha256\s+-LiteralPath\s+\$successorWatchdogHeartbeat',
+            'Get-CutoverFileSha256\s+-LiteralPath\s+\$successorWatchdogCommit',
+            'Get-CutoverFileSha256\s+-LiteralPath\s+\$successorWatchdogTerminal',
+            'Get-CutoverFileSha256\s+-LiteralPath\s+\$successorWatchdogProgram\.script_path',
+            'Get-CutoverFileSha256\s+-LiteralPath\s+\$successorWatchdogProgram\.host_path'
+        ) | Where-Object { $functionText -notmatch $_ }
+    ).Count -eq 0
+}
+$compositeApiAuthorizationCallsAllGuarded = $true
+foreach ($call in $compositeApiAuthorizationCalls) {
+    if (-not (Test-AstInsideExactIfClause -Node $call -Root $cutoverAst `
+        -ConditionPattern $path0047Pattern)) {
+        $compositeApiAuthorizationCallsAllGuarded = $false
+    }
+}
+$terminalAcceptanceContractComplete = $false
+if ($terminalAcceptanceGuards.Count -eq 1) {
+    $terminalText = $terminalAcceptanceGuards[0].Extent.Text
+    $terminalAcceptanceContractComplete = @(
+        @(
+            '\.status\s+-cne\s+"success"',
+            '\.trigger\s+-cne\s+"accepted_live_commit"',
+            '\$null\s+-ne\s+\$successorWatchdogTerminalProof\.containment',
+            '\$null\s+-ne\s+\$successorWatchdogTerminalProof\.failure',
+            '\.authorization\.api_stage_permitted\s+-ne\s+\$true',
+            '\.authorization\.worker_start_permitted\s+-ne\s+\$false',
+            '\.authorization\.safety_control_start_permitted\s+-ne\s+\$false',
+            '\.authorization\.live_transition_permitted\s+-ne\s+\$false',
+            '\.authorization\.binance_kill_switch_removal_permitted\s+-ne',
+            '\.lease_sha256\s+-cne\s+\$successorWatchdogLeaseSha256',
+            '\.commit\.marker_sha256\s+-cne',
+            '\.commit\.live_sha256\s+-cne',
+            '\.commit\.live_payload_sha256\s+-cne',
+            '\.commit\.postgres_started_at\s+-cne',
+            '\.commit\.docker_engine_contract_sha256\s+-cne'
+        ) | Where-Object { $terminalText -notmatch $_ }
+    ).Count -eq 0
+}
+$transitionAcceptanceContractComplete = $false
+if ($transitionAcceptanceGuards.Count -eq 1) {
+    $acceptanceText = $transitionAcceptanceGuards[0].Extent.Text
+    $requiredAcceptancePatterns = @(
+        'stratus-post-migration-successor-transition-live-v2',
+        '\.payload\.prestart\.path',
+        '\.payload\.transition_session\.mode',
+        '\.event_witness\.postgres_start_count\s+-ne\s+1',
+        '\.event_witness\.postgres_restart_policy_update_count\s+-ne\s+1',
+        '\.event_witness\.healthy_status_event_count\s+-ne\s+1',
+        '\.event_witness\.postgres_attach_count\s+-ne\s+0',
+        '\.event_witness\.network_connect_count\s+-ne\s+2',
+        '\.event_witness\.data_volume_mount_count\s+-ne\s+1',
+        '\.event_witness\.gate_exec_triplets\s+-ne\s+8',
+        '\.event_witness\.health_exec_triplets\s+-lt\s+1',
+        '\.event_witness\.health_exec_triplets\s+-gt\s+64',
+        '\.event_witness\.reconnect_count\s+-ne\s+0',
+        '\.event_witness\.eof_before_seal',
+        '\.event_witness\.truncated',
+        '\.rollback\.on_failure',
+        '\.rollback\.stop_timeout_seconds\s+-ne\s+15',
+        '\.rollback\.executed',
+        '\.rollback\.emergency_containment',
+        '\.postgres_transition\.restart_policy\s+-cne\s+"no"',
+        '\.hba\.reload_acknowledged',
+        '\.final_boundary\.fresh_hba_state\.conf_load_time',
+        '\.authorization\.live_transition_permitted',
+        '\.authorization\.binance_kill_switch_removal_permitted',
+        '\.authorization\.api_stage_permitted\s+-ne\s+\$false',
+        '\$successorApiStagePermitted\s+-ne\s+\$true',
+        'Get-CutoverFileSha256\s+-LiteralPath\s+\$successorWatchdogTerminal'
+    )
+    $transitionAcceptanceContractComplete = @(
+        $requiredAcceptancePatterns | Where-Object {
+            $acceptanceText -notmatch $_
+        }
+    ).Count -eq 0
+}
+if (
+    $transitionAssignments.Count -ne 1 -or
+    $transitionAcceptanceGuards.Count -ne 1 -or
+    $transitionSchemaAdmissions.Count -ne 1 -or
+    $outputCreateNewGuards.Count -ne 1 -or
+    $attemptAssignments.Count -ne 1 -or
+    $preStartPathAssignments.Count -ne 1 -or
+    $networkRepairPathAssignments.Count -ne 1 -or
+    $livePathAssignments.Count -ne 1 -or
+    $watchdogLeasePathAssignments.Count -ne 1 -or
+    $watchdogTerminalPathAssignments.Count -ne 1 -or
+    $watchdogHeartbeatPathAssignments.Count -ne 1 -or
+    $watchdogCommitPathAssignments.Count -ne 1 -or
+    $watchdogAttemptPathSets.Count -ne 1 -or
+    $terminalAcceptanceGuards.Count -ne 1 -or
+    $apiStageEffectAssignments.Count -ne 1 -or
+    $compositeApiAuthorizationCalls.Count -ne 1 -or
+    $terminalApiAuthorizationFunctions.Count -ne 1 -or
+    -not $terminalApiAuthorizationFunctionComplete -or
+    -not (Test-AstInsideExactIfClause -Node $terminalApiAuthorizationFunctions[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    -not $compositeApiAuthorizationCallsAllGuarded -or
+    $compositeApiAuthorizationCallMatches.Count -ne 4 -or
+    -not $terminalAcceptanceContractComplete -or
+    -not $transitionAcceptanceContractComplete -or
+    -not (Test-AstInsideExactIfClause -Node $transitionAssignments[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $transitionAcceptanceGuards[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $transitionSchemaAdmissions[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $preStartPathAssignments[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $livePathAssignments[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $watchdogLeasePathAssignments[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $watchdogTerminalPathAssignments[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $watchdogHeartbeatPathAssignments[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $watchdogCommitPathAssignments[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $watchdogAttemptPathSets[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $terminalAcceptanceGuards[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $apiStageEffectAssignments[0] `
+        -Root $cutoverAst -ConditionPattern $path0047Pattern) -or
+    $attemptAssignments[0].Extent.EndOffset -ge
+        $preStartPathAssignments[0].Extent.StartOffset -or
+    $attemptAssignments[0].Extent.EndOffset -ge
+        $livePathAssignments[0].Extent.StartOffset -or
+    $attemptAssignments[0].Extent.EndOffset -ge
+        $networkRepairPathAssignments[0].Extent.StartOffset -or
+    $preStartPathAssignments[0].Extent.EndOffset -ge
+        $outputCreateNewGuards[0].Extent.StartOffset -or
+    $livePathAssignments[0].Extent.EndOffset -ge
+        $outputCreateNewGuards[0].Extent.StartOffset -or
+    $networkRepairPathAssignments[0].Extent.EndOffset -ge
+        $outputCreateNewGuards[0].Extent.StartOffset -or
+    $watchdogLeasePathAssignments[0].Extent.EndOffset -ge
+        $watchdogAttemptPathSets[0].Extent.StartOffset -or
+    $watchdogTerminalPathAssignments[0].Extent.EndOffset -ge
+        $watchdogAttemptPathSets[0].Extent.StartOffset -or
+    $watchdogHeartbeatPathAssignments[0].Extent.EndOffset -ge
+        $watchdogAttemptPathSets[0].Extent.StartOffset -or
+    $watchdogCommitPathAssignments[0].Extent.EndOffset -ge
+        $watchdogAttemptPathSets[0].Extent.StartOffset -or
+    $watchdogAttemptPathSets[0].Extent.EndOffset -ge
+        $outputCreateNewGuards[0].Extent.StartOffset -or
+    $outputCreateNewGuards[0].Extent.EndOffset -ge
+        $transitionAssignments[0].Extent.StartOffset -or
+    $transitionAssignments[0].Extent.EndOffset -ge
+        $terminalAcceptanceGuards[0].Extent.StartOffset -or
+    $terminalAcceptanceGuards[0].Extent.EndOffset -ge
+        $apiStageEffectAssignments[0].Extent.StartOffset -or
+    $apiStageEffectAssignments[0].Extent.EndOffset -ge
+        $transitionAcceptanceGuards[0].Extent.StartOffset -or
+    $transitionAcceptanceGuards[0].Extent.EndOffset -ge
+        $transitionSchemaAdmissions[0].Extent.StartOffset -or
+    $compositeApiAuthorizationCalls[0].Extent.StartOffset -le
+        $apiStageEffectAssignments[0].Extent.EndOffset -or
+    $compositeApiAuthorizationCallMatches[1].Index -ge $runtimeProvisionIndex -or
+    $compositeApiAuthorizationCallMatches[2].Index -le $runtimeProvisionIndex -or
+    $compositeApiAuthorizationCallMatches[2].Index -ge $apiStageIndex -or
+    $compositeApiAuthorizationCallMatches[3].Index -le $apiStageIndex -or
+    $compositeApiAuthorizationCallMatches[3].Index -ge $apiStartIndex
+) {
+    throw (
+        'The cutover must use one fresh attempt ID for repair and all six Transition ' +
+        'create-new paths, require authoritative watchdog terminal success, fully ' +
+        'accept 0047, and only then admit its schema head. ' +
+        "paths=$($watchdogLeasePathAssignments.Count)/$($watchdogTerminalPathAssignments.Count)/" +
+        "$($watchdogHeartbeatPathAssignments.Count)/$($watchdogCommitPathAssignments.Count); " +
+        "set=$($watchdogAttemptPathSets.Count); terminal=$($terminalAcceptanceGuards.Count)/" +
+        "$terminalAcceptanceContractComplete; effective=$($apiStageEffectAssignments.Count); " +
+        "acceptance=$transitionAcceptanceContractComplete; recheck=" +
+        "$($terminalApiAuthorizationFunctions.Count)/$terminalApiAuthorizationFunctionComplete; calls=" +
+        "$($compositeApiAuthorizationCalls.Count)/$compositeApiAuthorizationCallsAllGuarded/" +
+        "$($compositeApiAuthorizationCallMatches.Count)"
+    )
+}
+
+$postgresStartCommands = @(
+    $cutoverCommands | Where-Object {
+        $_.Extent.Text -match '^docker\s+start\s+\$postgresContainer\[0\]'
+    }
+)
+if (
+    $postgresStartCommands.Count -ne 1 -or
+    -not (Test-AstInsideExactIfClause -Node $postgresStartCommands[0] `
+        -Root $cutoverAst -ConditionPattern $path0046Pattern)
+) {
+    throw 'Only the explicit 0046 clause may contain a runbook PostgreSQL start.'
+}
 $immediateHbaFinalByteProofIndex = $source.IndexOf(
     '$immediateHbaBytesAfterRules = Get-ImmediateReleaseHbaByteProof',
     [StringComparison]::Ordinal
@@ -1513,21 +2128,54 @@ if (
     throw 'Fixed HBA reload/rules/TOCTOU proof must complete before runtime-role admission.'
 }
 
-$preMigrationCreateGateIndex = $source.IndexOf(
-    '-Mode Create',
-    [StringComparison]::Ordinal
+$migrateStageCommands = @(
+    $cutoverCommands | Where-Object {
+        $_.Extent.Text -match (
+            '(?s)^docker\s+compose\b.*--no-start\b.*' +
+            '--force-recreate\s+migrate\s*$'
+        )
+    }
 )
-$migrationStartIndex = $source.IndexOf(
-    'docker start $migrateContainer',
-    [StringComparison]::Ordinal
+$migrateStartCommands = @(
+    $cutoverCommands | Where-Object {
+        $_.Extent.Text -match '^docker\s+start\s+\$migrateContainer\b'
+    }
+)
+$preMigrationGateAssignments = @(
+    $cutoverAssignments | Where-Object {
+        $_.Extent.Text -match '^\s*\$preMigrationGate\s*=\s*&' -and
+        $_.Extent.Text -match '(?m)^\s+-Mode Create\s+`\r?$'
+    }
+)
+$preMigrationAcceptanceGuards = @(
+    $cutoverIfs | Where-Object {
+        $_.Clauses[0].Item1.Extent.Text -match '\$preMigrationGate\.verified' -and
+        $_.Extent.Text -match 'Pre-migration backup/restore/live-state gate was not accepted'
+    }
 )
 if (
-    $preMigrationCreateGateIndex -lt 0 -or
-    $migrationStartIndex -le $preMigrationCreateGateIndex
+    $migrateStageCommands.Count -ne 1 -or
+    $migrateStartCommands.Count -ne 1 -or
+    $preMigrationGateAssignments.Count -ne 1 -or
+    $preMigrationAcceptanceGuards.Count -ne 1 -or
+    -not (Test-AstInsideExactIfClause -Node $migrateStageCommands[0] `
+        -Root $cutoverAst -ConditionPattern $path0046Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $migrateStartCommands[0] `
+        -Root $cutoverAst -ConditionPattern $path0046Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $preMigrationGateAssignments[0] `
+        -Root $cutoverAst -ConditionPattern $path0046Pattern) -or
+    -not (Test-AstInsideExactIfClause -Node $preMigrationAcceptanceGuards[0] `
+        -Root $cutoverAst -ConditionPattern $path0046Pattern) -or
+    $migrateStageCommands[0].Extent.EndOffset -ge
+        $preMigrationGateAssignments[0].Extent.StartOffset -or
+    $preMigrationGateAssignments[0].Extent.EndOffset -ge
+        $preMigrationAcceptanceGuards[0].Extent.StartOffset -or
+    $preMigrationAcceptanceGuards[0].Extent.EndOffset -ge
+        $migrateStartCommands[0].Extent.StartOffset
 ) {
     throw (
-        'Release runbook must accept the create-new backup/restore/live-state ' +
-        'gate immediately before starting migration DDL.'
+        'Migrate create/start and its accepted create-new backup gate must ' +
+        'remain exclusively inside the exact 0046 clause.'
     )
 }
 
@@ -1565,18 +2213,18 @@ $safetyNetworkIdentityIndex = $source.IndexOf(
 )
 $safetyStartIndex = $source.IndexOf(
     'docker start $safetyContainer[0]',
-    $postgresSafetyAttachIndex,
+    $safetyNetworkIdentityIndex,
     [StringComparison]::Ordinal
 )
 if (
     $safetyStageIndex -lt 0 -or
     $safetyNetworkIdentityIndex -le $safetyStageIndex -or
-    $postgresSafetyAttachIndex -le $safetyNetworkIdentityIndex -or
-    $safetyStartIndex -le $postgresSafetyAttachIndex
+    $postgresSafetyAttachIndex -ne -1 -or
+    $safetyStartIndex -le $safetyNetworkIdentityIndex
 ) {
     throw (
-        'Release runbook must attach and prove the retained PostgreSQL ' +
-        'safety-plane endpoint before safety-control starts.'
+        'Release runbook must read-only prove the already repaired PostgreSQL ' +
+        'safety-plane endpoint before safety-control starts, without a late attach.'
     )
 }
 
@@ -1831,6 +2479,12 @@ if (
     exception_safe_canary_cleanup_required = $true
     outer_canary_lifetime_scope_required = $true
     native_external_proof_types_required = $true
+    cutover_schema_path_explicit_before_start_required = $true
+    successor_transition_create_new_required = $true
+    successor_transition_before_schema_admission_required = $true
+    successor_transition_watchdog_terminal_required = $true
+    successor_transition_failure_rollback_required = $true
+    successor_migration_rerun_forbidden = $true
     terminal_stop_barrier_required = $true
     validated = $true
 } | ConvertTo-Json -Compress
