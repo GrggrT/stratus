@@ -33,13 +33,13 @@ Use a 40-character commit and a tag derived from its first 12 characters:
 ```powershell
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$expectedReleaseDockerSha256 =
+$global:StratusExpectedReleaseDockerSha256 =
   "388f231898cff8674a2aa341e306b77fd1f93a5954dd33ff556575a69227824d"
-$expectedReleaseGitSha256 =
+$global:StratusExpectedReleaseGitSha256 =
   "fec691d80fccc35fcc309fbc9f720536c1d795b8a562ec169f28c9923da9600f"
-$expectedReleaseComposeSha256 =
+$global:StratusExpectedReleaseComposeSha256 =
   "8482829f77d14da8dfdfd0b553847946cee5161c90312219cf4f47d1f132d2bf"
-$releaseComposePlugin = [IO.Path]::GetFullPath(
+$global:StratusReleaseComposePlugin = [IO.Path]::GetFullPath(
   "C:\Program Files\Docker\cli-plugins\docker-compose.exe"
 )
 
@@ -66,10 +66,10 @@ function Resolve-ApprovedReleaseApplication {
   return $approved[0]
 }
 
-$script:releaseDockerExecutable = Resolve-ApprovedReleaseApplication `
-  -Name "docker" -ExpectedSha256 $expectedReleaseDockerSha256
-$script:releaseGitExecutable = Resolve-ApprovedReleaseApplication `
-  -Name "git" -ExpectedSha256 $expectedReleaseGitSha256
+$global:StratusReleaseDockerExecutable = Resolve-ApprovedReleaseApplication `
+  -Name "docker" -ExpectedSha256 $global:StratusExpectedReleaseDockerSha256
+$global:StratusReleaseGitExecutable = Resolve-ApprovedReleaseApplication `
+  -Name "git" -ExpectedSha256 $global:StratusExpectedReleaseGitSha256
 foreach ($forbiddenOverride in @(
   "DOCKER_API_VERSION",
   "DOCKER_CERT_PATH",
@@ -100,22 +100,22 @@ if (Test-Path -LiteralPath $userComposePlugin) {
 
 function Assert-ReleaseExecutableBoundary {
   if (
-    (Get-FileHash -LiteralPath $script:releaseDockerExecutable -Algorithm SHA256).
-      Hash.ToLowerInvariant() -cne $expectedReleaseDockerSha256 -or
-    (Get-FileHash -LiteralPath $script:releaseGitExecutable -Algorithm SHA256).
-      Hash.ToLowerInvariant() -cne $expectedReleaseGitSha256 -or
-    -not (Test-Path -LiteralPath $releaseComposePlugin -PathType Leaf) -or
-    ((Get-Item -LiteralPath $releaseComposePlugin -Force).Attributes -band
+    (Get-FileHash -LiteralPath $global:StratusReleaseDockerExecutable -Algorithm SHA256).
+      Hash.ToLowerInvariant() -cne $global:StratusExpectedReleaseDockerSha256 -or
+    (Get-FileHash -LiteralPath $global:StratusReleaseGitExecutable -Algorithm SHA256).
+      Hash.ToLowerInvariant() -cne $global:StratusExpectedReleaseGitSha256 -or
+    -not (Test-Path -LiteralPath $global:StratusReleaseComposePlugin -PathType Leaf) -or
+    ((Get-Item -LiteralPath $global:StratusReleaseComposePlugin -Force).Attributes -band
       [IO.FileAttributes]::ReparsePoint) -or
-    (Get-FileHash -LiteralPath $releaseComposePlugin -Algorithm SHA256).
-      Hash.ToLowerInvariant() -cne $expectedReleaseComposeSha256
+    (Get-FileHash -LiteralPath $global:StratusReleaseComposePlugin -Algorithm SHA256).
+      Hash.ToLowerInvariant() -cne $global:StratusExpectedReleaseComposeSha256
   ) {
     throw "Release Docker, Compose, or Git executable provenance changed."
   }
 }
 
 function Assert-ReleaseDockerEngineBoundary {
-  $contextOutput = @(& $script:releaseDockerExecutable context show 2>&1)
+  $contextOutput = @(& $global:StratusReleaseDockerExecutable context show 2>&1)
   if (
     $LASTEXITCODE -ne 0 -or
     $contextOutput.Count -ne 1 -or
@@ -124,11 +124,11 @@ function Assert-ReleaseDockerEngineBoundary {
     throw "Release Docker context is not the pinned desktop-linux context."
   }
   $endpointOutput = @(
-    & $script:releaseDockerExecutable context inspect desktop-linux `
+    & $global:StratusReleaseDockerExecutable context inspect desktop-linux `
       --format "{{json .Endpoints.docker}}" 2>&1
   )
   $engineOutput = @(
-    & $script:releaseDockerExecutable info --format "{{json .}}" 2>&1
+    & $global:StratusReleaseDockerExecutable info --format "{{json .}}" 2>&1
   )
   if (
     $endpointOutput.Count -ne 1 -or
@@ -152,11 +152,11 @@ function Assert-ReleaseDockerEngineBoundary {
 function docker {
   Assert-ReleaseExecutableBoundary
   Assert-ReleaseDockerEngineBoundary
-  & $script:releaseDockerExecutable @args
+  & $global:StratusReleaseDockerExecutable @args
 }
 function git {
   Assert-ReleaseExecutableBoundary
-  & $script:releaseGitExecutable @args
+  & $global:StratusReleaseGitExecutable @args
 }
 Assert-ReleaseExecutableBoundary
 $releaseDockerPlugins = @(
@@ -169,7 +169,7 @@ if (
   $LASTEXITCODE -ne 0 -or
   $releaseComposePluginProof.Count -ne 1 -or
   [IO.Path]::GetFullPath([string]$releaseComposePluginProof[0].Path) -cne
-    $releaseComposePlugin -or
+    $global:StratusReleaseComposePlugin -or
   [string]$releaseComposePluginProof[0].Version -cne "v2.38.2-desktop.1"
 ) {
   throw "Docker did not expose the exact source-approved Compose plugin."

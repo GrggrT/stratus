@@ -43,7 +43,8 @@ foreach ($forbidden in @(
     '(?m)^\s*\.\\scripts\\Assert-StratusLoadGateArtifacts\.ps1',
     '(?m)^\s*\.\\scripts\\Assert-StratusReleaseImage\.ps1',
     '\-Mode Resume',
-    '(?m)^\s+-Mode (?:PreStart|Live)\s+`\r?$'
+    '(?m)^\s+-Mode (?:PreStart|Live)\s+`\r?$',
+    '\$script:release(?:Docker|Git)Executable'
 )) {
     if ($source -match $forbidden) {
         throw "Release runbook contains an unsafe or non-portable command: $forbidden"
@@ -66,6 +67,12 @@ foreach ($required in @(
     '\$postBackupStopTopology\.allowed_running_backup_count -ne 0',
     'Backup or application process remained after the pre-start stop boundary',
     'STRATUS_RELEASE_WORKTREE',
+    '\$global:StratusReleaseDockerExecutable',
+    '\$global:StratusReleaseGitExecutable',
+    '\$global:StratusReleaseComposePlugin',
+    '\$global:StratusExpectedReleaseDockerSha256',
+    '\$global:StratusExpectedReleaseGitSha256',
+    '\$global:StratusExpectedReleaseComposeSha256',
     'git -C \$productionRoot status --porcelain=v1 --untracked-files=all',
     '\$productionRevision -ne \$revision',
     'Production checkout must be the exact clean release revision',
