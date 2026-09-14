@@ -31,6 +31,90 @@ jobs:
           NATIVE_TEST_SHELL: ${{ matrix.shell }}
         run: |
           $ErrorActionPreference = 'Stop'
+          function Get-CurrentJobDiagnostics {
+            param([string] $Phase)
+            $snapshot = [ordered]@{
+              phase = $Phase
+              observed_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
+              process_id = $PID
+              scope = 'current-shell-immediate-job-only'
+              data = $null
+              diagnostic_failure_type = $null
+            }
+            try {
+              if (-not ('StratusWorkflowDiagnostics.CurrentJob' -as [type])) {
+                Add-Type -TypeDefinition @'
+          using System;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+          namespace StratusWorkflowDiagnostics {
+            public static class CurrentJob {
+              [StructLayout(LayoutKind.Sequential)] private struct Basic {
+                public long ProcessTime, JobTime;
+                public uint LimitFlags;
+                public UIntPtr MinimumWorkingSet, MaximumWorkingSet;
+                public uint ActiveProcessLimit;
+                public UIntPtr Affinity;
+                public uint PriorityClass, SchedulingClass;
+              }
+              [StructLayout(LayoutKind.Sequential)] private struct Io {
+                public ulong ReadOps, WriteOps, OtherOps, ReadBytes, WriteBytes, OtherBytes;
+              }
+              [StructLayout(LayoutKind.Sequential)] private struct Extended {
+                public Basic BasicLimits;
+                public Io Counters;
+                public UIntPtr ProcessMemory, JobMemory, PeakProcessMemory, PeakJobMemory;
+              }
+              [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+              [DllImport("kernel32.dll", SetLastError=true)]
+              private static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool inside);
+              [DllImport("kernel32.dll", SetLastError=true)]
+              private static extern bool QueryInformationJobObject(IntPtr job, int kind,
+                out Extended info, uint size, out uint returned);
+              public static Dictionary<string,object> Read() {
+                var value = new Dictionary<string,object>();
+                bool inside;
+                bool success = IsProcessInJob(GetCurrentProcess(), IntPtr.Zero, out inside);
+                int error = success ? 0 : Marshal.GetLastWin32Error();
+                value["membership_query_succeeded"] = success;
+                value["membership_error_code"] = error;
+                value["in_any_job"] = success ? (object)inside : null;
+                value["limits_query_attempted"] = success && inside;
+                value["limits_query_succeeded"] = null;
+                value["limits_error_code"] = null;
+                value["structure_size"] = Marshal.SizeOf(typeof(Extended));
+                value["returned_size"] = null;
+                value["size_matches"] = null;
+                value["limit_flags"] = null;
+                value["breakaway_ok"] = null;
+                value["silent_breakaway_ok"] = null;
+                if (!success || !inside) return value;
+                Extended info;
+                uint returned;
+                uint size = (uint)Marshal.SizeOf(typeof(Extended));
+                success = QueryInformationJobObject(IntPtr.Zero, 9, out info, size, out returned);
+                error = success ? 0 : Marshal.GetLastWin32Error();
+                value["limits_query_succeeded"] = success;
+                value["limits_error_code"] = error;
+                value["returned_size"] = returned;
+                value["size_matches"] = success && returned == size;
+                if (success && returned == size) {
+                  uint flags = info.BasicLimits.LimitFlags;
+                  value["limit_flags"] = flags;
+                  value["breakaway_ok"] = (flags & 0x800) != 0;
+                  value["silent_breakaway_ok"] = (flags & 0x1000) != 0;
+                }
+                return value;
+              }
+            }
+          }
+          '@
+              }
+              $snapshot.data = [StratusWorkflowDiagnostics.CurrentJob]::Read()
+            }
+            catch { $snapshot.diagnostic_failure_type = $_.Exception.GetType().FullName }
+            return $snapshot
+          }
           function Get-NativeCreateDiagnostics {
             param([object[]] $Records)
             $seen = [Collections.Generic.HashSet[Exception]]::new()
@@ -88,6 +172,8 @@ jobs:
             failure = $null
             diagnostic_schema = 'stratus-native-create-errors-v1'
             native_create_errors = @()
+            job_diagnostic_schema = 'stratus-current-shell-job-v1'
+            job_snapshots = @()
           }
           $exitCode = 1
           $transcribing = $false
@@ -111,6 +197,7 @@ jobs:
             if ($env:NATIVE_TEST_SHELL -ceq 'pwsh' -and $PSVersionTable.PSVersion.Major -lt 7) {
               throw 'PowerShell 7 is required for this matrix member.'
             }
+            $result.job_snapshots += Get-CurrentJobDiagnostics -Phase 'before-suite'
             & (Join-Path $env:GITHUB_WORKSPACE 'scripts/tests/Test-StratusParentStageWatchdog.ps1') |
               ForEach-Object {
                 $line = [string]$_
@@ -131,6 +218,7 @@ jobs:
             Write-Output ('NATIVE_CREATE_DIAGNOSTICS=' + ($result.native_create_errors | ConvertTo-Json -Depth 4 -Compress))
           }
           finally {
+            $result.job_snapshots += Get-CurrentJobDiagnostics -Phase 'after-suite'
             try {
               $children = @(Get-CimInstance Win32_Process -Filter "Name = 'ParentPrimitiveChild.exe'" -ErrorAction Stop)
               $fixtures = @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'stratus-parent-primitives-*' -ErrorAction Stop)
