@@ -1,0 +1,124 @@
+name: STRATUS frozen native host check
+
+on:
+  push:
+    branches:
+      - 'codex/parent-stage-native-check-*'
+
+permissions:
+  contents: read
+
+jobs:
+  native-primitives:
+    name: Frozen native primitives (${{ matrix.shell }})
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact frozen bytes and run the whole suite
+        shell: ${{ matrix.shell }}
+        env:
+          NATIVE_TEST_SHELL: ${{ matrix.shell }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $env:RUNNER_TEMP 'stratus-native-host-evidence'
+          [void][IO.Directory]::CreateDirectory($output)
+          $transcript = Join-Path $output 'transcript.txt'
+          $resultPath = Join-Path $output 'result.json'
+          $result = [ordered]@{
+            format = 'stratus-native-host-check-v1'
+            commit = $env:GITHUB_SHA
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            shell = $env:NATIVE_TEST_SHELL
+            shell_version = $PSVersionTable.PSVersion.ToString()
+            runner_os = $env:RUNNER_OS
+            runner_arch = $env:RUNNER_ARCH
+            runner_image = $env:ImageOS
+            runner_image_version = $env:ImageVersion
+            started_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
+            source_hashes = @()
+            suite_passed = $false
+            passed_case_count = 0
+            cleanup_verified = $false
+            full_parent_protocol_accepted = $false
+            production_authorized = $false
+            failure = $null
+          }
+          $exitCode = 1
+          $transcribing = $false
+          try {
+            [void](Start-Transcript -LiteralPath $transcript -ErrorAction Stop)
+            $transcribing = $true
+            $expected = [ordered]@{
+              'scripts/Stratus.ParentStage.Runtime.cs' = '71f0619da9aad5769ff7528984dee95de590ba4f920fd62b7e053356130ba249'
+              'scripts/Invoke-StratusParentStageWatchdog.ps1' = '7dcf593d44aaae5d77e7250191a91dba576b4c3d8d17e169b2ad9a6b0d54b161'
+              'scripts/tests/Test-StratusParentStageWatchdog.ps1' = '088816016f4ae8c6ca3286602b0471f03ead66f2ed8f438f40bb34b0f7b543a1'
+            }
+            foreach ($relative in $expected.Keys) {
+              $path = Join-Path $env:GITHUB_WORKSPACE $relative
+              $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+              $result.source_hashes += [ordered]@{ path = $relative; sha256 = $actual }
+              if ($actual -cne $expected[$relative]) { throw ('Frozen source mismatch: ' + $relative) }
+            }
+            if ($env:NATIVE_TEST_SHELL -ceq 'powershell' -and ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1)) {
+              throw 'Windows PowerShell 5.1 is required for this matrix member.'
+            }
+            if ($env:NATIVE_TEST_SHELL -ceq 'pwsh' -and $PSVersionTable.PSVersion.Major -lt 7) {
+              throw 'PowerShell 7 is required for this matrix member.'
+            }
+            & (Join-Path $env:GITHUB_WORKSPACE 'scripts/tests/Test-StratusParentStageWatchdog.ps1') |
+              ForEach-Object {
+                $line = [string]$_
+                if ($line.StartsWith('PASS primitive: ', [StringComparison]::Ordinal)) {
+                  $result.passed_case_count += 1
+                }
+                Write-Output $line
+              }
+            if ($result.passed_case_count -ne 56) { throw 'The unchanged full 56-case suite did not pass.' }
+            $result.suite_passed = $true
+            $exitCode = 0
+          }
+          catch {
+            $result.failure = $_.Exception.ToString()
+            Write-Output $result.failure
+          }
+          finally {
+            try {
+              $children = @(Get-CimInstance Win32_Process -Filter "Name = 'ParentPrimitiveChild.exe'" -ErrorAction Stop)
+              $fixtures = @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'stratus-parent-primitives-*' -ErrorAction Stop)
+              $result.cleanup_verified = ($children.Count -eq 0 -and $fixtures.Count -eq 0)
+              if (-not $result.cleanup_verified) {
+                $exitCode = 1
+                $result.failure = [string]$result.failure + ' Hermetic fixture cleanup was not verified.'
+              }
+            }
+            catch { $exitCode = 1; $result.failure = [string]$result.failure + ' Cleanup check failed: ' + $_.Exception.Message }
+            if ($transcribing) {
+              try { [void](Stop-Transcript -ErrorAction Stop) }
+              catch { $exitCode = 1; $result.failure = [string]$result.failure + ' Transcript finalization failed: ' + $_.Exception.Message }
+            }
+            $result.finished_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
+            $result.exit_code = $exitCode
+            [IO.File]::WriteAllText($resultPath, ($result | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+          }
+          Write-Output ('NATIVE_HOST_CHECK_EXIT=' + $exitCode)
+          exit $exitCode
+
+      - name: Retain diagnostic evidence even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-host-${{ matrix.shell }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stratus-native-host-evidence/
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: false
