@@ -31,6 +31,38 @@ jobs:
           NATIVE_TEST_SHELL: ${{ matrix.shell }}
         run: |
           $ErrorActionPreference = 'Stop'
+          function Get-NativeCreateDiagnostics {
+            param([object[]] $Records)
+            $seen = [Collections.Generic.HashSet[Exception]]::new()
+            $queue = [Collections.Generic.Queue[Exception]]::new()
+            $count = [Math]::Min($Records.Count, 256)
+            for ($i = 0; $i -lt $count; $i++) {
+              if ($Records[$i] -is [Management.Automation.ErrorRecord]) {
+                $queue.Enqueue($Records[$i].Exception)
+              }
+            }
+            $visited = 0
+            $reported = 0
+            while ($queue.Count -gt 0 -and $visited -lt 1024 -and $reported -lt 32) {
+              $exception = $queue.Dequeue()
+              if ($null -eq $exception -or -not $seen.Add($exception)) { continue }
+              $visited += 1
+              if ($exception -is [ComponentModel.Win32Exception] -and
+                  $exception.Message -ceq 'Create independent watchdog suspended') {
+                [ordered]@{
+                  exception_type = $exception.GetType().FullName
+                  operation = $exception.Message
+                  native_error_code = $exception.NativeErrorCode
+                  hresult = $exception.HResult
+                }
+                $reported += 1
+              }
+              if ($exception -is [AggregateException]) {
+                foreach ($inner in $exception.InnerExceptions) { $queue.Enqueue($inner) }
+              }
+              elseif ($null -ne $exception.InnerException) { $queue.Enqueue($exception.InnerException) }
+            }
+          }
           $output = Join-Path $env:RUNNER_TEMP 'stratus-native-host-evidence'
           [void][IO.Directory]::CreateDirectory($output)
           $transcript = Join-Path $output 'transcript.txt'
@@ -54,6 +86,8 @@ jobs:
             full_parent_protocol_accepted = $false
             production_authorized = $false
             failure = $null
+            diagnostic_schema = 'stratus-native-create-errors-v1'
+            native_create_errors = @()
           }
           $exitCode = 1
           $transcribing = $false
@@ -92,6 +126,9 @@ jobs:
           catch {
             $result.failure = $_.Exception.ToString()
             Write-Output $result.failure
+            $retainedErrors = @($global:Error)
+            $result.native_create_errors = @(Get-NativeCreateDiagnostics -Records $retainedErrors)
+            Write-Output ('NATIVE_CREATE_DIAGNOSTICS=' + ($result.native_create_errors | ConvertTo-Json -Depth 4 -Compress))
           }
           finally {
             try {
