@@ -9,6 +9,10 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $gatePath = Join-Path $repoRoot 'scripts\Assert-StratusPostMigrationSuccessorGate.ps1'
 $watchdogPath = Join-Path $repoRoot `
     'scripts\Invoke-StratusSuccessorTransitionWatchdog.ps1'
+$repairPath = Join-Path $repoRoot `
+    'scripts\Invoke-StratusStoppedPostgresNetworkRepair.ps1'
+$parentRuntimePath = Join-Path $repoRoot 'scripts\Stratus.ParentStage.Runtime.cs'
+$parentProgramPath = Join-Path $repoRoot 'scripts\Invoke-StratusParentStageWatchdog.ps1'
 
 if (-not (Test-Path -LiteralPath $gatePath -PathType Leaf)) {
     throw "Post-migration successor gate does not exist: $gatePath"
@@ -16,14 +20,105 @@ if (-not (Test-Path -LiteralPath $gatePath -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $watchdogPath -PathType Leaf)) {
     throw "Successor Transition watchdog does not exist: $watchdogPath"
 }
+if (-not (Test-Path -LiteralPath $repairPath -PathType Leaf)) {
+    throw "Stopped PostgreSQL network repair producer does not exist: $repairPath"
+}
 $gateSource = Get-Content -LiteralPath $gatePath -Raw
 $watchdogSource = Get-Content -LiteralPath $watchdogPath -Raw
+$repairSource = Get-Content -LiteralPath $repairPath -Raw
 $watchdogSourceSha256 = (
     Microsoft.PowerShell.Utility\Get-FileHash `
         -LiteralPath $watchdogPath -Algorithm SHA256
 ).Hash.ToLowerInvariant()
+
+$strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+$watchdogPhysicalBytes = [IO.File]::ReadAllBytes($watchdogPath)
+if ($watchdogPhysicalBytes.Length -ge 3 -and
+    $watchdogPhysicalBytes[0] -eq 0xef -and
+    $watchdogPhysicalBytes[1] -eq 0xbb -and
+    $watchdogPhysicalBytes[2] -eq 0xbf) {
+    throw 'Successor Transition watchdog must not contain a UTF-8 BOM.'
+}
+try {
+    $watchdogPhysicalSource = $strictUtf8.GetString(
+        $watchdogPhysicalBytes
+    )
+} catch {
+    throw 'Successor Transition watchdog is not strict UTF-8.'
+}
+if ($watchdogPhysicalSource -notmatch "`r`n" -or
+    $watchdogPhysicalSource -match "(?<!`r)`n" -or
+    $watchdogPhysicalSource -match "`r(?!`n)") {
+    throw 'Successor Transition watchdog must use CRLF-only line endings.'
+}
+
+$gitAttributesPath = Join-Path $repoRoot '.gitattributes'
+$gitAttributesSource = Get-Content -LiteralPath $gitAttributesPath -Raw
+if ($gitAttributesSource -notmatch '(?m)^\*\.ps1[ \t]+text[ \t]+eol=crlf[ \t]*$') {
+    throw '.gitattributes must pin PowerShell scripts to CRLF checkouts.'
+}
+
+$approvedWatchdogMatches = [regex]::Matches(
+    $gateSource,
+    '(?ms)\$approvedWatchdogSha256\s*=\s*''([0-9a-f]{64})'''
+)
+if ($approvedWatchdogMatches.Count -ne 1 -or
+    $approvedWatchdogMatches[0].Groups[1].Value -cne $watchdogSourceSha256) {
+    throw 'The approved watchdog SHA-256 does not match its physical CRLF checkout bytes.'
+}
 [void][scriptblock]::Create($gateSource)
 [void][scriptblock]::Create($watchdogSource)
+[void][scriptblock]::Create($repairSource)
+
+$repairTokens = $null
+$repairParseErrors = $null
+$repairAst = [Management.Automation.Language.Parser]::ParseInput(
+    $repairSource, [ref]$repairTokens, [ref]$repairParseErrors
+)
+if (@($repairParseErrors).Count -ne 0) {
+    throw 'Stopped PostgreSQL network repair producer did not parse.'
+}
+$repairHashFunction = $repairAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Get-Sha256Text'
+}, $true)
+$repairCollectorFunction = $repairAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Initialize-RepairDockerCollectorType'
+}, $true)
+if ($null -eq $repairHashFunction -or $null -eq $repairCollectorFunction) {
+    throw 'Repair producer lacks its deterministic Docker collector contract.'
+}
+$repairCollectorMetadata = & ([scriptblock]::Create(
+    $repairHashFunction.Extent.Text + "`n" +
+    $repairCollectorFunction.Extent.Text +
+    "`nInitialize-RepairDockerCollectorType"
+))
+$templatePin = [regex]::Matches(
+    $gateSource,
+    '(?ms)\$approvedRepairDockerCollectorTemplateSha256\s*=\s*''([0-9a-f]{64})'''
+)
+$sourcePin = [regex]::Matches(
+    $gateSource,
+    '(?ms)\$approvedRepairDockerCollectorSourceSha256\s*=\s*''([0-9a-f]{64})'''
+)
+if (
+    $templatePin.Count -ne 1 -or $sourcePin.Count -ne 1 -or
+    $templatePin[0].Groups[1].Value -cne
+        [string]$repairCollectorMetadata.template_sha256 -or
+    $sourcePin[0].Groups[1].Value -cne
+        [string]$repairCollectorMetadata.source_sha256 -or
+    $repairCollectorMetadata.type_name -cne (
+        'StratusRepairDockerCollector_' +
+        [string]$repairCollectorMetadata.template_sha256.Substring(0, 16)
+    ) -or
+    $repairCollectorMetadata.contract_identity -cne
+        ('repair-v2:' + [string]$repairCollectorMetadata.template_sha256)
+) {
+    throw 'Successor gate does not pin the exact repair Docker collector producer.'
+}
 
 $gateTokens = $null
 $gateParseErrors = $null
@@ -50,34 +145,121 @@ if ($emptyByteHash -cne
     throw 'The core byte-array SHA-256 helper does not accept the empty journal prefix.'
 }
 
+$takeoverStopFunction = $gateAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Stop-TransitionWatchdogForParentTakeover'
+}, $true)
+if ($null -eq $takeoverStopFunction -or
+    $takeoverStopFunction.Extent.Text.Contains('while ($true)') -or
+    -not $takeoverStopFunction.Extent.Text.Contains(
+        '$stopWatch = [Diagnostics.Stopwatch]::StartNew()'
+    ) -or
+    -not $takeoverStopFunction.Extent.Text.Contains(
+        'takeover and authorization remain prohibited'
+    )) {
+    throw 'Parent watchdog takeover is not explicitly bounded and fail closed.'
+}
+$neverExitingProcess = [pscustomobject]@{
+    HasExited = $false
+    KillCalls = 0
+    WaitCalls = 0
+    RefreshCalls = 0
+}
+$neverExitingProcess | Add-Member ScriptMethod Refresh {
+    $this.RefreshCalls += 1
+}
+$neverExitingProcess | Add-Member ScriptMethod Kill {
+    $this.KillCalls += 1
+    throw [InvalidOperationException]::new('injected unkillable watchdog')
+}
+$neverExitingProcess | Add-Member ScriptMethod WaitForExit {
+    param([int] $Milliseconds)
+    $this.WaitCalls += 1
+    return $false
+}
+$unusedCollector = [pscustomobject]@{
+    OutputFilesClosed = $false
+}
+$unusedCollector | Add-Member ScriptMethod StopAndWait {
+    param([int] $Milliseconds)
+    throw 'The collector must not be sealed while its process remains live.'
+}
+$unusedCollector | Add-Member ScriptMethod CloseOutputFiles {
+    throw 'The collector must not be closed while its process remains live.'
+}
+$boundedTakeoverWatchdog = [pscustomobject]@{
+    process = $neverExitingProcess
+    collector = $unusedCollector
+    intentionally_stopped = $false
+}
+$boundedTakeoverHarness = [scriptblock]::Create(
+    "param([object]`$Watchdog)`n" + $takeoverStopFunction.Extent.Text +
+    "`nStop-TransitionWatchdogForParentTakeover -Watchdog `$Watchdog " +
+    '-MaximumWaitMilliseconds 50 -WaitSliceMilliseconds 5'
+)
+$boundedTakeoverStopwatch = [Diagnostics.Stopwatch]::StartNew()
+$boundedTakeoverFailure = $null
+try { & $boundedTakeoverHarness $boundedTakeoverWatchdog }
+catch { $boundedTakeoverFailure = $_.Exception.Message }
+$boundedTakeoverStopwatch.Stop()
+if (
+    $boundedTakeoverFailure -notlike
+        '*takeover and authorization remain prohibited*' -or
+    $boundedTakeoverStopwatch.ElapsedMilliseconds -gt 2000 -or
+    $neverExitingProcess.KillCalls -lt 1 -or
+    $neverExitingProcess.WaitCalls -lt 1 -or
+    $boundedTakeoverWatchdog.intentionally_stopped
+) {
+    throw 'An unkillable watchdog did not terminate parent takeover in a bounded fail-closed state.'
+}
+
 foreach ($required in @(
     "[ValidateSet('Transition')]",
     'PreMigrationAttestationPath',
     'NetworkRepairAttestationPath',
     'PreStartAttestationPath',
     'LiveAcceptancePath',
-    'stratus-stopped-postgres-safety-plane-repair-v1',
+    'ParentStageContractPath',
+    'ParentStageContractSha256',
+    'ParentStageLeasePath',
+    'ParentStageLeaseSha256',
+    'ParentStageReadyPath',
+    'ParentStageReadySha256',
+    'ParentStageHeartbeatPath',
+    '[IO.FileStream] $ParentMutationFence',
+    'stratus-parent-stage-binding-v1',
+    'retained PostgreSQL start PONR',
+    'parent authorization pre-publication',
+    'parent authorization post-publication',
+    'stratus-stopped-postgres-safety-plane-repair-v2',
+    'verified_configured_pending_existing',
+    'post_attachment_admissible_twice',
     'stratus-post-migration-successor-transition-prestart-v2',
     'stratus-post-migration-successor-transition-live-v2',
-    'stratus-successor-transition-watchdog-handoff-v1',
-    'stratus-successor-transition-watchdog-binding-v1',
+    'stratus-successor-transition-watchdog-handoff-v3',
+    'stratus-successor-transition-watchdog-binding-v3',
     'stratus-successor-transition-watchdog-commit-v1',
     'stratus-successor-transition-watchdog-terminal-v1',
     'Start-TransitionWatchdogProcess',
     'Start-WatchdogHeartbeatPublisher',
     'Assert-TransitionWatchdogSuccessReceipt',
+    'Stop-AcceptedTerminalHeartbeatPublisher',
+    'watchdog heartbeat publisher failed',
     'Invoke-StratusSuccessorTransitionWatchdog.ps1',
     '$Watchdog.collector.CloseOutputFiles()',
     '$Watchdog.collector.OutputFilesClosed',
     'The successor transition watchdog output handles remained open.',
     '-HeartbeatPublisher $null',
-    'The immutable terminal success receipt is the atomic authorization',
+    'parent_authorization_postpublication_supervisor_loss',
     "Assert-NativeJsonObject -Value `$receipt.authorization",
     '[IO.FileMode]::CreateNew',
     "Resolve-PinnedApplication -Name 'docker'",
     "Resolve-PinnedApplication -Name 'git'",
     "'update', '--restart=no', `$productionPostgresId",
-    "Invoke-Docker -Arguments @('start', `$productionPostgresId)",
+    'Invoke-BoundedPinnedDockerStart',
+    'stratus-successor-transition-start-attempt-v1',
+    'stratus-successor-transition-start-complete-v1',
     'Invoke-BoundedPinnedDockerStop',
     'The non-reconnecting Docker event witness exited before final sealing.',
     'Transition requires exactly one retained PostgreSQL start event.',
@@ -101,6 +283,11 @@ foreach ($required in @(
     'normalized_prosrc_sha256'
     'replace(procedure.prosrc, E''\r\n'', E''\n'')'
     "'functions_exact'"
+    'Volatile.Read(ref stdoutEof)'
+    'Interlocked.Read(ref stderrBytes)'
+    'Interlocked.CompareExchange(ref stderrError, candidate, null)'
+    'collector output exceeded its bound'
+    'collector cleanup failed:'
 )) {
     if (-not $gateSource.Contains($required)) {
         throw "Post-migration successor gate is missing required contract text: $required"
@@ -133,30 +320,67 @@ $terminalAcceptanceOffset = $gateSource.IndexOf(
     '$watchdogTerminalReceipt = Assert-TransitionWatchdogSuccessReceipt',
     [StringComparison]::Ordinal
 )
+$parentAuthorizationOffset = $gateSource.IndexOf(
+    '$parentAuthorizationJson = Publish-ParentAuthorization',
+    $terminalAcceptanceOffset, [StringComparison]::Ordinal
+)
 $transitionSuccessOffset = $gateSource.IndexOf(
-    '$transitionSucceeded = $true', $terminalAcceptanceOffset,
+    '$transitionSucceeded = $true', $parentAuthorizationOffset,
     [StringComparison]::Ordinal
 )
 if (
     $preCommitRecheckOffset -lt 0 -or
     $preCommitRecheckOffset -ge $commitPublicationOffset -or
     $terminalAcceptanceOffset -le $commitPublicationOffset -or
-    $transitionSuccessOffset -le $terminalAcceptanceOffset
+    $parentAuthorizationOffset -le $terminalAcceptanceOffset -or
+    $transitionSuccessOffset -le $parentAuthorizationOffset
 ) {
-    throw 'The watchdog terminal receipt is not the atomic rollback boundary.'
+    throw 'The parent authorization publication is not the atomic success boundary.'
 }
-$postTerminalValidationText = $gateSource.Substring(
-    $terminalAcceptanceOffset,
-    $transitionSuccessOffset - $terminalAcceptanceOffset
+$postAuthorizationText = $gateSource.Substring(
+    $parentAuthorizationOffset,
+    $transitionSuccessOffset - $parentAuthorizationOffset
 )
 foreach ($forbidden in @(
-    'Get-FileSha256', 'Assert-NetworkRepairEvidenceUnchanged',
-    'Get-HeldHbaReadBoundary', 'Get-DockerEngineBoundary',
-    'Get-PostgresBoundary', 'Assert-ExclusiveRuntimeTopology', 'StopAndWait'
+    'Invoke-ParentCausalPostgresContainment',
+    'Publish-ParentStartRevocation', 'Invoke-BoundedPinnedDockerStop'
 )) {
-    if ($postTerminalValidationText.Contains($forbidden)) {
-        throw "A rollback-capable check remains after terminal acceptance: $forbidden"
+    if ($postAuthorizationText.Contains($forbidden)) {
+        throw "A rollback path remains after parent authorization publication: $forbidden"
     }
+}
+if (-not $gateSource.Contains('if ($parentAuthorizationPublished)') -or
+    -not $gateSource.Contains("-Trigger 'parent_authorization_postpublication_supervisor_loss'")) {
+    throw 'Post-publication parent supervisor loss lacks explicit causal containment.'
+}
+$publisherOffset = $gateSource.IndexOf(
+    'function Publish-ParentAuthorization', [StringComparison]::Ordinal
+)
+$publisherFlushOffset = $gateSource.IndexOf(
+    '$stream.Flush($true)', $publisherOffset, [StringComparison]::Ordinal
+)
+$publisherDeadlineOffset = $gateSource.IndexOf(
+    '$durableFlushObservedAt -gt $NotAfter', $publisherOffset,
+    [StringComparison]::Ordinal
+)
+$publisherReadbackOffset = $gateSource.IndexOf(
+    'Parent authorization same-handle readback differs', $publisherOffset,
+    [StringComparison]::Ordinal
+)
+$publisherCloseOffset = $gateSource.IndexOf(
+    '$stream.Dispose()', $publisherReadbackOffset, [StringComparison]::Ordinal
+)
+$publisherPonrOffset = $gateSource.IndexOf(
+    '$Published.Value = $true', $publisherOffset, [StringComparison]::Ordinal
+)
+if (
+    $publisherOffset -lt 0 -or $publisherFlushOffset -lt $publisherOffset -or
+    $publisherDeadlineOffset -le $publisherFlushOffset -or
+    $publisherReadbackOffset -le $publisherDeadlineOffset -or
+    $publisherCloseOffset -le $publisherReadbackOffset -or
+    $publisherPonrOffset -le $publisherCloseOffset
+) {
+    throw 'Parent authorization PONR precedes a throwable post-flush validation.'
 }
 if ([regex]::Matches(
     $gateSource, 'api_stage_permitted\s*=\s*\$false'
@@ -182,16 +406,18 @@ if ([regex]::Matches(
 }
 
 foreach ($required in @(
-    'stratus-successor-transition-watchdog-lease-v1',
+    'stratus-successor-transition-watchdog-lease-v3',
     'stratus-successor-transition-watchdog-heartbeat-v1',
     'stratus-successor-transition-watchdog-commit-v1',
     'stratus-successor-transition-watchdog-terminal-v1',
+    'verified_configured_pending_existing',
+    'PostgreSQL attachment arrays are not native',
     'accepted_live_commit',
     'heartbeat_stale',
     'invalid_or_replayed_heartbeat',
     'invalid_or_forged_commit',
     '[IO.FileMode]::CreateNew',
-    "'stop', '--time', [string]`$containmentStopTimeoutSeconds"
+    "'stop', '--timeout', [string]`$containmentStopTimeoutSeconds"
 )) {
     if (-not $watchdogSource.Contains($required)) {
         throw "Successor Transition watchdog is missing required contract text: $required"
@@ -717,6 +943,7 @@ function Get-FakeCliSource {
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.IO.Pipes;
 using System.Text;
@@ -731,8 +958,40 @@ public static class StratusFakeCli
         ).ToLowerInvariant();
         try
         {
-            if (tool == "docker" && args.Length > 0 && args[0] == "events")
-                return RunEventWitness();
+            if (tool == "docker")
+            {
+                string logRoot = Environment.GetEnvironmentVariable(
+                    "STRATUS_FAKE_SCOPED_DOCKER_LOG");
+                if (!String.IsNullOrEmpty(logRoot))
+                {
+                    Directory.CreateDirectory(logRoot);
+                    File.WriteAllLines(
+                        Path.Combine(logRoot, Process.GetCurrentProcess().Id.ToString(
+                            CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N")),
+                        args,
+                        new UTF8Encoding(false)
+                    );
+                }
+                if (args.Length < 3 || args[0] != "--context" ||
+                    args[1] != "desktop-linux")
+                    throw new InvalidOperationException(
+                        "Docker invocation lacks the immutable context prefix");
+                string[] semantic = new string[args.Length - 2];
+                Array.Copy(args, 2, semantic, 0, semantic.Length);
+                args = semantic;
+                if (args.Length == 1 &&
+                    args[0] == "__stratus-test-split-crlf")
+                {
+                    Console.Out.Write(new String('x', 4095) + "\r");
+                    Console.Out.Flush();
+                    Thread.Sleep(250);
+                    Console.Out.Write("\n");
+                    Console.Out.Flush();
+                    return 0;
+                }
+                if (args.Length > 0 && args[0] == "events")
+                    return RunEventWitness();
+            }
             return InvokeServer(tool, args);
         }
         catch (Exception error)
@@ -768,42 +1027,96 @@ public static class StratusFakeCli
         }
     }
 
+    private static void CreateWitnessMarker(string path, string identity)
+    {
+        byte[] bytes = new UTF8Encoding(false).GetBytes(identity);
+        string directory = Path.GetDirectoryName(path);
+        string pending = Path.Combine(
+            directory, "pending." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using (FileStream stream = new FileStream(
+                pending, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+            {
+                stream.Write(bytes, 0, bytes.Length);
+                stream.Flush(true);
+            }
+            File.Move(pending, path);
+        }
+        finally
+        {
+            if (File.Exists(pending)) File.Delete(pending);
+        }
+    }
+
     private static int RunEventWitness()
     {
         string source = Environment.GetEnvironmentVariable("STRATUS_FAKE_EVENTS");
         string ready = Environment.GetEnvironmentVariable("STRATUS_FAKE_WITNESS_READY");
         string stop = Environment.GetEnvironmentVariable("STRATUS_FAKE_WITNESS_EXIT");
         string exited = Environment.GetEnvironmentVariable("STRATUS_FAKE_WITNESS_EXITED");
-        long offset = File.Exists(source) ? new FileInfo(source).Length : 0;
-        File.WriteAllText(ready, Process.GetCurrentProcess().Id.ToString(), new UTF8Encoding(false));
-        while (!File.Exists(stop))
+        string registry = Environment.GetEnvironmentVariable("STRATUS_FAKE_WITNESS_REGISTRY");
+        string readyDelayText = Environment.GetEnvironmentVariable(
+            "STRATUS_FAKE_WITNESS_READY_DELAY_MS");
+        if (String.IsNullOrWhiteSpace(registry))
+            throw new InvalidOperationException("fake event witness registry is unavailable");
+        int readyDelay = 0;
+        if (!String.IsNullOrWhiteSpace(readyDelayText) &&
+            (!Int32.TryParse(readyDelayText, NumberStyles.None,
+                CultureInfo.InvariantCulture, out readyDelay) ||
+             readyDelay < 0 || readyDelay > 5000))
+            throw new InvalidOperationException("fake event witness ready delay is invalid");
+        int processId;
+        long processStartTicks;
+        using (Process current = Process.GetCurrentProcess())
         {
-            if (File.Exists(source))
+            processId = current.Id;
+            processStartTicks = current.StartTime.ToUniversalTime().Ticks;
+        }
+        string identity = processId.ToString(CultureInfo.InvariantCulture) + "." +
+            processStartTicks.ToString(CultureInfo.InvariantCulture);
+        Directory.CreateDirectory(registry);
+        if (readyDelay > 0) Thread.Sleep(readyDelay);
+        long offset = File.Exists(source) ? new FileInfo(source).Length : 0;
+        CreateWitnessMarker(Path.Combine(registry, "ready." + identity), identity);
+        File.WriteAllText(ready, processId.ToString(CultureInfo.InvariantCulture),
+            new UTF8Encoding(false));
+        try
+        {
+            while (!File.Exists(stop))
             {
-                using (FileStream stream = new FileStream(
-                    source, FileMode.Open, FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete))
+                if (File.Exists(source))
                 {
-                    if (stream.Length > offset)
+                    using (FileStream stream = new FileStream(
+                        source, FileMode.Open, FileAccess.Read,
+                        FileShare.ReadWrite | FileShare.Delete))
                     {
-                        stream.Seek(offset, SeekOrigin.Begin);
-                        byte[] bytes = new byte[stream.Length - offset];
-                        int total = 0;
-                        while (total < bytes.Length)
+                        if (stream.Length > offset)
                         {
-                            int count = stream.Read(bytes, total, bytes.Length - total);
-                            if (count <= 0) break;
-                            total += count;
+                            stream.Seek(offset, SeekOrigin.Begin);
+                            byte[] bytes = new byte[stream.Length - offset];
+                            int total = 0;
+                            while (total < bytes.Length)
+                            {
+                                int count = stream.Read(bytes, total, bytes.Length - total);
+                                if (count <= 0) break;
+                                total += count;
+                            }
+                            offset += total;
+                            Console.Out.Write(Encoding.UTF8.GetString(bytes, 0, total));
+                            Console.Out.Flush();
                         }
-                        offset += total;
-                        Console.Out.Write(Encoding.UTF8.GetString(bytes, 0, total));
-                        Console.Out.Flush();
                     }
                 }
+                Thread.Sleep(10);
             }
-            Thread.Sleep(10);
         }
-        File.WriteAllText(exited, Process.GetCurrentProcess().Id.ToString(), new UTF8Encoding(false));
+        finally
+        {
+            CreateWitnessMarker(Path.Combine(registry, "exited." + identity), identity);
+            File.WriteAllText(exited, processId.ToString(CultureInfo.InvariantCulture),
+                new UTF8Encoding(false));
+        }
         return 0;
     }
 }
@@ -832,6 +1145,16 @@ $successorImageId = 'sha256:a31c5ae9f848a3c05d9577f8b13936a3391eaf15bd10a467504c
 $defaultNetworkId = '77551e8d1119201f778fdb90e151ec26f1d9cc23832ba7b88c4db6203e3d8ba2'
 $safetyNetworkId = '0d1ad122718694dbc5e6714f69a601a7d429e23a0b74eecdb10ace944e5c8620'
 $fixedHba = '164276f8a7337705c3933e3201cb53a5a10e354ec7627768c4ac8b3e951380a4'
+
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class StratusTestProcessControl
+{
+    [DllImport("ntdll.dll", SetLastError = true)]
+    public static extern uint NtSuspendProcess(IntPtr processHandle);
+}
+"@
 
 function New-Result {
     param([object[]] $Stdout = @(), [int] $ExitCode = 0, [object[]] $Stderr = @())
@@ -900,6 +1223,10 @@ function Import-Configuration {
         event_nano = [int64]0
         watchdog_fault_injected = $false
         watchdog_publisher_cleanup_delay_count = 0
+        watchdog_kill_count = 0
+        watchdog_suspend_count = 0
+        watchdog_identity_rejection_count = 0
+        pending_start_due = ''
     }
     foreach ($path in @(
         $env:STRATUS_FAKE_RESULT, $env:STRATUS_FAKE_EVENTS,
@@ -942,6 +1269,168 @@ function Lock-WatchdogHeartbeatPublisher {
     $script:state.watchdog_fault_injected = $true
 }
 
+function Get-LeaseWatchdogProcess {
+    $leasePath = [string]$script:configuration.prestart + '.watchdog-lease.json'
+    if (-not (Test-Path -LiteralPath $leasePath -PathType Leaf)) {
+        throw 'Synthetic watchdog fault could not find the watchdog lease.'
+    }
+    $lease = Get-Content -LiteralPath $leasePath -Raw | ConvertFrom-Json
+    $watchdogPid = [int]$lease.watchdog.process_id
+    if ($watchdogPid -lt 1 -or $watchdogPid -eq $PID) {
+        throw 'Synthetic watchdog fault resolved an invalid watchdog PID.'
+    }
+    $leaseStartedValue = $lease.watchdog.process_started_at
+    if ($leaseStartedValue -is [DateTime]) {
+        $leaseStartedTicks = [int64]$leaseStartedValue.ToUniversalTime().Ticks
+    }
+    elseif ($leaseStartedValue -is [DateTimeOffset]) {
+        $leaseStartedTicks = [int64]$leaseStartedValue.UtcDateTime.Ticks
+    }
+    else {
+        $leaseStartedAt = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParseExact(
+            [string]$leaseStartedValue, 'o',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$leaseStartedAt
+        )) {
+            throw 'Synthetic watchdog fault lease start identity is invalid.'
+        }
+        $leaseStartedTicks = [int64]$leaseStartedAt.UtcDateTime.Ticks
+    }
+    $engineName = if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        'powershell.exe'
+    }
+    else { 'pwsh.exe' }
+    $expectedHostPath = [IO.Path]::GetFullPath((Join-Path $PSHOME $engineName))
+    $process = Get-Process -Id $watchdogPid -ErrorAction Stop
+    $retain = $false
+    try {
+        # Force an OS process handle now and retain it across identity checks and
+        # the caller's Kill/NtSuspendProcess operation.  A reused PID can never
+        # redirect the synthetic fault to a different process.
+        [void]$process.Handle
+        $process.Refresh()
+        if (
+            $process.HasExited -or
+            [int64]$process.StartTime.ToUniversalTime().Ticks -ne
+                $leaseStartedTicks -or
+            -not [string]::Equals(
+                [IO.Path]::GetFullPath($process.MainModule.FileName),
+                $expectedHostPath, [StringComparison]::OrdinalIgnoreCase
+            )
+        ) {
+            $script:state.watchdog_identity_rejection_count += 1
+            throw 'Synthetic watchdog fault refused a stale or foreign process identity.'
+        }
+        $retain = $true
+        return $process
+    }
+    finally {
+        if (-not $retain) { $process.Dispose() }
+    }
+}
+
+function Assert-StaleLeaseWatchdogIdentityRejected {
+    $originalPrestart = [string]$script:configuration.prestart
+    $probePrefix = $originalPrestart + '.identity-regression'
+    $probeLease = $probePrefix + '.watchdog-lease.json'
+    $engineName = if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        'powershell.exe'
+    }
+    else { 'pwsh.exe' }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = Join-Path $PSHOME $engineName
+    $startInfo.Arguments =
+        '-NoLogo -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 30"'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    $probe = [Diagnostics.Process]::Start($startInfo)
+    try {
+        [void]$probe.Handle
+        $probe.Refresh()
+        $startedAt = [DateTimeOffset]::new(
+            $probe.StartTime.ToUniversalTime(), [TimeSpan]::Zero
+        )
+        Write-AtomicText -LiteralPath $probeLease -Value (([ordered]@{
+            watchdog = [ordered]@{
+                process_id = [int]$probe.Id
+                process_started_at = $startedAt.AddTicks(1).ToString('o')
+            }
+        }) | ConvertTo-Json -Depth 4)
+        $script:configuration.prestart = $probePrefix
+        $unexpected = $null
+        try { $unexpected = Get-LeaseWatchdogProcess }
+        catch {
+            if ([string]$_.Exception.Message -notlike
+                '*refused a stale or foreign process identity*') {
+                throw
+            }
+            return
+        }
+        finally {
+            if ($null -ne $unexpected) { $unexpected.Dispose() }
+        }
+        throw 'Synthetic watchdog identity fencing accepted a stale start time.'
+    }
+    finally {
+        $script:configuration.prestart = $originalPrestart
+        Remove-Item -LiteralPath $probeLease -Force -ErrorAction SilentlyContinue
+        try {
+            $probe.Refresh()
+            if (-not $probe.HasExited) {
+                $probe.Kill()
+                [void]$probe.WaitForExit(5000)
+            }
+        }
+        finally { $probe.Dispose() }
+    }
+}
+
+function Kill-LeaseWatchdog {
+    if ($script:state.watchdog_fault_injected) { return }
+    $process = Get-LeaseWatchdogProcess
+    try {
+        $process.Kill()
+        if (-not $process.WaitForExit(5000)) {
+            throw 'Synthetic watchdog hard death did not complete.'
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+    $script:state.watchdog_kill_count += 1
+    $script:state.watchdog_fault_injected = $true
+}
+
+function Suspend-LeaseWatchdog {
+    if ($script:state.watchdog_fault_injected) { return }
+    $process = Get-LeaseWatchdogProcess
+    try {
+        $status = [StratusTestProcessControl]::NtSuspendProcess($process.Handle)
+        if ($status -ne 0) {
+            throw "Synthetic watchdog suspension failed with NTSTATUS $status."
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+    $script:state.watchdog_suspend_count += 1
+    $script:state.watchdog_fault_injected = $true
+}
+
+function Materialize-PendingPostgresStart {
+    if ([string]::IsNullOrWhiteSpace([string]$script:state.pending_start_due)) {
+        return
+    }
+    $due = [DateTimeOffset]::Parse([string]$script:state.pending_start_due)
+    if ([DateTimeOffset]::UtcNow -lt $due) { return }
+    $script:state.pending_start_due = ''
+    $script:state.postgres_state = 'running'
+    Add-PostgresStartEvents
+}
+
 function Poison-WatchdogHeartbeatAfterContainment {
     $path = [string]$script:configuration.prestart + '.watchdog-heartbeat.json'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
@@ -978,10 +1467,68 @@ function Get-NextEventNano {
 }
 
 function Wait-WitnessReady {
+    param([ValidateRange(1, 2)][int] $MinimumWitnessCount = 1)
+
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
-    while (-not (Test-Path -LiteralPath $env:STRATUS_FAKE_WITNESS_READY)) {
+    while ($true) {
+        $registry = [IO.Path]::GetFullPath(
+            [string]$env:STRATUS_FAKE_WITNESS_REGISTRY
+        )
+        $expectedDockerPath = [IO.Path]::GetFullPath(
+            [string]$env:STRATUS_FAKE_DOCKER_PATH
+        )
+        $registered = 0
+        $seen = @{}
+        foreach ($item in @(Get-ChildItem -LiteralPath $registry `
+            -Filter 'ready.*' -File -ErrorAction Stop)) {
+            $match = [regex]::Match(
+                [string]$item.Name,
+                '^ready\.([1-9][0-9]{0,9})\.([1-9][0-9]{0,18})$'
+            )
+            $processId = 0
+            $processStartTicks = [int64]0
+            if (
+                -not $match.Success -or
+                -not [int]::TryParse($match.Groups[1].Value, [ref]$processId) -or
+                -not [int64]::TryParse(
+                    $match.Groups[2].Value, [ref]$processStartTicks
+                ) -or
+                $processId -lt 1 -or $processStartTicks -lt 1
+            ) {
+                throw "Malformed fake witness ready identity: $($item.Name)"
+            }
+            $identity = "$processId.$processStartTicks"
+            $record = [IO.File]::ReadAllText(
+                $item.FullName, [Text.UTF8Encoding]::new($false, $true)
+            )
+            if ($record -cne $identity -or $seen.ContainsKey($identity)) {
+                throw "Inconsistent fake witness ready identity: $($item.Name)"
+            }
+            $seen[$identity] = $true
+            $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+            if ($null -eq $process) { continue }
+            try {
+                [void]$process.Handle
+                $process.Refresh()
+                if ($process.HasExited) { continue }
+                if (
+                    [int64]$process.StartTime.ToUniversalTime().Ticks -ne
+                        $processStartTicks -or
+                    -not [string]::Equals(
+                        [IO.Path]::GetFullPath($process.MainModule.FileName),
+                        $expectedDockerPath,
+                        [StringComparison]::OrdinalIgnoreCase
+                    )
+                ) {
+                    throw "Foreign or stale fake witness ready identity: $identity"
+                }
+                $registered += 1
+            }
+            finally { $process.Dispose() }
+        }
+        if ($registered -ge $MinimumWitnessCount) { return }
         if ([DateTimeOffset]::UtcNow -ge $deadline) {
-            throw 'fake event witness did not become ready'
+            throw "fake event witness count did not reach $MinimumWitnessCount"
         }
         Start-Sleep -Milliseconds 10
     }
@@ -995,7 +1542,6 @@ function Add-Event {
         [Parameter(Mandatory = $true)][object] $Attributes,
         [AllowNull()][object] $TimeNano
     )
-    Wait-WitnessReady
     $nano = if ($null -eq $TimeNano) { Get-NextEventNano } else { [int64]$TimeNano }
     if ($nano -gt [int64]$script:state.event_nano) {
         $script:state.event_nano = $nano
@@ -1211,14 +1757,17 @@ function New-NetworkAttachment {
         $endpoint = ''
         $mac = ''
     }
+    $configuredPending =
+        -not $Running -and $Kind -ceq 'safety' -and
+        $script:state.fault -ceq 'configured-pending'
     return [ordered]@{
-        IPAMConfig = $null
+        IPAMConfig = if ($configuredPending) { [ordered]@{} } else { $null }
         Links = $null
         Aliases = @('postgres', 'weatherpoly-postgres-1')
         MacAddress = $mac
-        DriverOpts = $null
+        DriverOpts = if ($configuredPending) { [ordered]@{} } else { $null }
         GwPriority = 0
-        NetworkID = $id
+        NetworkID = if ($configuredPending) { '' } else { $id }
         EndpointID = $endpoint
         Gateway = $gateway
         IPAddress = $ip
@@ -1511,12 +2060,22 @@ function Handle-DockerCore {
         if ($isBarrier) {
             $script:state.barrier_sequence += 1
             $script:state.barrier_create_count += 1
-            $id = if ($script:state.barrier_sequence -eq 1) { '3' * 64 } else { '4' * 64 }
+            $id = switch ($script:state.barrier_sequence) {
+                1 { '3' * 64 }
+                2 { '4' * 64 }
+                3 { '5' * 64 }
+                default { '6' * 64 }
+            }
             $labelIndex = [Array]::IndexOf($Arguments, '--label') + 1
             $label = $Arguments[$labelIndex]
             Add-OwnedContainer -Id $id -Kind barrier -Name $name `
                 -Image $Arguments[-1] -Label $label
-            Wait-WitnessReady
+            # The primary and authorization witnesses overlap only for the
+            # second barrier.  By the third watchdog-owned barrier the primary
+            # witness has been deliberately sealed and disposed.
+            Wait-WitnessReady -MinimumWitnessCount $(if (
+                [int]$script:state.barrier_sequence -eq 2
+            ) { 2 } else { 1 })
             if ($fault -eq 'witness-early-exit' -and
                 $script:state.barrier_sequence -eq 1) {
                 [IO.File]::WriteAllText($env:STRATUS_FAKE_WITNESS_EXIT, 'exit', $utf8)
@@ -1724,6 +2283,21 @@ function Handle-DockerCore {
         if ($fault -eq 'start-failure-before-running') {
             return New-Result -ExitCode 1 -Stderr 'synthetic start failure'
         }
+        if ($fault -in @(
+            'watchdog-dies-completed-start',
+            'watchdog-dies-delayed-start'
+        )) {
+            Kill-LeaseWatchdog
+        }
+        elseif ($fault -eq 'watchdog-hangs-after-start') {
+            Suspend-LeaseWatchdog
+        }
+        if ($fault -eq 'watchdog-dies-delayed-start') {
+            $script:state.pending_start_due = [DateTimeOffset]::UtcNow.AddMilliseconds(
+                1500
+            ).ToString('o')
+            return New-Result -ExitCode 1 -Stderr 'synthetic delayed daemon start'
+        }
         $script:state.postgres_state = 'running'
         Add-PostgresStartEvents
         if ($fault -eq 'backup-live') {
@@ -1743,10 +2317,10 @@ function Handle-DockerCore {
         return New-Result -Stdout $postgresId
     }
     if ($Arguments.Count -eq 4 -and $Arguments[0] -ceq 'stop' -and
-        $Arguments[1] -ceq '--time') {
+        $Arguments[1] -ceq '--timeout') {
         $script:state.stop_count += 1
         $script:state.mutations = @($script:state.mutations) + @(
-            "stop --time $($Arguments[2]) $($Arguments[3])"
+            "stop --timeout $($Arguments[2]) $($Arguments[3])"
         )
         if ($Arguments[2] -cne '15' -or $Arguments[3] -cne $postgresId) {
             $script:state.forbidden_mutation_count += 1
@@ -2014,7 +2588,9 @@ function Handle-PostgresExec {
     if ($Arguments[2] -ceq 'sha256sum') {
         $script:state.hba_sha_count += 1
         $hash = $fixedHba
-        if (($script:state.fault -eq 'hba-mounted' -and
+        if ((($script:state.fault -in @(
+                'hba-mounted', 'watchdog-hangs-after-start'
+            )) -and
             $script:state.hba_sha_count -eq 1) -or
             ($script:state.fault -eq 'hba-final-bytes' -and
             $script:state.hba_sha_count -ge 3)) {
@@ -2038,6 +2614,12 @@ function Handle-PostgresExec {
 function Handle-Docker {
     param([string[]] $Arguments)
     $script:state.docker_call_count += 1
+    Materialize-PendingPostgresStart
+    if ($Arguments.Count -eq 1 -and
+        $Arguments[0] -ceq '__stratus-test-stale-watchdog-identity') {
+        Assert-StaleLeaseWatchdogIdentityRejected
+        return New-Result -Stdout 'stale-watchdog-identity-rejected'
+    }
     if ($Arguments.Count -gt 0 -and $Arguments[0] -ceq 'compose') {
         return Handle-Compose -Arguments $Arguments
     }
@@ -2149,6 +2731,138 @@ function Get-FakeServerSource {
     ) -join "`n"
 }
 
+function Add-TestPreContainmentDiagnostics {
+    param(
+        [Parameter(Mandatory = $true)][string] $Source,
+        [Parameter(Mandatory = $true)][string] $FixtureRoot
+    )
+
+    # This transformer is applied only to the disposable gate copy. Diagnostics
+    # do not authorize any operation or change its existing catches/containment.
+    $newLine = if ($Source.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $helperName = 'Write-StratusTestPreContainmentDiagnostic'
+    if ($Source.Contains($helperName)) {
+        throw 'The isolated gate diagnostic instrumentation was already applied.'
+    }
+    $helperSource = @'
+function Write-StratusTestPreContainmentDiagnostic {
+    param([object] $Record, [string] $Phase, [string] $PreStartPath)
+    $diagnosticStream = $null
+    try {
+        $fixtureRoot = '__STRATUS_TEST_DIAGNOSTIC_FIXTURE_ROOT__'
+        $preStart = [IO.Path]::GetFullPath($PreStartPath)
+        if (-not $preStart.StartsWith($fixtureRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
+            $Phase -cnotin @('start-boundary', 'transition-catch')) {
+            throw 'Test diagnostic destination is outside the isolated fixture.'
+        }
+        $path = [IO.Path]::Combine([IO.Path]::GetDirectoryName($preStart),
+            ('test-' + $Phase + '-failure.json'))
+        $raw = [ordered]@{
+            exception_type = [string]$Record.Exception.GetType().FullName
+            exception_message = [string]$Record.Exception.Message
+            exception_text = [string]$Record.Exception.ToString()
+            script_stack_trace = [string]$Record.ScriptStackTrace
+            fully_qualified_error_id = [string]$Record.FullyQualifiedErrorId
+        }
+        $diagnostic = [ordered]@{
+            format = 'stratus-test-precontainment-failure-v1'
+            test_only = $true; non_authorizing = $true
+            production_authorized = $false; protocol_accepted = $false
+            phase = $Phase; captured_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
+            process_id = $PID; fields = [ordered]@{}
+        }
+        $utf8 = [Text.UTF8Encoding]::new($false, $true)
+        $bytes = $null
+        foreach ($limit in @(4096, 1024)) {
+            $diagnostic.fields = [ordered]@{}
+            foreach ($name in $raw.Keys) {
+                $value = [string]$raw[$name]
+                $diagnostic.fields[$name] = [ordered]@{
+                    text = if ($value.Length -gt $limit) { $value.Substring(0, $limit) } else { $value }
+                    original_characters = $value.Length
+                    truncated = [bool]($value.Length -gt $limit)
+                }
+            }
+            $bytes = $utf8.GetBytes(($diagnostic | ConvertTo-Json -Depth 6 -Compress))
+            if ($bytes.Length -le 65536) { break }
+        }
+        if ($bytes.Length -gt 65536) { throw 'Test diagnostic exceeded its fixed byte bound.' }
+        $diagnosticStream = [IO.FileStream]::new($path, [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::WriteThrough)
+        $diagnosticStream.Write($bytes, 0, $bytes.Length)
+        $diagnosticStream.Flush($true)
+    }
+    catch {
+        # Never replace the original gate ErrorRecord. This fallback is also
+        # bounded, best-effort and stderr-only; a failed diagnostic is not PASS.
+        try {
+            $detail = [string]$_.Exception.Message
+            if ($detail.Length -gt 512) { $detail = $detail.Substring(0, 512) }
+            [Console]::Error.WriteLine('STRATUS TEST DIAGNOSTIC CAPTURE FAILED: ' + $detail)
+        }
+        catch { }
+    }
+    finally {
+        if ($null -ne $diagnosticStream) {
+            try { $diagnosticStream.Dispose() }
+            catch {
+                try { [Console]::Error.WriteLine('STRATUS TEST DIAGNOSTIC CLOSE FAILED.') }
+                catch { }
+            }
+        }
+    }
+}
+
+'@
+    $helperSource = $helperSource.Replace("`r`n", "`n").Replace("`n", $newLine)
+    $rootMarker = '__STRATUS_TEST_DIAGNOSTIC_FIXTURE_ROOT__'
+    if ([regex]::Matches($helperSource, [regex]::Escape($rootMarker)).Count -ne 1) {
+        throw 'The test diagnostic fixture-root marker is not unique.'
+    }
+    $helperSource = $helperSource.Replace($rootMarker,
+        ([IO.Path]::GetFullPath($FixtureRoot).Replace("'", "''")))
+    $hooks = @(
+        [pscustomobject]@{
+            needle = 'function Open-ParentStageBoundary {'
+            replacement = $helperSource + $newLine + 'function Open-ParentStageBoundary {'
+        },
+        [pscustomobject]@{
+            needle = '    catch {' + $newLine + '        if ($postgresStartCommandIssued) {'
+            replacement = '    catch {' + $newLine +
+                '        Write-StratusTestPreContainmentDiagnostic -Record $_ -Phase ''start-boundary'' -PreStartPath $absolutePreStartPath' +
+                $newLine + '        if ($postgresStartCommandIssued) {'
+        },
+        [pscustomobject]@{
+            needle = 'catch {' + $newLine + '    $transitionFailure = $_'
+            replacement = 'catch {' + $newLine + '    $transitionFailure = $_' + $newLine +
+                '    Write-StratusTestPreContainmentDiagnostic -Record $transitionFailure -Phase ''transition-catch'' -PreStartPath $absolutePreStartPath'
+        }
+    )
+    foreach ($hook in $hooks) {
+        if ([regex]::Matches($Source, [regex]::Escape($hook.needle)).Count -ne 1) {
+            throw 'The isolated gate pre-containment diagnostic boundary is not unique.'
+        }
+        $Source = $Source.Replace($hook.needle, $hook.replacement)
+    }
+    $tokens = $null; $parseErrors = $null
+    $instrumented = [Management.Automation.Language.Parser]::ParseInput(
+        $Source, [ref]$tokens, [ref]$parseErrors)
+    $definitions = @($instrumented.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Write-StratusTestPreContainmentDiagnostic'
+    }, $true))
+    $calls = @($instrumented.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq 'Write-StratusTestPreContainmentDiagnostic'
+    }, $true))
+    if (@($parseErrors).Count -ne 0 -or $definitions.Count -ne 1 -or $calls.Count -ne 2) {
+        throw 'The isolated gate diagnostic instrumentation failed its AST/cardinality checks.'
+    }
+    return $Source
+}
+
 function Start-FakeRuntime {
     param(
         [Parameter(Mandatory = $true)][string] $LiteralPath,
@@ -2181,7 +2895,8 @@ function Start-FakeRuntime {
         docker = $dockerExe
         git = $gitExe
         compose = $composeExe
-        gate = Join-Path $LiteralPath 'Assert-StratusPostMigrationSuccessorGate.ps1'
+        gate = Join-Path $FixtureRoot `
+            'scripts\Assert-StratusPostMigrationSuccessorGate.ps1'
         watchdog = Join-Path $FixtureRoot `
             'scripts\Invoke-StratusSuccessorTransitionWatchdog.ps1'
         server_script = Join-Path $LiteralPath 'fake-server.ps1'
@@ -2191,10 +2906,15 @@ function Start-FakeRuntime {
         witness_ready = Join-Path $LiteralPath 'witness.ready'
         witness_exit = Join-Path $LiteralPath 'witness.exit'
         witness_exited = Join-Path $LiteralPath 'witness.exited'
+        witness_registry = Join-Path $LiteralPath 'witness-registry'
+        scoped_docker_log = Join-Path $LiteralPath 'scoped-docker-log'
         server_ready = Join-Path $LiteralPath 'server.ready'
         pipe = 'stratus-successor-test-' + [guid]::NewGuid().ToString('N')
         process = $null
+        parent_heartbeat_type = $null
     }
+    [void](New-Item -ItemType Directory -Path $runtime.witness_registry)
+    [void](New-Item -ItemType Directory -Path $runtime.scoped_docker_log)
     $fakeExecutableSha256 = (
         Microsoft.PowerShell.Utility\Get-FileHash `
             -LiteralPath $dockerExe -Algorithm SHA256
@@ -2230,7 +2950,24 @@ function Start-FakeRuntime {
     if (-not $pinnedGateSource.Contains($pinnedWatchdogSha256)) {
         throw 'The isolated core watchdog program pin was not replaced.'
     }
+    $pinnedGateSource = Add-TestPreContainmentDiagnostics `
+        -Source $pinnedGateSource -FixtureRoot $FixtureRoot
     Write-Utf8NoBom -LiteralPath $runtime.gate -Value $pinnedGateSource
+    foreach ($path in @($parentRuntimePath, $parentProgramPath)) {
+        Copy-Item -LiteralPath $path -Destination (Join-Path $FixtureRoot ('scripts\' + [IO.Path]::GetFileName($path)))
+    }
+    $fixtureBuildScripts = Join-Path ([IO.Path]::GetDirectoryName($FixtureRoot)) 'build\scripts'
+    [void](New-Item -ItemType Directory -Path $fixtureBuildScripts -Force)
+    foreach ($path in @($runtime.gate, $parentRuntimePath, $parentProgramPath)) {
+        Copy-Item -LiteralPath $path -Destination (Join-Path $fixtureBuildScripts ([IO.Path]::GetFileName($path)))
+    }
+    $parentNamespace = 'Stratus.ParentFixture' + [guid]::NewGuid().ToString('N')
+    $parentSource = [IO.File]::ReadAllText($parentRuntimePath).Replace('namespace Stratus.ParentStage {',
+        ('namespace ' + $parentNamespace + ' {'))
+    $parentTypes = @(Add-Type -TypeDefinition $parentSource -PassThru -ErrorAction Stop)
+    $runtime.parent_heartbeat_type = @($parentTypes | Where-Object {
+        $_.FullName -ceq ($parentNamespace + '.Heartbeat')
+    })[0]
     Write-Utf8NoBom -LiteralPath $runtime.server_script -Value (Get-FakeServerSource)
     $env:STRATUS_FAKE_PIPE = $runtime.pipe
     $env:STRATUS_FAKE_CONFIG = $runtime.config
@@ -2239,6 +2976,11 @@ function Start-FakeRuntime {
     $env:STRATUS_FAKE_WITNESS_READY = $runtime.witness_ready
     $env:STRATUS_FAKE_WITNESS_EXIT = $runtime.witness_exit
     $env:STRATUS_FAKE_WITNESS_EXITED = $runtime.witness_exited
+    $env:STRATUS_FAKE_WITNESS_REGISTRY = $runtime.witness_registry
+    $env:STRATUS_FAKE_DOCKER_PATH = $runtime.docker
+    $env:STRATUS_FAKE_SCOPED_DOCKER_LOG = $runtime.scoped_docker_log
+    Remove-Item -LiteralPath Env:STRATUS_FAKE_WITNESS_READY_DELAY_MS `
+        -ErrorAction SilentlyContinue
     $env:STRATUS_FAKE_SERVER_READY = $runtime.server_ready
     $env:PATH = $shim + [IO.Path]::PathSeparator + $env:PATH
 
@@ -2273,15 +3015,50 @@ function Start-FakeRuntime {
 
 function Stop-FakeRuntime {
     param([AllowNull()][object] $Runtime)
-    if ($null -eq $Runtime -or $null -eq $Runtime.process) {
-        return
+    if ($null -eq $Runtime) { return }
+
+    $cleanupFailures = [Collections.Generic.List[string]]::new()
+    try { Stop-FakeEventWitnesses -Runtime $Runtime }
+    catch { $cleanupFailures.Add([string]$_.Exception.Message) }
+
+    if ($null -ne $Runtime.process) {
+        try {
+            $Runtime.process.Refresh()
+            if (-not $Runtime.process.HasExited) {
+                $Runtime.process.Kill()
+                if (-not $Runtime.process.WaitForExit(5000)) {
+                    $cleanupFailures.Add('The isolated fake CLI server did not stop.')
+                }
+            }
+        }
+        catch { $cleanupFailures.Add([string]$_.Exception.Message) }
+        finally { $Runtime.process.Dispose() }
     }
-    $Runtime.process.Refresh()
-    if (-not $Runtime.process.HasExited) {
-        $Runtime.process.Kill()
-        [void]$Runtime.process.WaitForExit(5000)
+
+    try { Reset-FakeEventWitnessRegistry -Runtime $Runtime }
+    catch { $cleanupFailures.Add([string]$_.Exception.Message) }
+    if ($cleanupFailures.Count -ne 0) {
+        throw 'Fake runtime cleanup failed: ' + ($cleanupFailures -join '; ')
     }
-    $Runtime.process.Dispose()
+}
+
+function Assert-ScopedDockerCommandLog {
+    param([Parameter(Mandatory = $true)][object] $Runtime)
+
+    $records = @(Get-ChildItem -LiteralPath $Runtime.scoped_docker_log -File)
+    if ($records.Count -eq 0) {
+        throw 'The isolated gate observed no Docker child invocations.'
+    }
+    foreach ($record in $records) {
+        $arguments = @([IO.File]::ReadAllLines($record.FullName))
+        if (
+            $arguments.Count -lt 3 -or
+            $arguments[0] -cne '--context' -or
+            $arguments[1] -cne 'desktop-linux'
+        ) {
+            throw 'A gate Docker child escaped the immutable desktop-linux context.'
+        }
+    }
 }
 
 function Add-FakeExecutableTrustedHashes {
@@ -2338,15 +3115,29 @@ function New-RepairEngineFixture {
 }
 
 function New-RepairAttachmentFixture {
-    param([Parameter(Mandatory = $true)][string] $Name)
+    param(
+        [Parameter(Mandatory = $true)][string] $Name,
+        [switch] $ConfiguredPending
+    )
     $body = [ordered]@{
         name = $Name
-        network_id = if ($Name -ceq 'weatherpoly_default') {
+        configuration_state = if ($ConfiguredPending) {
+            'ConfiguredPending'
+        }
+        else {
+            'ExactStopped'
+        }
+        network_id = if ($ConfiguredPending) {
+            ''
+        }
+        elseif ($Name -ceq 'weatherpoly_default') {
             $defaultNetworkId
         }
         else {
             $safetyNetworkId
         }
+        ipam_configuration = if ($ConfiguredPending) { 'empty_object' } else { 'null' }
+        driver_options = if ($ConfiguredPending) { 'empty_object' } else { 'null' }
         gateway_priority = 0
         aliases = @('postgres', 'weatherpoly-postgres-1')
         dns_names = @($postgresId.Substring(0, 12), 'postgres', 'weatherpoly-postgres-1')
@@ -2372,6 +3163,12 @@ function New-RepairNetworkFixture {
         }
         id = if ($isDefault) { $defaultNetworkId } else { $safetyNetworkId }
         compose_name = if ($isDefault) { 'default' } else { 'safety-plane' }
+        created = if ($isDefault) {
+            '2026-07-05T17:30:21.808081932Z'
+        }
+        else {
+            '2026-07-30T09:19:55.325597748Z'
+        }
         scope = 'local'
         driver = 'bridge'
         subnet = if ($isDefault) { '172.20.0.0/16' } else { '172.22.0.0/16' }
@@ -2398,8 +3195,13 @@ function New-RepairNetworkFixture {
 function New-RepairSnapshotFixture {
     param(
         [Parameter(Mandatory = $true)][object] $Runtime,
-        [Parameter(Mandatory = $true)][object] $Fixture
+        [Parameter(Mandatory = $true)][object] $Fixture,
+        [switch] $ConfiguredPending,
+        [switch] $DefaultOnly
     )
+    if ($ConfiguredPending -and $DefaultOnly) {
+        throw 'Repair snapshot fixture cannot be configured-pending and default-only.'
+    }
     $stable = [ordered]@{
         container_id = $postgresId
         name = '/weatherpoly-postgres-1'
@@ -2422,19 +3224,37 @@ function New-RepairSnapshotFixture {
         hba_source = [IO.Path]::GetFullPath(
             (Join-Path $Fixture.root 'ops\postgres\stratus-pg_hba.conf')
         ).Replace('\', '/')
+        hba_mode = 'ro'
+        hba_propagation = 'rprivate'
         data_volume = 'weatherpoly_stratus-postgres'
+        data_volume_driver = 'local'
+        data_volume_source =
+            '/var/lib/docker/volumes/weatherpoly_stratus-postgres/_data'
+        data_volume_mode = 'rw'
+        data_volume_propagation = ''
         published_postgres = '127.0.0.1:5432'
         labels_sha256 = 'c' * 64
     }
     $attachments = [ordered]@{
         weatherpoly_default = New-RepairAttachmentFixture -Name weatherpoly_default
-        'weatherpoly_safety-plane' =
-            New-RepairAttachmentFixture -Name 'weatherpoly_safety-plane'
+    }
+    if (-not $DefaultOnly) {
+        $attachments['weatherpoly_safety-plane'] =
+            New-RepairAttachmentFixture -Name 'weatherpoly_safety-plane' `
+                -ConfiguredPending:$ConfiguredPending
     }
     $postgres = [ordered]@{
         stable_identity = $stable
         stable_identity_sha256 = Get-CanonicalFixtureHash -Value $stable -Depth 10
-        attachment_state = 'exact'
+        attachment_state = if ($DefaultOnly) {
+            'default_only'
+        }
+        elseif ($ConfiguredPending) {
+            'configured_pending'
+        }
+        else {
+            'exact'
+        }
         attachments = $attachments
         attachments_sha256 = Get-CanonicalFixtureHash -Value $attachments -Depth 12
     }
@@ -2442,11 +3262,33 @@ function New-RepairSnapshotFixture {
         weatherpoly_default = New-RepairNetworkFixture -Kind default
         'weatherpoly_safety-plane' = New-RepairNetworkFixture -Kind safety
     }
+    $composeLines = @(
+        "com.docker.compose.project`0weatherpoly",
+        "com.docker.compose.service`0postgres"
+    )
+    [Array]::Sort($composeLines, [StringComparer]::Ordinal)
+    [object[]]$lifecycleInventory = @([ordered]@{
+        container_id = $stable.container_id
+        name = $stable.name
+        state = $stable.state
+        running = $stable.running
+        started_at = $stable.started_at
+        finished_at = $stable.finished_at
+        restart_count = $stable.restart_count
+        oom_killed = $stable.oom_killed
+        compose_project = 'weatherpoly'
+        compose_service = 'postgres'
+        compose_labels_sha256 = Get-TextSha256 -Value (
+            ($composeLines -join "`n") + "`n"
+        )
+    })
     $snapshotBody = [ordered]@{
         docker_engine = New-RepairEngineFixture -Runtime $Runtime
         running_container_ids = @()
-        lifecycle_inventory = @()
-        lifecycle_inventory_sha256 = 'b' * 64
+        lifecycle_inventory = $lifecycleInventory
+        lifecycle_inventory_sha256 = Get-TextSha256 -Value (
+            ConvertTo-Json -InputObject $lifecycleInventory -Depth 8 -Compress
+        )
         postgres = $postgres
         production_networks = $networks
         production_networks_sha256 = Get-CanonicalFixtureHash -Value $networks -Depth 12
@@ -2459,16 +3301,155 @@ function New-RepairSnapshotFixture {
     return $snapshot
 }
 
+function New-RepairEventWitnessFixture {
+    param(
+        [Parameter(Mandatory = $true)][DateTimeOffset] $AcceptedAt,
+        [bool] $MutationIssued = $false
+    )
+
+    $sessionId = 'a' * 32
+    $barrierName = 'b' * 64
+    $templateSha256 =
+        '090809477bdd74506256d557f11a2d73a470675de98c41d3f5923735251f51c5'
+    $eventFormat = (
+        '{"type":{{json .Type}},"action":{{json .Action}},' +
+        '"actor_id":{{json .Actor.ID}},"attributes":{{json .Actor.Attributes}},' +
+        '"scope":{{json .Scope}},"time":{{.Time}},' +
+        '"time_nano":{{.TimeNano}}}'
+    )
+    $eventSeconds = $AcceptedAt.AddSeconds(-1).ToUnixTimeSeconds()
+    $preTimeNano = [int64](
+        ([int64]$eventSeconds * [int64]1000000000) + [int64]100
+    )
+    $events = [Collections.Generic.List[object]]::new()
+    $events.Add([ordered]@{
+        type = 'volume'
+        action = 'create'
+        actor_id = $barrierName
+        attributes = [ordered]@{ driver = 'local' }
+        scope = 'local'
+        time = [int64]$eventSeconds
+        time_nano = $preTimeNano
+    })
+    if ($MutationIssued) {
+        $events.Add([ordered]@{
+            type = 'network'
+            action = 'connect'
+            actor_id = $safetyNetworkId
+            attributes = [ordered]@{
+                container = $postgresId
+                name = 'weatherpoly_safety-plane'
+                type = 'bridge'
+            }
+            scope = 'local'
+            time = [int64]$eventSeconds
+            time_nano = [int64]($preTimeNano + 100)
+        })
+    }
+    $events.Add([ordered]@{
+        type = 'volume'
+        action = 'destroy'
+        actor_id = $barrierName
+        attributes = [ordered]@{ driver = 'local' }
+        scope = 'local'
+        time = [int64]$eventSeconds
+        time_nano = [int64]($preTimeNano + $(if ($MutationIssued) { 200 } else { 100 }))
+    })
+    [object[]]$eventArray = @($events.ToArray())
+    $eventLines = @($eventArray | ForEach-Object {
+        ConvertTo-Json -InputObject $_ -Depth 8 -Compress
+    })
+    $journalText = ($eventLines -join "`n") + "`n"
+    $finalEvent = $eventArray[$eventArray.Count - 1]
+    return [ordered]@{
+        format = 'stratus-stopped-repair-docker-event-witness-v1'
+        session_id = $sessionId
+        process_id = 4242
+        process_started_at = $AcceptedAt.AddSeconds(-2).ToString('o')
+        event_command = @(
+            '--context', 'desktop-linux', 'events', '--format', $eventFormat
+        )
+        collector = [ordered]@{
+            type_name = 'StratusRepairDockerCollector_' +
+                $templateSha256.Substring(0, 16)
+            contract_identity = 'repair-v2:' + $templateSha256
+            template_sha256 = $templateSha256
+            source_sha256 =
+                '621e556478237ab88a6cb20247953d92569e6f00fd3fa700bfa706c3bcc37a5e'
+            assembly_full_name_sha256 = '3' * 64
+            assembly_is_dynamic = $false
+            module_version_id = '11111111-1111-1111-1111-111111111111'
+        }
+        barrier_volume_name = $barrierName
+        pre_barrier = [ordered]@{
+            actor_id = $barrierName
+            time = [int64]$eventArray[0].time
+            time_nano = [int64]$eventArray[0].time_nano
+        }
+        final_barrier = [ordered]@{
+            actor_id = $barrierName
+            time = [int64]$finalEvent.time
+            time_nano = [int64]$finalEvent.time_nano
+        }
+        authority_as_of_time_nano = [int64]$finalEvent.time_nano
+        journal_bytes = [int64][Text.UTF8Encoding]::new($false).GetByteCount($journalText)
+        journal_sha256 = Get-TextSha256 -Value $journalText
+        event_count = $eventArray.Count
+        events_sha256 = Get-TextSha256 -Value (
+            ConvertTo-Json -InputObject $eventArray -Depth 8 -Compress
+        )
+        events = $eventArray
+        network_connect_count = if ($MutationIssued) { 1 } else { 0 }
+        network_connect_time_nano = if ($MutationIssued) {
+            [int64]$eventArray[1].time_nano
+        }
+        else {
+            $null
+        }
+        stderr_bytes = 0
+        truncated = $false
+        eof_before_seal = $false
+        unexpected_event_count = 0
+    }
+}
+
 function Write-NetworkRepairFixture {
     param(
         [Parameter(Mandatory = $true)][string] $LiteralPath,
         [Parameter(Mandatory = $true)][object] $Runtime,
-        [Parameter(Mandatory = $true)][object] $Fixture
+        [Parameter(Mandatory = $true)][object] $Fixture,
+        [switch] $ConfiguredPending,
+        [switch] $ConnectedByThisInvocation,
+        [ValidateRange(0, 60000)][int] $EventLagMilliseconds = 1000
     )
-    $snapshot = New-RepairSnapshotFixture -Runtime $Runtime -Fixture $Fixture
+    if ($ConfiguredPending -and $ConnectedByThisInvocation) {
+        throw 'Repair fixture cannot be configured-pending and newly connected.'
+    }
+    $preSnapshot = New-RepairSnapshotFixture -Runtime $Runtime -Fixture $Fixture `
+        -ConfiguredPending:$ConfiguredPending `
+        -DefaultOnly:$ConnectedByThisInvocation
+    $postSnapshot = if ($ConnectedByThisInvocation) {
+        New-RepairSnapshotFixture -Runtime $Runtime -Fixture $Fixture
+    }
+    else {
+        Copy-JsonValue -Value $preSnapshot
+    }
+    $acceptedAt = [DateTimeOffset]::UtcNow
+    $eventWitness = New-RepairEventWitnessFixture -AcceptedAt $acceptedAt `
+        -MutationIssued:$ConnectedByThisInvocation
+    Set-RepairEventWitnessLag -Witness $eventWitness -AcceptedAt $acceptedAt `
+        -LagMilliseconds $EventLagMilliseconds
     $payload = [ordered]@{
-        accepted_at = [DateTimeOffset]::UtcNow.ToString('o')
-        disposition = 'verified_exact_existing'
+        accepted_at = $acceptedAt.ToString('o')
+        disposition = if ($ConnectedByThisInvocation) {
+            'connected_by_this_invocation'
+        }
+        elseif ($ConfiguredPending) {
+            'verified_configured_pending_existing'
+        }
+        else {
+            'verified_exact_existing'
+        }
         fixed_identity = [ordered]@{
             postgres_container_id = $postgresId
             postgres_container_name = 'weatherpoly-postgres-1'
@@ -2476,23 +3457,25 @@ function Write-NetworkRepairFixture {
             safety_network_id = $safetyNetworkId
         }
         docker_engine = New-RepairEngineFixture -Runtime $Runtime
+        event_witness = $eventWitness
         snapshots = [ordered]@{
-            pre = Copy-JsonValue -Value $snapshot
-            armed = Copy-JsonValue -Value $snapshot
-            post_first = Copy-JsonValue -Value $snapshot
-            post_second = Copy-JsonValue -Value $snapshot
+            pre = Copy-JsonValue -Value $preSnapshot
+            armed = Copy-JsonValue -Value $preSnapshot
+            post_first = Copy-JsonValue -Value $postSnapshot
+            post_second = Copy-JsonValue -Value $postSnapshot
         }
         comparisons = [ordered]@{
             pre_equals_armed = $true
             post_first_equals_post_second = $true
             docker_engine_unchanged = $true
             all_container_lifecycle_inventory_unchanged = $true
+            continuous_docker_event_history_exact = $true
             postgres_stopped_identity_unchanged = $true
             production_network_identity_unchanged = $true
-            post_attachment_exact_twice = $true
+            post_attachment_admissible_twice = $true
         }
         mutation = [ordered]@{
-            issued = $false
+            issued = [bool]$ConnectedByThisInvocation
             command = @(
                 'network', 'connect', '--alias', 'postgres', '--alias',
                 'weatherpoly-postgres-1', '--gw-priority', '0',
@@ -2510,11 +3493,106 @@ function Write-NetworkRepairFixture {
         }
     }
     Write-JsonFixture -LiteralPath $LiteralPath -Value ([ordered]@{
-        format = 'stratus-stopped-postgres-safety-plane-repair-v1'
+        format = 'stratus-stopped-postgres-safety-plane-repair-v2'
         accepted = $true
         payload = $payload
         payload_sha256 = Get-CanonicalFixtureHash -Value $payload -Depth 30
     }) -Depth 30
+}
+
+function Set-RepairSnapshotCanonicalSha256 {
+    param([Parameter(Mandatory = $true)][object] $Snapshot)
+
+    $snapshotBody = [ordered]@{
+        docker_engine = $Snapshot.docker_engine
+        running_container_ids = @($Snapshot.running_container_ids)
+        lifecycle_inventory = @($Snapshot.lifecycle_inventory)
+        lifecycle_inventory_sha256 = [string]$Snapshot.lifecycle_inventory_sha256
+        postgres = $Snapshot.postgres
+        production_networks = $Snapshot.production_networks
+        production_networks_sha256 = [string]$Snapshot.production_networks_sha256
+    }
+    $Snapshot.canonical_sha256 = Get-CanonicalFixtureHash `
+        -Value $snapshotBody -Depth 20
+}
+
+function Set-RepairLifecycleInventorySha256 {
+    param([Parameter(Mandatory = $true)][object] $Snapshot)
+
+    [object[]]$inventory = @($Snapshot.lifecycle_inventory)
+    $Snapshot.lifecycle_inventory = $inventory
+    $Snapshot.lifecycle_inventory_sha256 = Get-TextSha256 -Value (
+        ConvertTo-Json -InputObject $inventory -Depth 8 -Compress
+    )
+}
+
+function Write-MutatedNetworkRepairFixture {
+    param(
+        [Parameter(Mandatory = $true)][string] $LiteralPath,
+        [Parameter(Mandatory = $true)][object] $Repair
+    )
+
+    $Repair.payload_sha256 = Get-CanonicalFixtureHash `
+        -Value $Repair.payload -Depth 30
+    Write-JsonFixture -LiteralPath $LiteralPath -Value $Repair -Depth 30
+}
+
+function Set-RepairEventWitnessHashes {
+    param([Parameter(Mandatory = $true)][object] $Witness)
+
+    [object[]]$events = @($Witness.events)
+    $eventLines = @($events | ForEach-Object {
+        ConvertTo-Json -InputObject $_ -Depth 8 -Compress
+    })
+    $journalText = ($eventLines -join "`n") + "`n"
+    $Witness.event_count = $events.Count
+    $Witness.journal_bytes =
+        [int64][Text.UTF8Encoding]::new($false).GetByteCount($journalText)
+    $Witness.journal_sha256 = Get-TextSha256 -Value $journalText
+    $Witness.events_sha256 = Get-TextSha256 -Value (
+        ConvertTo-Json -InputObject $events -Depth 8 -Compress
+    )
+}
+
+function Set-RepairEventWitnessLag {
+    param(
+        [Parameter(Mandatory = $true)][object] $Witness,
+        [Parameter(Mandatory = $true)][DateTimeOffset] $AcceptedAt,
+        [Parameter(Mandatory = $true)][ValidateRange(0, 60000)]
+        [int] $LagMilliseconds
+    )
+
+    $acceptedUnixTicks = [int64](
+        $AcceptedAt.UtcDateTime.Ticks - [int64]621355968000000000
+    )
+    $acceptedTimeNano = [int64]($acceptedUnixTicks * [int64]100)
+    $finalTimeNano = [int64](
+        $acceptedTimeNano -
+        ([int64]$LagMilliseconds * [int64]1000000)
+    )
+    [object[]]$events = @($Witness.events)
+    for ($index = 0; $index -lt $events.Count; $index += 1) {
+        $distance = [int64](($events.Count - 1 - $index) * 100)
+        $timeNano = [int64]($finalTimeNano - $distance)
+        $events[$index].time_nano = $timeNano
+        $events[$index].time = [int64][Math]::Floor(
+            [decimal]$timeNano / [decimal]1000000000
+        )
+    }
+    $Witness.process_started_at = $AcceptedAt.AddMilliseconds(
+        -1 * ($LagMilliseconds + 1000)
+    ).ToString('o')
+    $Witness.pre_barrier.time = [int64]$events[0].time
+    $Witness.pre_barrier.time_nano = [int64]$events[0].time_nano
+    $lastIndex = $events.Count - 1
+    $Witness.final_barrier.time = [int64]$events[$lastIndex].time
+    $Witness.final_barrier.time_nano = [int64]$events[$lastIndex].time_nano
+    $Witness.authority_as_of_time_nano =
+        [int64]$Witness.final_barrier.time_nano
+    if ([int64]$Witness.network_connect_count -eq 1) {
+        $Witness.network_connect_time_nano = [int64]$events[1].time_nano
+    }
+    Set-RepairEventWitnessHashes -Witness $Witness
 }
 
 # The active harness below uses compiled fake docker/git applications and a
@@ -2576,6 +3654,18 @@ function New-TransitionCasePaths {
             'successor-prestart.json.watchdog-heartbeat.json'
         watchdog_commit = Join-Path $directory `
             'successor-prestart.json.watchdog-commit.json'
+        watchdog_start_fence = Join-Path $directory `
+            'successor-prestart.json.watchdog-start-fence.lock'
+        watchdog_start_revoke = Join-Path $directory `
+            'successor-prestart.json.watchdog-start-revoked.json'
+        watchdog_start_attempt = Join-Path $directory `
+            'successor-prestart.json.watchdog-start-attempt.json'
+        watchdog_start_completion = Join-Path $directory `
+            'successor-prestart.json.watchdog-start-complete.json'
+        parent_containment = Join-Path $directory `
+            'successor-prestart.json.parent-containment.json'
+        parent_authorization = Join-Path $directory `
+            'successor-prestart.json.parent-authorization.json'
     }
     $worstHeartbeatTemporaryPath = [string]$case.watchdog_heartbeat +
         '.tmp-' + ('f' * 32) + '-2147483647'
@@ -2592,15 +3682,26 @@ function Initialize-TransitionCase {
         [Parameter(Mandatory = $true)][object] $Case,
         [Parameter(Mandatory = $true)][string] $Fault
     )
+    Assert-TransitionWitnessStopped -Runtime $Runtime `
+        -Label 'Previous Transition case'
+    Reset-FakeEventWitnessRegistry -Runtime $Runtime
     Write-HistoricalBackupFixtures -LiteralPath $Fixture.backup
     Initialize-HostFixtureState -Fixture $Fixture
     Write-NetworkRepairFixture -LiteralPath $Case.repair `
-        -Runtime $Runtime -Fixture $Fixture
+        -Runtime $Runtime -Fixture $Fixture `
+        -ConfiguredPending:($Fault -ceq 'configured-pending') `
+        -ConnectedByThisInvocation:($Fault -ceq 'repair-connected') `
+        -EventLagMilliseconds $(if ($Fault -ceq 'repair-connected') {
+            30000
+        } else { 1000 })
     foreach ($path in @(
         $Runtime.result, $Runtime.events, $Runtime.witness_ready,
         $Runtime.witness_exit, $Runtime.witness_exited, $Case.prestart,
         $Case.live, $Case.watchdog_lease, $Case.watchdog_terminal,
-        $Case.watchdog_heartbeat, $Case.watchdog_commit
+        $Case.watchdog_heartbeat, $Case.watchdog_commit,
+        $Case.watchdog_start_fence, $Case.watchdog_start_revoke,
+        $Case.watchdog_start_attempt, $Case.watchdog_start_completion,
+        $Case.parent_containment, $Case.parent_authorization
     )) {
         Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
     }
@@ -2617,12 +3718,246 @@ function Initialize-TransitionCase {
     })
 }
 
+function Get-ParentFixtureFileHash {
+    param([string] $Path)
+    return (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function New-ParentStageR1Fixture {
+    param([object] $Fixture, [object] $Case, [string] $Session, [string] $Fault)
+    $directory = Join-Path $Fixture.root ".stratus-cache\release-transitions\r1-$successorRevision.accepted"
+    [void](New-Item -ItemType Directory -Path $directory -Force)
+    $sourceLines = @()
+    $sourceNames = [string[]]@('docker-compose.yml', 'scripts/Invoke-StratusParentStageWatchdog.ps1',
+        'scripts/Stratus.ParentStage.Runtime.cs', 'scripts/Assert-StratusPostMigrationSuccessorGate.ps1',
+        'scripts/Invoke-StratusSuccessorTransitionWatchdog.ps1', 'scripts/Invoke-StratusStoppedPostgresNetworkRepair.ps1',
+        'scripts/Invoke-StratusRuntimeLoadObserver.ps1', 'scripts/Invoke-StratusDashboardLoadGate.ps1',
+        'scripts/Assert-StratusLoadGateArtifacts.ps1')
+    [Array]::Sort($sourceNames, [StringComparer]::Ordinal)
+    foreach ($relative in $sourceNames) {
+        $path = Join-Path $Fixture.root $relative
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            Copy-Item -LiteralPath (Join-Path $repoRoot $relative) -Destination $path
+        }
+        if ($Fault -ceq 'r1-missing-program' -and $relative -ceq 'scripts/Invoke-StratusDashboardLoadGate.ps1') { continue }
+        # Every case seals its isolated instrumented programs, including the
+        # matching sibling build tree. No repository/production file is modified.
+        Copy-Item -LiteralPath $path -Destination (Join-Path $Fixture.build $relative) -Force
+        $length = ([IO.FileInfo]::new($path)).Length
+        $sourceLines += $relative + "`t" + $length + "`t" + (Get-ParentFixtureFileHash $path)
+    }
+    $names = @('acceptance.json', 'build-command.json', 'build-history.json', 'ci-evidence.json',
+        'git-evidence.json', 'historical-0047-inputs.json', 'image-inspect.json', 'input-manifest.tsv',
+        'pre-start-topology.json', 'release-guard.json', 'source-manifest.tsv', 'source-summary.json', 'successor-reservation.json')
+    foreach ($name in $names) { Write-Utf8NoBom (Join-Path $directory $name) "{}`n" }
+    $reservation = [ordered]@{
+        format = 'stratus-r1-successor-reservation-v3'; record_id = 'fixture-r1'
+        reserved_at_utc = [DateTime]::UtcNow.ToString('o'); revision = $successorRevision; attempt_id = $Session
+        attempt_directory = [IO.Path]::GetDirectoryName($Case.directory); evidence_directory = $Case.directory
+        separate_from_historical_lineage = $true; empty_at_acceptance = $true; regular_directory = $true
+        reparse_point = $false; create_new_only = $true; reuse_after_failure = $false; section3_started = $false
+    }
+    if ($Fault -ceq 'swapped-reservation-session') { $reservation.attempt_id = [guid]::NewGuid().ToString('N') }
+    Write-JsonFixture (Join-Path $directory 'successor-reservation.json') $reservation
+    Write-Utf8NoBom (Join-Path $directory 'source-manifest.tsv') (($sourceLines -join "`n") + "`n")
+    $sourceHash = Get-ParentFixtureFileHash (Join-Path $directory 'source-manifest.tsv')
+    $acceptance = [ordered]@{
+        format = 'stratus-r0-r1-acceptance-v3'; record_id = 'fixture-r1'
+        recorded_at_utc = [DateTime]::UtcNow.ToString('o'); production_root = $Fixture.root
+        candidate = [ordered]@{
+            revision = $successorRevision; tree = ('b' * 40); source_path_count = $sourceLines.Count
+            source_aggregate_sha256 = $sourceHash; build_worktree = $Fixture.build
+            detached = $true; clean = $true; image = $successorImage; image_id = $successorImageId
+            release_digest = $successorImageId.Substring(7); platform = 'linux/amd64'
+        }
+        remote_ci = @{ evidence_sha256 = Get-ParentFixtureFileHash (Join-Path $directory 'ci-evidence.json') }
+        historical_0047 = @{ evidence_sha256 = Get-ParentFixtureFileHash (Join-Path $directory 'historical-0047-inputs.json') }
+        successor_attempt = [ordered]@{
+            directory = $reservation.attempt_directory; evidence_directory = $Case.directory
+            reservation_sha256 = Get-ParentFixtureFileHash (Join-Path $directory 'successor-reservation.json')
+            separate_from_historical_lineage = $true; empty_at_acceptance = $true; create_new_only = $true; reuse_after_failure = $false
+        }
+        pre_start = @{ topology_sha256 = Get-ParentFixtureFileHash (Join-Path $directory 'pre-start-topology.json') }
+        decisions = [ordered]@{ R0 = 'ACCEPT'; R1 = 'ACCEPT'; immutable_image_load_gate_transition = 'RECORDED'
+            section3_authorized = $false; requires_parent_stage_watchdog_acceptance = $true; section3_started = $false }
+        authorization = [ordered]@{ scope = 'PAPER_ONLY'
+            retained_postgres_start_permitted_only_inside_single_process_transition = $false
+            migration_start_permitted = $false; api_start_permitted_before_matching_successful_terminal_receipt = $false
+            worker_start_permitted = $false; safety_control_start_permitted = $false
+            live_transition_permitted = $false; binance_kill_switch_removal_permitted = $false }
+        artifacts = @($names | Where-Object { $_ -cne 'acceptance.json' })
+    }
+    if ($Fault -ceq 'forged-reservation-hash') { $acceptance.successor_attempt.reservation_sha256 = 'f' * 64 }
+    if ($Fault -ceq 'r1-noncanonical-time') { $acceptance.recorded_at_utc = [DateTimeOffset]::UtcNow.ToString('o') }
+    if ($Fault -ceq 'r1-source-count') { $acceptance.candidate.source_path_count += 1 }
+    foreach ($binding in @(@('r1-lineage-topology', 'pre_start', 'topology_sha256'),
+        @('r1-lineage-ci', 'remote_ci', 'evidence_sha256'),
+        @('r1-lineage-history', 'historical_0047', 'evidence_sha256'))) {
+        if ($Fault -ceq $binding[0]) { $acceptance.($binding[1]).($binding[2]) = 'f' * 64 }
+    }
+    Write-JsonFixture (Join-Path $directory 'acceptance.json') $acceptance -Depth 20
+    $manifestLines = @($names | ForEach-Object {
+        $path = Join-Path $directory $_
+        $_ + "`t" + ([IO.FileInfo]::new($path)).Length + "`t" + (Get-ParentFixtureFileHash $path)
+    })
+    Write-Utf8NoBom (Join-Path $directory 'evidence-manifest.tsv') (($manifestLines -join "`n") + "`n")
+    $acceptanceHash = Get-ParentFixtureFileHash (Join-Path $directory 'acceptance.json')
+    $manifestHash = Get-ParentFixtureFileHash (Join-Path $directory 'evidence-manifest.tsv')
+    Write-JsonFixture (Join-Path $directory 'SEALED.json') ([ordered]@{
+        format = 'stratus-r0-r1-seal-v3'; record_id = 'fixture-r1'; sealed_at_utc = [DateTime]::UtcNow.ToString('o')
+        revision = $successorRevision; acceptance_sha256 = $acceptanceHash; evidence_manifest_sha256 = $manifestHash
+        input_manifest_sha256 = Get-ParentFixtureFileHash (Join-Path $directory 'input-manifest.tsv')
+        artifact_count = 13; state = 'ACCEPTED_R1_PREREQUISITE_PARENT_STAGE_PENDING'
+        section3_authorized = $false; requires_parent_stage_watchdog_acceptance = $true
+    })
+    return [pscustomobject]@{
+        anchor = [ordered]@{ directory = $directory; acceptance_sha256 = $acceptanceHash
+            evidence_manifest_sha256 = $manifestHash; sealed_sha256 = Get-ParentFixtureFileHash (Join-Path $directory 'SEALED.json') }
+        source_sha256 = $sourceHash
+    }
+}
+
+function New-ParentStageFixture {
+    param([object] $Runtime, [object] $Fixture, [object] $Case, [string] $Fault = 'none')
+    $session = [guid]::NewGuid().ToString('N')
+    $r1 = New-ParentStageR1Fixture -Fixture $Fixture -Case $Case -Session $session -Fault $Fault
+    $ownerProcess = [Diagnostics.Process]::GetCurrentProcess()
+    try {
+        $owner = [ordered]@{ pid = $PID; start_time_utc = [DateTimeOffset]::new($ownerProcess.StartTime.ToUniversalTime()).ToString('o')
+            executable = [IO.Path]::GetFullPath($ownerProcess.MainModule.FileName) }
+    }
+    finally { $ownerProcess.Dispose() }
+    $owner.sha256 = Get-ParentFixtureFileHash $owner.executable
+    $Runtime.process.Refresh()
+    # The fake CLI server is the hermetic independent watchdog process witness.
+    # No production parent-stage protocol acceptance is inferred from this fixture.
+    $watchdog = [ordered]@{ pid = $Runtime.process.Id
+        start_time_utc = [DateTimeOffset]::new($Runtime.process.StartTime.ToUniversalTime()).ToString('o')
+        executable = [IO.Path]::GetFullPath($Runtime.process.MainModule.FileName) }
+    if ($Fault -ceq 'dead-watchdog') { $watchdog.pid = [int]::MaxValue }
+    if ($Fault -ceq 'reused-watchdog') { $watchdog.start_time_utc = [DateTimeOffset]::Parse($watchdog.start_time_utc).AddTicks(1).ToString('o') }
+    $names = @('mutation_fence', 'lease', 'parent_armed', 'ready', 'heartbeat', 'terminal', 'containment',
+        'transition_registration', 'transition_ack', 'provision_intent', 'provision_intent_ack', 'provision_attempt',
+        'provision_registration', 'provision_registration_ack', 'provision_complete', 'api_intent', 'api_intent_ack',
+        'api_attempt', 'api_registration', 'api_registration_ack', 'api_start_intent', 'api_start_ack', 'api_start_attempt',
+        'api_start_complete', 'observer_registration', 'observer_ack', 'handoff_request', 'handoff_ack', 'handoff_commit',
+        'transition_start_fence', 'transition_start_revoke', 'transition_start_attempt', 'transition_start_completion',
+        'transition_terminal', 'parent_authorization', 'observer_intent', 'observer_complete', 'observer_ready', 'observer_output', 'load_accepted')
+    $paths = [ordered]@{}; $number = 0
+    foreach ($name in $names) { $paths[$name] = Join-Path $Case.directory ('p' + (++$number) + '.json') }
+    $paths.transition_start_fence = $Case.watchdog_start_fence; $paths.transition_start_revoke = $Case.watchdog_start_revoke
+    $paths.transition_start_attempt = $Case.watchdog_start_attempt; $paths.transition_start_completion = $Case.watchdog_start_completion
+    $paths.transition_terminal = $Case.watchdog_terminal; $paths.parent_authorization = $Case.parent_authorization
+    $contractPath = Join-Path $Case.directory 'p-contract.json'
+    $now = [DateTimeOffset]::UtcNow
+    $deadline = $now.AddSeconds(1200)
+    if ($Fault -ceq 'expired-lease') { $deadline = $now.AddSeconds(-1) }
+    $contract = [ordered]@{
+        format = 'stratus-parent-contract-v2'; root = $Fixture.root; session_id = $session; revision = $successorRevision
+        owner = $owner; watchdog = [ordered]@{
+            script_path = Join-Path $Fixture.root 'scripts\Invoke-StratusParentStageWatchdog.ps1'
+            script_sha256 = Get-ParentFixtureFileHash $parentProgramPath
+            host_path = $watchdog.executable; host_sha256 = Get-ParentFixtureFileHash $watchdog.executable
+            runtime_path = Join-Path $Fixture.root 'scripts\Stratus.ParentStage.Runtime.cs'
+            runtime_sha256 = Get-ParentFixtureFileHash $parentRuntimePath
+        }
+        docker = [ordered]@{ executable = $Runtime.docker; sha256 = Get-ParentFixtureFileHash $Runtime.docker }
+        hba = [ordered]@{ path = Join-Path $Fixture.root 'ops\postgres\stratus-pg_hba.conf'
+            sha256 = Get-ParentFixtureFileHash (Join-Path $Fixture.root 'ops\postgres\stratus-pg_hba.conf') }
+        deadline_utc = $deadline.ToString('o'); heartbeat_ttl_seconds = 30; artifacts = $paths
+        postgres = [ordered]@{ name = 'weatherpoly-postgres-1'; image_id = $postgresImageId; config_image = $postgresImage
+            service = 'postgres' }
+        api = [ordered]@{ name = 'weatherpoly-api-1'; image_id = $successorImageId; config_image = $successorImage
+            service = 'api' }
+        provision = [ordered]@{ name = 'stratus-runtime-provision-' + $session; image_id = $postgresImageId
+            config_image = $postgresImage; service = 'provision-runtime-role' }
+        load_acceptance_path = Join-Path $Case.directory 'p-load.json'; r1 = $r1.anchor
+    }
+    if ($Fault -ceq 'wrong-provision-image') {
+        $contract.provision.image_id = $successorImageId
+        $contract.provision.config_image = $successorImage
+    }
+    Write-JsonFixture $contractPath $contract -Depth 20
+    $contractHash = Get-ParentFixtureFileHash $contractPath
+    Write-JsonFixture $paths.mutation_fence ([ordered]@{ format = 'stratus-parent-mutation-fence-v1'; session_id = $session
+        owner_pid = $PID; owner_start_time_utc = $owner.start_time_utc; contract_sha256 = $contractHash })
+    $fenceHash = Get-ParentFixtureFileHash $paths.mutation_fence
+    $nonAuthorization = [ordered]@{ postgres_start_permitted = $false; api_start_permitted = $false; worker_start_permitted = $false
+        safety_control_start_permitted = $false; live_transition_permitted = $false; binance_kill_switch_removal_permitted = $false
+        migration_container_permitted = $false; container_remove_permitted = $false }
+    $lease = [ordered]@{ format = 'stratus-parent-lease-v2'; session_id = $session; contract_path = $contractPath
+        contract_sha256 = $contractHash; watchdog = $watchdog; owner = $owner; mutation_fence_path = $paths.mutation_fence
+        mutation_fence_sha256 = $fenceHash; r1_anchor = $r1.anchor; source_manifest_sha256 = $r1.source_sha256
+        armed_at = $now.ToString('o'); deadline_utc = $deadline.ToString('o'); authorization = $nonAuthorization }
+    if ($Fault -ceq 'forged-lease') { $lease.contract_sha256 = 'f' * 64 }
+    Write-JsonFixture $paths.lease $lease -Depth 20
+    $leaseHash = Get-ParentFixtureFileHash $paths.lease
+    $armed = [ordered]@{ format = 'stratus-parent-parent-armed-v1'; session_id = $session; lease_sha256 = $leaseHash
+        owner_pid = $PID; owner_start_time_utc = $owner.start_time_utc; published_at = [DateTimeOffset]::UtcNow.ToString('o')
+        mutation_fence_sha256 = $fenceHash }
+    Write-JsonFixture $paths.parent_armed $armed
+    $ready = [ordered]@{ format = 'stratus-parent-ack-v1'; session_id = $session; lease_sha256 = $leaseHash
+        acknowledged_at = [DateTimeOffset]::UtcNow.ToString('o'); watchdog_pid = $watchdog.pid
+        watchdog_start_time_utc = $watchdog.start_time_utc; source_path = $paths.parent_armed
+        source_sha256 = Get-ParentFixtureFileHash $paths.parent_armed
+        boundary = [ordered]@{ mutation_fence_sha256 = $fenceHash; postgres_stopped = $true
+            r1_acceptance_sha256 = $r1.anchor.acceptance_sha256; phase = 'transition' }; authorization = $nonAuthorization }
+    if ($Fault -ceq 'forged-ready') { $ready.source_sha256 = 'f' * 64 }
+    Write-JsonFixture $paths.ready $ready -Depth 20
+    $guard = [pscustomobject]@{ fence = $null; heartbeat = $null; parameters = @{
+        ParentStageContractPath = $contractPath; ParentStageContractSha256 = $contractHash
+        ParentStageLeasePath = $paths.lease; ParentStageLeaseSha256 = $leaseHash
+        ParentStageReadyPath = $paths.ready; ParentStageReadySha256 = Get-ParentFixtureFileHash $paths.ready
+        ParentStageHeartbeatPath = $paths.heartbeat; ParentMutationFence = $null
+    }}
+    try {
+        $fencePath = $paths.mutation_fence
+        if ($Fault -ceq 'wrong-fence') {
+            $fencePath = Join-Path $Case.directory 'p-wrong-fence.json'
+            Copy-Item -LiteralPath $paths.mutation_fence -Destination $fencePath
+        }
+        $sharing = switch -CaseSensitive ($Fault) {
+            'shared-fence' { [IO.FileShare]::ReadWrite }
+            'write-shared-fence' { [IO.FileShare]::Write }
+            'delete-shared-fence' { [IO.FileShare]::Delete }
+            default { [IO.FileShare]::None }
+        }
+        # Keep the owner handle read-only: a read denial must not hide an
+        # allowed second write or DELETE-access open under partial sharing.
+        $guard.fence = [IO.FileStream]::new($fencePath, 'Open', 'Read', $sharing)
+        $guard.parameters.ParentMutationFence = $guard.fence
+        if ($Fault -ceq 'closed-fence') { $guard.fence.Dispose() }
+        if ($Fault -ceq 'missing-fence') { $guard.parameters.ParentMutationFence = $null }
+        if ($Fault -ceq 'stale-heartbeat') {
+            Write-JsonFixture $paths.heartbeat ([ordered]@{ format = 'stratus-parent-heartbeat-v1'; session_id = $session
+                lease_sha256 = $leaseHash; owner_pid = $PID; owner_start_time_utc = $owner.start_time_utc
+                sequence = 1; published_at = $now.AddSeconds(-40).ToString('o') })
+        }
+        else {
+            $heartbeatType = $Runtime.parent_heartbeat_type
+            $heartbeatConstructor = $heartbeatType.GetConstructor([type[]]@([string], [string], [string], [int]))
+            if ($null -eq $heartbeatConstructor) { throw 'Parent fixture heartbeat constructor contract differs.' }
+            $guard.heartbeat = $heartbeatConstructor.Invoke([object[]]@(
+                [string]$paths.heartbeat, [string]$session, [string]$leaseHash, [int]1000))
+        }
+        return $guard
+    }
+    catch {
+        $primary = $_; $cleanup = [Collections.Generic.List[object]]::new()
+        foreach ($handle in @($guard.heartbeat, $guard.fence)) {
+            if ($null -ne $handle) { try { $handle.Dispose() } catch { $cleanup.Add($_) } }
+        }
+        Complete-TestHarnessOutcome -PrimaryFailure $primary -CleanupFailures $cleanup.ToArray() -Label 'parent-stage fixture initialization'
+    }
+}
+
 function Invoke-TransitionCase {
     param(
         [Parameter(Mandatory = $true)][object] $Runtime,
         [Parameter(Mandatory = $true)][object] $Fixture,
         [Parameter(Mandatory = $true)][object] $Case,
-        [hashtable] $Overrides = @{}
+        [hashtable] $Overrides = @{},
+        [string] $ParentFault = 'none'
     )
     $parameters = @{
         Mode = 'Transition'
@@ -2642,7 +3977,41 @@ function Invoke-TransitionCase {
     foreach ($entry in $Overrides.GetEnumerator()) {
         $parameters[[string]$entry.Key] = $entry.Value
     }
-    return & $Runtime.gate @parameters
+    if ($ParentFault -ceq 'direct-transition') {
+        # A hostless runspace cannot prompt for omitted mandatory values.
+        # Parameter binding must reject the legacy direct entry before any
+        # script body runs; it needs neither globals/mocks nor parent files.
+        $direct = [Management.Automation.PowerShell]::Create()
+        try {
+            [void]$direct.AddCommand($Runtime.gate).AddParameters($parameters)
+            $directOutput = @(); $directFailure = $null
+            try { $directOutput = @($direct.Invoke()) } catch { $directFailure = $_ }
+            $bindingFailure = @($directFailure) + @($direct.Streams.Error)
+            if ($directOutput.Count -ne 0 -or
+                ($null -eq $directFailure -and -not $direct.HadErrors) -or
+                ($bindingFailure | Out-String) -notmatch 'ParentStageContractPath') {
+                throw 'Direct Transition did not fail at mandatory parent-stage parameter binding.'
+            }
+            throw [InvalidOperationException]::new('Direct Transition rejected missing mandatory ParentStageContractPath.')
+        }
+        finally { $direct.Dispose() }
+    }
+    $guard = New-ParentStageFixture -Runtime $Runtime -Fixture $Fixture -Case $Case -Fault $ParentFault
+    foreach ($entry in $guard.parameters.GetEnumerator()) { $parameters[[string]$entry.Key] = $entry.Value }
+    $failure = $null; $output = @(); $cleanup = [Collections.Generic.List[object]]::new()
+    try { $output = @(& $Runtime.gate @parameters) }
+    catch { $failure = $_ }
+    try {
+        if ($ParentFault -cne 'closed-fence' -and -not $guard.fence.CanRead) {
+            throw 'The gate disposed the borrowed parent mutation fence.'
+        }
+    }
+    catch { $cleanup.Add($_) }
+    foreach ($handle in @($guard.heartbeat, $guard.fence)) {
+        if ($null -ne $handle) { try { $handle.Dispose() } catch { $cleanup.Add($_) } }
+    }
+    Complete-TestHarnessOutcome -PrimaryFailure $failure -CleanupFailures $cleanup.ToArray() -Label 'parent-stage fixture lifetime'
+    return $output
 }
 
 function Get-FakeTransitionState {
@@ -2663,41 +4032,683 @@ function Get-FakeTransitionState {
     )
 }
 
+function Get-FakeEventWitnessIdentities {
+    param([Parameter(Mandatory = $true)][object] $Runtime)
+
+    if (-not (Test-Path -LiteralPath $Runtime.witness_registry -PathType Container)) {
+        return [object[]]@()
+    }
+    $identities = [Collections.Generic.List[object]]::new()
+    $seen = @{}
+    foreach ($item in @(Get-ChildItem -LiteralPath $Runtime.witness_registry -Force |
+        Where-Object { $_.Name -like 'ready.*' })) {
+        $match = [regex]::Match(
+            [string]$item.Name,
+            '^ready\.([1-9][0-9]{0,9})\.([1-9][0-9]{0,18})$'
+        )
+        $processId = 0
+        $processStartTicks = [int64]0
+        if (
+            -not $match.Success -or
+            -not [int]::TryParse($match.Groups[1].Value, [ref]$processId) -or
+            -not [int64]::TryParse(
+                $match.Groups[2].Value, [ref]$processStartTicks
+            ) -or
+            $processId -lt 1 -or $processStartTicks -lt 1
+        ) {
+            throw "Malformed fake Docker event witness registry record: $($item.Name)"
+        }
+        $identity = "$processId.$processStartTicks"
+        $recordText = [IO.File]::ReadAllText(
+            $item.FullName, [Text.UTF8Encoding]::new($false, $true)
+        )
+        if ($recordText -cne $identity -or $seen.ContainsKey($identity)) {
+            throw "Inconsistent fake Docker event witness registry record: $($item.Name)"
+        }
+        $seen[$identity] = $true
+        $identities.Add([pscustomobject]@{
+            identity = $identity
+            process_id = $processId
+            process_start_ticks = $processStartTicks
+            ready_path = $item.FullName
+            exited_path = Join-Path $Runtime.witness_registry "exited.$identity"
+        })
+    }
+    return [object[]]$identities.ToArray()
+}
+
+function Open-ExactFakeEventWitnessProcess {
+    param(
+        [Parameter(Mandatory = $true)][object] $Runtime,
+        [Parameter(Mandatory = $true)][object] $Identity
+    )
+
+    try {
+        $process = [Diagnostics.Process]::GetProcessById(
+            [int]$Identity.process_id
+        )
+    }
+    catch [ArgumentException] { return $null }
+    catch {
+        throw [InvalidOperationException]::new(
+            "Registered fake Docker event witness PID could not be opened: $($Identity.identity)",
+            $_.Exception
+        )
+    }
+    $retain = $false
+    try {
+        try {
+            [void]$process.Handle
+            $process.Refresh()
+            if ($process.HasExited -or
+                [int64]$process.StartTime.ToUniversalTime().Ticks -ne
+                    [int64]$Identity.process_start_ticks) {
+                return $null
+            }
+            $actualPath = [IO.Path]::GetFullPath($process.MainModule.FileName)
+        }
+        catch {
+            $proofFailure = $_
+            try {
+                $process.Refresh()
+                if ($process.HasExited) { return $null }
+            }
+            catch {
+                throw [InvalidOperationException]::new(
+                    "Registered fake Docker event witness identity could not be proven: $($Identity.identity)",
+                    $proofFailure.Exception
+                )
+            }
+            throw $proofFailure
+        }
+        if (-not [string]::Equals(
+            $actualPath, [IO.Path]::GetFullPath([string]$Runtime.docker),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "Fake Docker event witness identity resolved to an unexpected executable: $($Identity.identity)"
+        }
+        $retain = $true
+        return $process
+    }
+    finally {
+        if (-not $retain) { $process.Dispose() }
+    }
+}
+
+function Get-LiveFakeEventWitnessProcessSnapshot {
+    param([Parameter(Mandatory = $true)][object] $Runtime)
+
+    $expectedPath = [IO.Path]::GetFullPath([string]$Runtime.docker)
+    $processName = [IO.Path]::GetFileNameWithoutExtension($expectedPath)
+    $live = [Collections.Generic.List[object]]::new()
+    $seen = @{}
+    $registeredPids = @{}
+    $completed = $false
+    try {
+        # Registry records are authoritative.  Reconcile them first so an
+        # inaccessible live registered PID cannot be mistaken for an unrelated
+        # process and silently skipped by the broader executable-name scan.
+        foreach ($identity in @(Get-FakeEventWitnessIdentities -Runtime $Runtime)) {
+            $registeredPids[[string][int]$identity.process_id] = $true
+            $process = Open-ExactFakeEventWitnessProcess `
+                -Runtime $Runtime -Identity $identity
+            if ($null -eq $process) { continue }
+            $identityKey = [string]$identity.identity
+            if ($seen.ContainsKey($identityKey)) {
+                $process.Dispose()
+                continue
+            }
+            $live.Add([pscustomobject]@{
+                identity = $identityKey
+                process_id = [int]$identity.process_id
+                process_start_ticks = [int64]$identity.process_start_ticks
+                process = $process
+            })
+            $seen[$identityKey] = $true
+        }
+
+        # The exact-path scan closes the pre-registration/late-ready race.  It
+        # may skip identity-access errors only for an unregistered docker.exe;
+        # no process is ever acted on until its exact executable is proven.
+        foreach ($process in @(Get-Process -Name $processName `
+            -ErrorAction SilentlyContinue)) {
+            $retain = $false
+            $processId = [int]$process.Id
+            try {
+                try {
+                    # Opening Handle before reading identity pins this Process
+                    # object even if its numeric PID is subsequently reused.
+                    [void]$process.Handle
+                    $process.Refresh()
+                    if ($process.HasExited) { continue }
+                    $actualPath = [IO.Path]::GetFullPath(
+                        $process.MainModule.FileName
+                    )
+                    $startTicks = [int64]$process.StartTime.ToUniversalTime().Ticks
+                }
+                catch {
+                    if ($registeredPids.ContainsKey([string]$processId)) {
+                        throw [InvalidOperationException]::new(
+                            "Registered fake Docker event witness PID could not be proven: $processId",
+                            $_.Exception
+                        )
+                    }
+                    continue
+                }
+                if (-not [string]::Equals(
+                    $actualPath, $expectedPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                    continue
+                }
+                $identityKey = "$processId.$startTicks"
+                if ($seen.ContainsKey($identityKey)) { continue }
+                $live.Add([pscustomobject]@{
+                    identity = $identityKey
+                    process_id = $processId
+                    process_start_ticks = $startTicks
+                    process = $process
+                })
+                $seen[$identityKey] = $true
+                $retain = $true
+            }
+            finally {
+                if (-not $retain) { $process.Dispose() }
+            }
+        }
+        $completed = $true
+        return [object[]]$live.ToArray()
+    }
+    finally {
+        if (-not $completed) {
+            foreach ($entry in $live) { $entry.process.Dispose() }
+        }
+    }
+}
+
+function Get-LiveFakeEventWitnessIdentities {
+    param([Parameter(Mandatory = $true)][object] $Runtime)
+
+    $snapshot = @(Get-LiveFakeEventWitnessProcessSnapshot -Runtime $Runtime)
+    try {
+        $identities = [Collections.Generic.List[object]]::new()
+        foreach ($entry in $snapshot) {
+            $identities.Add([pscustomobject]@{
+                identity = [string]$entry.identity
+                process_id = [int]$entry.process_id
+                process_start_ticks = [int64]$entry.process_start_ticks
+            })
+        }
+        return [object[]]$identities.ToArray()
+    }
+    finally {
+        foreach ($entry in $snapshot) { $entry.process.Dispose() }
+    }
+}
+
+function Stop-FakeEventWitnesses {
+    param(
+        [Parameter(Mandatory = $true)][object] $Runtime,
+        [ValidateRange(1, 10000)][int] $GraceMilliseconds = 500
+    )
+
+    [IO.File]::WriteAllText(
+        $Runtime.witness_exit, 'exit', [Text.UTF8Encoding]::new($false)
+    )
+    $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds($GraceMilliseconds)
+    $emptyScans = 0
+    do {
+        $live = @(Get-LiveFakeEventWitnessIdentities -Runtime $Runtime)
+        if ($live.Count -eq 0) {
+            $emptyScans += 1
+            if ($emptyScans -ge 2) { return }
+        }
+        else { $emptyScans = 0 }
+        Start-Sleep -Milliseconds 20
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+
+    $killDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    $emptyScans = 0
+    do {
+        $snapshot = @(Get-LiveFakeEventWitnessProcessSnapshot -Runtime $Runtime)
+        try {
+            if ($snapshot.Count -eq 0) {
+                $emptyScans += 1
+            }
+            else {
+                $emptyScans = 0
+                foreach ($entry in $snapshot) {
+                    $entry.process.Refresh()
+                    if (-not $entry.process.HasExited) {
+                        $entry.process.Kill()
+                        if (-not $entry.process.WaitForExit(5000)) {
+                            throw "Fake Docker process did not stop: $($entry.identity)"
+                        }
+                    }
+                }
+            }
+        }
+        finally {
+            foreach ($entry in $snapshot) { $entry.process.Dispose() }
+        }
+        if ($emptyScans -ge 2) { return }
+        Start-Sleep -Milliseconds 20
+    } while ([DateTimeOffset]::UtcNow -lt $killDeadline)
+
+    $remaining = @(Get-LiveFakeEventWitnessIdentities -Runtime $Runtime)
+    if ($remaining.Count -ne 0) {
+        throw 'Exact fake Docker processes remained live after cleanup: ' +
+            (($remaining.identity) -join ', ')
+    }
+}
+
+function Reset-FakeEventWitnessRegistry {
+    param([Parameter(Mandatory = $true)][object] $Runtime)
+
+    foreach ($scan in 1..2) {
+        $live = @(Get-LiveFakeEventWitnessIdentities -Runtime $Runtime)
+        if ($live.Count -ne 0) {
+            throw 'Refusing to clear live fake Docker process identities: ' +
+                (($live.identity) -join ', ')
+        }
+        if ($scan -eq 1) { Start-Sleep -Milliseconds 20 }
+    }
+    [void]@(Get-FakeEventWitnessIdentities -Runtime $Runtime).Count
+    if (Test-Path -LiteralPath $Runtime.witness_registry -PathType Container) {
+        Get-ChildItem -LiteralPath $Runtime.witness_registry -Force |
+            Remove-Item -Force
+    }
+    foreach ($path in @(
+        $Runtime.witness_ready, $Runtime.witness_exit, $Runtime.witness_exited
+    )) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Assert-TransitionWitnessStopped {
     param(
         [Parameter(Mandatory = $true)][object] $Runtime,
-        [Parameter(Mandatory = $true)][string] $Label
+        [Parameter(Mandatory = $true)][string] $Label,
+        [ValidateRange(1, 10000)][int] $WaitMilliseconds = 5000
     )
-    if (-not (Test-Path -LiteralPath $Runtime.witness_ready -PathType Leaf)) {
-        return
-    }
-    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
-    while (-not (Test-Path -LiteralPath $Runtime.witness_exited -PathType Leaf) -and
-        [DateTimeOffset]::UtcNow -lt $deadline) {
-        $witnessProcessId = 0
-        $readyText = Get-Content -LiteralPath $Runtime.witness_ready -Raw
-        if ([int]::TryParse($readyText.Trim(), [ref]$witnessProcessId)) {
-            $witnessProcess = Get-Process -Id $witnessProcessId `
-                -ErrorAction SilentlyContinue
-            if ($null -eq $witnessProcess) {
+
+    $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds($WaitMilliseconds)
+    do {
+        $live = @(Get-LiveFakeEventWitnessIdentities -Runtime $Runtime)
+        if ($live.Count -eq 0) {
+            Start-Sleep -Milliseconds 20
+            if (@(Get-LiveFakeEventWitnessIdentities -Runtime $Runtime).Count -eq 0) {
                 return
             }
         }
         Start-Sleep -Milliseconds 20
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+
+    $leaked = @(Get-LiveFakeEventWitnessIdentities -Runtime $Runtime)
+    $cleanupFailure = $null
+    try { Stop-FakeEventWitnesses -Runtime $Runtime }
+    catch { $cleanupFailure = $_.Exception.Message }
+    $detail = (($leaked.identity) -join ', ')
+    if (-not [string]::IsNullOrWhiteSpace($cleanupFailure)) {
+        $detail += "; cleanup failed: $cleanupFailure"
     }
-    $remainingProcessId = 0
-    $remainingReadyText = Get-Content -LiteralPath $Runtime.witness_ready -Raw
-    $remainingProcess = $null
-    if ([int]::TryParse($remainingReadyText.Trim(), [ref]$remainingProcessId)) {
-        $remainingProcess = Get-Process -Id $remainingProcessId `
-            -ErrorAction SilentlyContinue
+    throw "$Label leaked fake Docker event witnesses: $detail"
+}
+
+function Complete-TestHarnessOutcome {
+    param(
+        [AllowNull()][object] $PrimaryFailure,
+        [object[]] $CleanupFailures = @(),
+        [Parameter(Mandatory = $true)][string] $Label
+    )
+
+    $cleanup = @($CleanupFailures | Where-Object { $null -ne $_ })
+    if ($null -eq $PrimaryFailure -and $cleanup.Count -eq 0) { return }
+    if ($null -ne $PrimaryFailure -and $cleanup.Count -eq 0) {
+        throw $PrimaryFailure
     }
+    $cleanupText = @($cleanup | ForEach-Object {
+        [string]$_.Exception.Message
+    }) -join '; '
+    if ($null -ne $PrimaryFailure) {
+        $message = "$Label primary failure: $($PrimaryFailure.Exception.Message); " +
+            "cleanup also failed: $cleanupText"
+        $inner = $PrimaryFailure.Exception
+    }
+    else {
+        $message = "$Label cleanup failed: $cleanupText"
+        $inner = $cleanup[0].Exception
+    }
+    $combined = [InvalidOperationException]::new($message, $inner)
+    throw [Management.Automation.ErrorRecord]::new(
+        $combined, 'StratusTestHarnessCombinedFailure',
+        [Management.Automation.ErrorCategory]::InvalidOperation, $Label
+    )
+}
+
+function Assert-FakeEventWitnessRegistryHarness {
+    param([Parameter(Mandatory = $true)][object] $Runtime)
+
+    $started = [Collections.Generic.List[Diagnostics.Process]]::new()
+    $originalReadyDelay = [Environment]::GetEnvironmentVariable(
+        'STRATUS_FAKE_WITNESS_READY_DELAY_MS',
+        [EnvironmentVariableTarget]::Process
+    )
+    $harnessPrimaryFailure = $null
+    try {
+        $primarySentinel = $null
+        $cleanupSentinel = $null
+        $secondCleanupSentinel = $null
+        try { throw 'primary-regression-sentinel' }
+        catch { $primarySentinel = $_ }
+        try { throw 'cleanup-regression-sentinel' }
+        catch { $cleanupSentinel = $_ }
+        try { throw 'second-cleanup-regression-sentinel' }
+        catch { $secondCleanupSentinel = $_ }
+        $combinedSentinel = $null
+        try {
+            Complete-TestHarnessOutcome -PrimaryFailure $primarySentinel `
+                -CleanupFailures @($cleanupSentinel, $secondCleanupSentinel) `
+                -Label 'Combined failure regression'
+        }
+        catch { $combinedSentinel = $_ }
+        if (
+            $null -eq $combinedSentinel -or
+            [string]$combinedSentinel.Exception.Message -notlike
+                '*primary-regression-sentinel*cleanup-regression-sentinel*second-cleanup-regression-sentinel*' -or
+            $null -eq $combinedSentinel.Exception.InnerException -or
+            [string]$combinedSentinel.Exception.InnerException.Message -cne
+                'primary-regression-sentinel'
+        ) {
+            throw 'Combined test failure did not retain primary and cleanup errors.'
+        }
+
+        Reset-FakeEventWitnessRegistry -Runtime $Runtime
+        foreach ($ordinal in 1..2) {
+            $startInfo = [Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = $Runtime.docker
+            $startInfo.Arguments = '--context desktop-linux events'
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+            $started.Add([Diagnostics.Process]::Start($startInfo))
+        }
+
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+        do {
+            $identities = @(Get-FakeEventWitnessIdentities -Runtime $Runtime)
+            if ($identities.Count -eq 2) { break }
+            foreach ($process in $started) {
+                $process.Refresh()
+                if ($process.HasExited) {
+                    throw 'A registry harness witness exited before registration.'
+                }
+            }
+            Start-Sleep -Milliseconds 20
+        } while ([DateTimeOffset]::UtcNow -lt $deadline)
+        if ($identities.Count -ne 2) {
+            throw 'The registry harness did not observe both concurrent witnesses.'
+        }
+
+        $expected = @($started | ForEach-Object {
+            $_.Refresh()
+            "$($_.Id).$($_.StartTime.ToUniversalTime().Ticks)"
+        } | Sort-Object)
+        $actual = @($identities.identity | Sort-Object)
+        if (($actual -join "`n") -cne ($expected -join "`n")) {
+            throw 'The registry harness did not bind witnesses to exact process identities.'
+        }
+
+        Write-Utf8NoBom -LiteralPath $Runtime.witness_exited -Value 'stale'
+        $leakObserved = $false
+        try {
+            Assert-TransitionWitnessStopped -Runtime $Runtime `
+                -Label 'Registry harness' -WaitMilliseconds 100
+        }
+        catch {
+            if ([string]$_.Exception.Message -notlike
+                '*leaked fake Docker event witnesses*') {
+                throw
+            }
+            $leakObserved = $true
+        }
+        if (-not $leakObserved -or
+            @(Get-LiveFakeEventWitnessIdentities -Runtime $Runtime).Count -ne 0) {
+            throw 'A stale singleton exit marker masked a live registry witness.'
+        }
+
+        Reset-FakeEventWitnessRegistry -Runtime $Runtime
+        $current = Get-Process -Id $PID
+        try {
+            $currentTicks = [int64]$current.StartTime.ToUniversalTime().Ticks
+            $forgedTicks = $currentTicks + 1
+        }
+        finally { $current.Dispose() }
+        $forgedIdentity = "$PID.$forgedTicks"
+        Write-Utf8NoBom -LiteralPath (
+            Join-Path $Runtime.witness_registry "ready.$forgedIdentity"
+        ) -Value $forgedIdentity
+        $forgedRecord = (Get-FakeEventWitnessIdentities -Runtime $Runtime)[0]
+        $forgedProcess = Open-ExactFakeEventWitnessProcess `
+            -Runtime $Runtime -Identity $forgedRecord
+        if ($null -ne $forgedProcess) {
+            try {
+                throw 'PID-reuse fencing accepted a different process start time.'
+            }
+            finally { $forgedProcess.Dispose() }
+        }
+        Assert-TransitionWitnessStopped -Runtime $Runtime `
+            -Label 'PID-reuse registry harness' -WaitMilliseconds 100
+        $currentAfterFence = Get-Process -Id $PID -ErrorAction SilentlyContinue
+        if ($null -eq $currentAfterFence) {
+            throw 'PID-reuse fencing targeted a process with a different start time.'
+        }
+        $currentAfterFence.Dispose()
+
+        # A registered live PID is authoritative even when its process name is
+        # not docker.  The exact-path proof must reject it; the broad scan alone
+        # would never encounter this record.
+        $foreignIdentity = "$PID.$currentTicks"
+        $foreignReadyPath = Join-Path $Runtime.witness_registry `
+            "ready.$foreignIdentity"
+        Write-Utf8NoBom -LiteralPath $foreignReadyPath -Value $foreignIdentity
+        $foreignRejected = $false
+        try {
+            [void](@(Get-LiveFakeEventWitnessIdentities -Runtime $Runtime).Count)
+        }
+        catch {
+            if ([string]$_.Exception.Message -notlike
+                '*resolved to an unexpected executable*') {
+                throw
+            }
+            $foreignRejected = $true
+        }
+        finally {
+            Remove-Item -LiteralPath $foreignReadyPath -Force `
+                -ErrorAction SilentlyContinue
+        }
+        if (-not $foreignRejected) {
+            throw 'Authoritative registered foreign-process identity was silently skipped.'
+        }
+
+        Reset-FakeEventWitnessRegistry -Runtime $Runtime
+        $env:STRATUS_FAKE_WITNESS_READY_DELAY_MS = '2000'
+        $delayedStart = [Diagnostics.ProcessStartInfo]::new()
+        $delayedStart.FileName = $Runtime.docker
+        $delayedStart.Arguments = '--context desktop-linux events'
+        $delayedStart.UseShellExecute = $false
+        $delayedStart.CreateNoWindow = $true
+        $delayedStart.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+        $delayed = [Diagnostics.Process]::Start($delayedStart)
+        $started.Add($delayed)
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(2)
+        do {
+            $unregistered = @(
+                Get-LiveFakeEventWitnessIdentities -Runtime $Runtime
+            )
+            if ($unregistered.Count -eq 1) { break }
+            Start-Sleep -Milliseconds 20
+        } while ([DateTimeOffset]::UtcNow -lt $deadline)
+        if ($unregistered.Count -ne 1 -or
+            @(Get-FakeEventWitnessIdentities -Runtime $Runtime).Count -ne 0) {
+            throw 'The delayed-ready fake was not observed before registration.'
+        }
+        $lateLeakObserved = $false
+        try {
+            Assert-TransitionWitnessStopped -Runtime $Runtime `
+                -Label 'Delayed-ready registry harness' -WaitMilliseconds 100
+        }
+        catch {
+            if ([string]$_.Exception.Message -notlike
+                '*leaked fake Docker event witnesses*') {
+                throw
+            }
+            $lateLeakObserved = $true
+        }
+        $delayed.Refresh()
+        if (-not $lateLeakObserved -or -not $delayed.HasExited) {
+            throw 'Late-ready executable fencing did not drain the unregistered fake.'
+        }
+    }
+    catch { $harnessPrimaryFailure = $_ }
+
+    $harnessCleanupFailures = [Collections.Generic.List[object]]::new()
+    try {
+        if ($null -eq $originalReadyDelay) {
+            Remove-Item -LiteralPath Env:STRATUS_FAKE_WITNESS_READY_DELAY_MS `
+                -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:STRATUS_FAKE_WITNESS_READY_DELAY_MS = $originalReadyDelay
+        }
+    }
+    catch { $harnessCleanupFailures.Add($_) }
+    try { Stop-FakeEventWitnesses -Runtime $Runtime }
+    catch { $harnessCleanupFailures.Add($_) }
+    foreach ($process in $started) {
+        try {
+            [void]$process.Handle
+            $process.Refresh()
+            if (-not $process.HasExited) {
+                $process.Kill()
+                if (-not $process.WaitForExit(5000)) {
+                    throw "Registry harness process did not stop: $($process.Id)"
+                }
+            }
+        }
+        catch { $harnessCleanupFailures.Add($_) }
+        finally {
+            try { $process.Dispose() }
+            catch { $harnessCleanupFailures.Add($_) }
+        }
+    }
+    try { Reset-FakeEventWitnessRegistry -Runtime $Runtime }
+    catch { $harnessCleanupFailures.Add($_) }
+    Complete-TestHarnessOutcome -PrimaryFailure $harnessPrimaryFailure `
+        -CleanupFailures $harnessCleanupFailures.ToArray() `
+        -Label 'Fake event witness registry harness'
+}
+
+function Assert-FakeLeaseWatchdogIdentityHarness {
+    param([Parameter(Mandatory = $true)][object] $Runtime)
+
+    $probePrefix = Join-Path $Runtime.root 'watchdog-identity-probe'
+    Write-JsonFixture -LiteralPath $Runtime.config -Depth 4 -Value ([ordered]@{
+        generation = [guid]::NewGuid().ToString('N')
+        fault = 'watchdog-identity-regression'
+        prestart = $probePrefix
+    })
+    $output = @(& $Runtime.docker '--context' 'desktop-linux' `
+        '__stratus-test-stale-watchdog-identity' 2>&1)
+    $exitCode = $LASTEXITCODE
+    $state = Get-FakeTransitionState -Runtime $Runtime
     if (
-        -not (Test-Path -LiteralPath $Runtime.witness_exited -PathType Leaf) -and
-        $null -ne $remainingProcess
+        $exitCode -ne 0 -or $output.Count -ne 1 -or
+        [string]$output[0] -cne 'stale-watchdog-identity-rejected' -or
+        $null -eq $state -or
+        [int]$state.watchdog_identity_rejection_count -ne 1 -or
+        [int]$state.watchdog_kill_count -ne 0 -or
+        [int]$state.watchdog_suspend_count -ne 0
     ) {
-        throw "$Label leaked the non-reconnecting Docker event witness."
+        throw 'The stale watchdog identity regression was not rejected before mutation.'
     }
+}
+
+function Assert-CollectorSplitCrLfCanonicalization {
+    param([Parameter(Mandatory = $true)][object] $Runtime)
+
+    $hashFunction = $gateAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Get-Sha256Text'
+    }, $true)
+    $collectorFunction = $gateAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Initialize-DockerEventCollectorType'
+    }, $true)
+    if ($null -eq $hashFunction -or $null -eq $collectorFunction) {
+        throw 'The gate collector contract is unavailable for the CRLF boundary test.'
+    }
+    $metadata = & ([scriptblock]::Create(
+        $hashFunction.Extent.Text + "`n" +
+        "`$ExpectedRevision = '$successorRevision'`n" +
+        $collectorFunction.Extent.Text +
+        "`nInitialize-DockerEventCollectorType"
+    ))
+    $captureRoot = Join-Path $Runtime.root 'collector-split-crlf'
+    $stdoutPath = Join-Path $captureRoot 'stdout.bin'
+    $stderrPath = Join-Path $captureRoot 'stderr.bin'
+    $collector = $null
+    $primaryFailure = $null
+    $cleanupFailures = [Collections.Generic.List[object]]::new()
+    try {
+        [void](New-Item -ItemType Directory -Path $captureRoot)
+        $collector = [Activator]::CreateInstance($metadata.type)
+        $collector.Start(
+            $Runtime.docker,
+            '--context desktop-linux __stratus-test-split-crlf',
+            $stdoutPath,
+            $stderrPath,
+            4096,
+            4096
+        )
+        if (-not $collector.Process.WaitForExit(5000)) {
+            throw 'The split-CRLF fake process did not exit inside its bound.'
+        }
+        $collector.StopAndWait(5000)
+        $collector.CloseOutputFiles()
+        $expectedText = ('x' * 4095) + "`n"
+        $expected = [Text.UTF8Encoding]::new($false).GetBytes($expectedText)
+        $actual = [IO.File]::ReadAllBytes($stdoutPath)
+        if (
+            -not $collector.StdoutEof -or -not $collector.StderrEof -or
+            $collector.OutputExceeded -or
+            -not [string]::IsNullOrEmpty([string]$collector.PumpError) -or
+            [int64]$collector.StdoutBytes -ne [int64]$expected.Length -or
+            [int64]$collector.StderrBytes -ne 0 -or
+            [string]$collector.StdoutSha256 -cne
+                (Get-TextSha256 -Value $expectedText) -or
+            [Convert]::ToBase64String($actual) -cne
+                [Convert]::ToBase64String($expected)
+        ) {
+            throw 'Split CRLF was not canonicalized before byte/hash/overflow publication.'
+        }
+    }
+    catch { $primaryFailure = $_ }
+    finally {
+        if ($null -ne $collector) {
+            try { $collector.Dispose() }
+            catch { $cleanupFailures.Add($_) }
+        }
+        if (Test-Path -LiteralPath $captureRoot) {
+            try { Remove-Item -LiteralPath $captureRoot -Recurse -Force }
+            catch { $cleanupFailures.Add($_) }
+        }
+    }
+    Complete-TestHarnessOutcome -PrimaryFailure $primaryFailure `
+        -CleanupFailures $cleanupFailures.ToArray() `
+        -Label 'Split-CRLF collector canonicalization harness'
 }
 
 function Assert-FakeTransitionSafety {
@@ -2722,7 +4733,7 @@ function Assert-FakeTransitionSafety {
     $allowed = @(
         "update --restart=no $postgresId",
         "start $postgresId",
-        "stop --time 15 $postgresId"
+        "stop --timeout 15 $postgresId"
     )
     foreach ($mutation in @($State.mutations)) {
         if ([string]$mutation -cnotin $allowed) {
@@ -2760,7 +4771,7 @@ function Assert-ExactTransitionMutation {
         $expected = @(
             "update --restart=no $postgresId",
             "start $postgresId",
-            "stop --time 15 $postgresId"
+            "stop --timeout 15 $postgresId"
         )
         if (
             [int]$State.update_count -ne 1 -or [int]$State.start_count -ne 1 -or
@@ -2793,19 +4804,21 @@ function Assert-TransitionFailureCase {
         [string] $Disposition,
         [scriptblock] $Configure = {},
         [scriptblock] $Restore = {},
-        [hashtable] $Overrides = @{}
+        [hashtable] $Overrides = @{},
+        [string] $ParentFault = 'none'
     )
     if (-not (Test-TransitionCaseSelected -Label $Label)) { return }
     Write-TransitionTestProgress -Label $Label
     $case = New-TransitionCasePaths -Fixture $Fixture -Label $Label
-    Initialize-TransitionCase -Runtime $Runtime -Fixture $Fixture `
-        -Case $case -Fault $Fault
-    & $Configure $case
-    $observed = $false
+    $primaryFailure = $null
     try {
+        Initialize-TransitionCase -Runtime $Runtime -Fixture $Fixture `
+            -Case $case -Fault $Fault
+        $observed = $false
+        & $Configure $case
         try {
             Invoke-TransitionCase -Runtime $Runtime -Fixture $Fixture `
-                -Case $case -Overrides $Overrides | Out-Null
+                -Case $case -Overrides $Overrides -ParentFault $ParentFault | Out-Null
         }
         catch {
             $observed = $true
@@ -2856,6 +4869,22 @@ function Assert-TransitionFailureCase {
             }
         }
         $state = Get-FakeTransitionState -Runtime $Runtime
+        if ($ParentFault -cne 'none' -and $null -ne $state -and [int]$state.docker_call_count -ne 0) {
+            throw "$Label called Docker before parent-stage acceptance."
+        }
+        if ($Fault -in @(
+            'watchdog-dies-completed-start',
+            'watchdog-dies-delayed-start'
+        )) {
+            if ($null -eq $state -or [int]$state.watchdog_kill_count -ne 1) {
+                throw "$Label did not inject exactly one watchdog hard death."
+            }
+        }
+        elseif ($Fault -ceq 'watchdog-hangs-after-start') {
+            if ($null -eq $state -or [int]$state.watchdog_suspend_count -ne 1) {
+                throw "$Label did not inject exactly one watchdog suspension."
+            }
+        }
         Assert-FakeTransitionSafety -State $state -Label $Label
         if ($null -ne $state) {
             Assert-ExactTransitionMutation -State $state `
@@ -2866,11 +4895,17 @@ function Assert-TransitionFailureCase {
         }
         Assert-RejectedWatchdogAuthorization -Case $case `
             -Disposition $Disposition -Label $Label
-        Assert-TransitionWitnessStopped -Runtime $Runtime -Label $Label
     }
-    finally {
-        & $Restore $case
-    }
+    catch { $primaryFailure = $_ }
+    $cleanupFailures = [Collections.Generic.List[object]]::new()
+    try { Assert-TransitionWitnessStopped -Runtime $Runtime -Label $Label }
+    catch { $cleanupFailures.Add($_) }
+    try { Reset-FakeEventWitnessRegistry -Runtime $Runtime }
+    catch { $cleanupFailures.Add($_) }
+    try { & $Restore $case }
+    catch { $cleanupFailures.Add($_) }
+    Complete-TestHarnessOutcome -PrimaryFailure $primaryFailure `
+        -CleanupFailures $cleanupFailures.ToArray() -Label $Label
 }
 
 function Assert-RejectedWatchdogAuthorization {
@@ -2882,16 +4917,156 @@ function Assert-RejectedWatchdogAuthorization {
         [Parameter(Mandatory = $true)][string] $Label
     )
 
+    if (Test-Path -LiteralPath $Case.parent_authorization -PathType Leaf) {
+        $parentAuthorizationRaw = Get-Content `
+            -LiteralPath $Case.parent_authorization -Raw
+        $parentAuthorization = $null
+        try {
+            $parentAuthorization = ConvertFrom-TestJsonText `
+                -Json $parentAuthorizationRaw
+        }
+        catch { }
+        if (
+            $null -ne $parentAuthorization -and
+            $parentAuthorization.format -ceq
+                'stratus-successor-transition-parent-authorization-v1' -and
+            $parentAuthorization.status -ceq 'authorized' -and
+            $parentAuthorization.authorization.api_stage_permitted -eq $true
+        ) {
+            if ($Label -cne 'parent authorization post-publication supervisor loss' -or
+                -not (Test-Path -LiteralPath $Case.watchdog_start_revoke -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $Case.parent_containment -PathType Leaf)) {
+                throw "$Label left a valid parent API-stage authorization."
+            }
+            $revocation = ConvertFrom-TestJsonText -Json (Get-Content -LiteralPath $Case.watchdog_start_revoke -Raw)
+            if ($revocation.session_id -cne $parentAuthorization.session_id -or
+                $revocation.start_fence_path -cne $parentAuthorization.start_fence_path -or
+                $revocation.start_fence_sha256 -cne $parentAuthorization.start_fence_sha256 -or
+                $revocation.trigger -cne 'parent_authorization_postpublication_supervisor_loss' -or
+                $revocation.postgres_start_permitted -isnot [bool] -or $revocation.postgres_start_permitted) {
+                throw "$Label did not revoke the exact published transition lineage."
+            }
+        }
+    }
+
+    $terminalRaw = if (Test-Path -LiteralPath $Case.watchdog_terminal -PathType Leaf) {
+        Get-Content -LiteralPath $Case.watchdog_terminal -Raw
+    }
+    else { $null }
+    if ($null -ne $terminalRaw -and
+        $terminalRaw -match '"api_stage_permitted"\s*:\s*true') {
+        throw "$Label left a terminal artifact with API authorization."
+    }
+    if (Test-Path -LiteralPath $Case.parent_containment -PathType Leaf) {
+        if ($Disposition -cne 'AfterStartFailure') {
+            throw "$Label crossed into parent containment before a start attempt."
+        }
+        $parent = ConvertFrom-TestJsonText -Json (
+            Get-Content -LiteralPath $Case.parent_containment -Raw
+        )
+        Assert-ExactTestJsonProperties -Value $parent `
+            -Label "$Label parent containment" -Expected @(
+                'format', 'status', 'terminal_at', 'session_id', 'owner_pid',
+                'trigger', 'start_fence_path', 'start_fence_sha256',
+                'observed_start_fence_sha256', 'start_fence_sha256_exact',
+                'start_revoke_path', 'start_revoke_present',
+                'start_revoke_created', 'start_revoke_attempt_count',
+                'start_attempt_path', 'start_attempt_sha256',
+                'start_completion_path', 'start_completion_sha256',
+                'start_protocol_status', 'causal_materialization_required',
+                'materialization_observed', 'attempted_stop',
+                'docker_stop_succeeded', 'stop_attempt_count',
+                'stopped_proof_count', 'transition_observation_count',
+                'before_state', 'last_error', 'stop', 'final_stopped',
+                'authorization'
+            )
+        Assert-ExactTestJsonProperties -Value $parent.authorization `
+            -Label "$Label parent containment authorization" -Expected @(
+                'api_stage_permitted', 'worker_start_permitted',
+                'safety_control_start_permitted', 'live_transition_permitted',
+                'binance_kill_switch_removal_permitted'
+            )
+        foreach ($name in @(
+            'api_stage_permitted', 'worker_start_permitted',
+            'safety_control_start_permitted', 'live_transition_permitted',
+            'binance_kill_switch_removal_permitted'
+        )) {
+            if ($parent.authorization.$name -isnot [bool] -or
+                [bool]$parent.authorization.$name) {
+                throw "$Label parent containment authorization was not native false."
+            }
+        }
+        if (
+            $parent.format -cne
+                'stratus-successor-transition-parent-containment-v1' -or
+            $parent.status -cne 'contained' -or
+            $parent.trigger -cnotin @(
+                'parent_start_boundary_failure', 'parent_watchdog_lost',
+                'parent_authorization_postpublication_supervisor_loss'
+            ) -or
+            $parent.start_revoke_present -isnot [bool] -or
+            -not $parent.start_revoke_present -or
+            $null -eq $parent.final_stopped -or
+            $parent.final_stopped.verified_stopped -isnot [bool] -or
+            -not $parent.final_stopped.verified_stopped -or
+            $parent.final_stopped.running -isnot [bool] -or
+            $parent.final_stopped.running -or
+            $parent.final_stopped.running_container_count -ne 0 -or
+            -not (Test-Path -LiteralPath $Case.watchdog_start_revoke)
+        ) {
+            throw "$Label parent supervisor did not prove exact stopped containment."
+        }
+        if ($Label -ceq 'completed-start watchdog hard death') {
+            if (
+                $parent.trigger -cne 'parent_start_boundary_failure' -or
+                $parent.start_protocol_status -cne 'completed' -or
+                $parent.causal_materialization_required -isnot [bool] -or
+                $parent.causal_materialization_required -or
+                $parent.materialization_observed -isnot [bool] -or
+                -not $parent.materialization_observed -or
+                -not $parent.attempted_stop -or
+                -not $parent.docker_stop_succeeded -or
+                $parent.stop_attempt_count -lt 1
+            ) {
+                throw "$Label did not contain the exact completed-start death boundary."
+            }
+        }
+        elseif ($Label -ceq 'delayed-start watchdog hard death') {
+            if (
+                $parent.trigger -cne 'parent_start_boundary_failure' -or
+                $parent.start_protocol_status -cne 'unresolved' -or
+                $parent.causal_materialization_required -isnot [bool] -or
+                -not $parent.causal_materialization_required -or
+                $parent.materialization_observed -isnot [bool] -or
+                -not $parent.materialization_observed -or
+                -not $parent.attempted_stop -or
+                -not $parent.docker_stop_succeeded -or
+                $parent.stop_attempt_count -lt 1 -or
+                $parent.stopped_proof_count -lt 2
+            ) {
+                throw "$Label did not resolve and contain the delayed start."
+            }
+        }
+        elseif ($Label -ceq 'live watchdog suspension') {
+            if (
+                $parent.trigger -cne 'parent_watchdog_lost' -or
+                $parent.start_protocol_status -cne 'completed' -or
+                -not $parent.materialization_observed -or
+                -not $parent.attempted_stop -or
+                -not $parent.docker_stop_succeeded
+            ) {
+                throw "$Label did not complete parent takeover after suspension."
+            }
+        }
+        return
+    }
     if (-not (Test-Path -LiteralPath $Case.watchdog_terminal -PathType Leaf)) {
         if ($Disposition -ceq 'AfterStartFailure') {
             throw "$Label did not leave a durable fail-closed watchdog terminal receipt."
         }
         return
     }
-    $raw = Get-Content -LiteralPath $Case.watchdog_terminal -Raw
-    if ($raw -match '"api_stage_permitted"\s*:\s*true') {
-        throw "$Label left a terminal artifact with API authorization."
-    }
+    $raw = $terminalRaw
     $terminal = $null
     try { $terminal = ConvertFrom-TestJsonText -Json $raw }
     catch {
@@ -2934,7 +5109,8 @@ function Assert-RejectedWatchdogAuthorization {
             $terminal.status -cne 'contained' -or
             $terminal.trigger -cnotin @(
                 'heartbeat_stale', 'invalid_or_replayed_heartbeat',
-                'invalid_or_forged_commit', 'watchdog_internal_failure'
+                'invalid_or_forged_commit', 'watchdog_internal_failure',
+                'ambiguous_start_attempt'
             ) -or
             $null -eq $terminal.containment -or
             -not $terminal.containment.verified_stopped -or
@@ -2957,20 +5133,35 @@ function Assert-PositiveWatchdogChain {
 
     foreach ($path in @(
         $Case.watchdog_lease, $Case.watchdog_heartbeat,
-        $Case.watchdog_commit, $Case.watchdog_terminal
+        $Case.watchdog_commit, $Case.watchdog_terminal,
+        $Case.watchdog_start_fence, $Case.watchdog_start_attempt,
+        $Case.watchdog_start_completion, $Case.parent_authorization
     )) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Positive Transition omitted a durable watchdog artifact: $path"
         }
     }
+    if (Test-Path -LiteralPath $Case.watchdog_start_revoke) {
+        throw 'Positive Transition retained a PostgreSQL start-revoke marker.'
+    }
+    if (Test-Path -LiteralPath $Case.parent_containment) {
+        throw 'Positive Transition retained a parent-containment failure artifact.'
+    }
     $leaseRaw = Get-Content -LiteralPath $Case.watchdog_lease -Raw
     $heartbeatRaw = Get-Content -LiteralPath $Case.watchdog_heartbeat -Raw
     $commitRaw = Get-Content -LiteralPath $Case.watchdog_commit -Raw
     $terminalRaw = Get-Content -LiteralPath $Case.watchdog_terminal -Raw
+    $attemptRaw = Get-Content -LiteralPath $Case.watchdog_start_attempt -Raw
+    $completionRaw = Get-Content -LiteralPath $Case.watchdog_start_completion -Raw
+    $parentAuthorizationRaw = Get-Content `
+        -LiteralPath $Case.parent_authorization -Raw
     $lease = ConvertFrom-TestJsonText -Json $leaseRaw
     $heartbeat = ConvertFrom-TestJsonText -Json $heartbeatRaw
     $commit = ConvertFrom-TestJsonText -Json $commitRaw
     $terminal = ConvertFrom-TestJsonText -Json $terminalRaw
+    $attempt = ConvertFrom-TestJsonText -Json $attemptRaw
+    $completion = ConvertFrom-TestJsonText -Json $completionRaw
+    $parentAuthorization = ConvertFrom-TestJsonText -Json $parentAuthorizationRaw
     $handoff = $PreStart.payload.transition_session.watchdog_handoff
     $binding = $Live.payload.transition_session.watchdog
     $leaseEvidence = $Live.payload.transition_session.watchdog_lease
@@ -2980,19 +5171,40 @@ function Assert-PositiveWatchdogChain {
     $liveSha256 = Get-TestFileSha256 -LiteralPath $Case.live
     $leaseSha256 = Get-TestFileSha256 -LiteralPath $Case.watchdog_lease
     $commitSha256 = Get-TestFileSha256 -LiteralPath $Case.watchdog_commit
+    $fenceSha256 = Get-TestFileSha256 -LiteralPath $Case.watchdog_start_fence
+    $attemptSha256 = Get-TestFileSha256 -LiteralPath $Case.watchdog_start_attempt
+    $completionSha256 = Get-TestFileSha256 `
+        -LiteralPath $Case.watchdog_start_completion
+    $terminalSha256 = Get-TestFileSha256 -LiteralPath $Case.watchdog_terminal
     $watchdogSha256 = Get-TestFileSha256 -LiteralPath $Runtime.watchdog
+    $dockerSha256 = Get-TestFileSha256 -LiteralPath $Runtime.docker
 
     Assert-ExactTestJsonProperties -Value $handoff -Label 'PreStart watchdog handoff' `
         -Expected @(
             'format', 'session_id', 'owner_pid', 'owner_start_time_utc',
             'hard_deadline_utc', 'heartbeat_timeout_seconds', 'lease_path',
             'receipt_path', 'heartbeat_path', 'commit_path', 'live_path',
-            'prestart_path'
+            'prestart_path', 'start_fence_path', 'start_fence_sha256',
+            'start_revoke_path', 'start_attempt_path', 'start_completion_path'
         )
     Assert-ExactTestJsonProperties -Value $lease -Label 'watchdog lease' -Expected @(
         'format', 'armed', 'armed_at', 'session_id', 'watchdog', 'owner',
         'deadline', 'artifacts', 'docker_engine', 'postgres', 'containment'
     )
+    Assert-ExactTestJsonProperties -Value $lease.artifacts `
+        -Label 'watchdog lease artifacts' -Expected @(
+            'lease_path', 'receipt_path', 'heartbeat_path', 'commit_path',
+            'live_path', 'prestart_path', 'prestart_sha256',
+            'prestart_payload_sha256', 'start_fence_path',
+            'start_fence_sha256', 'start_revoke_path', 'start_attempt_path',
+            'start_completion_path'
+        )
+    Assert-ExactTestJsonProperties -Value $lease.containment `
+        -Label 'watchdog lease containment' -Expected @(
+            'stop_timeout_seconds', 'stop_wall_clock_timeout_seconds',
+            'exact_container_only',
+            'ambiguous_start_requires_causal_resolution'
+        )
     Assert-ExactTestJsonProperties -Value $heartbeat -Label 'watchdog heartbeat' `
         -Expected @(
             'format', 'session_id', 'owner_pid', 'owner_start_time_utc',
@@ -3013,7 +5225,39 @@ function Assert-PositiveWatchdogChain {
         -Expected @(
             'format', 'session_id', 'owner_pid', 'owner_start_time_utc',
             'hard_deadline_utc', 'heartbeat_timeout_seconds', 'lease_path',
-            'lease_sha256', 'receipt_path', 'heartbeat_path', 'commit_path'
+            'lease_sha256', 'receipt_path', 'heartbeat_path', 'commit_path',
+            'start_fence_path', 'start_fence_sha256', 'start_revoke_path',
+            'start_attempt_path', 'start_attempt_sha256',
+            'start_completion_path', 'start_completion_sha256',
+            'start_revoke_absent'
+        )
+    Assert-ExactTestJsonProperties -Value $attempt `
+        -Label 'PostgreSQL start attempt' -Expected @(
+            'format', 'session_id', 'owner_pid', 'owner_start_time_utc',
+            'start_fence_path', 'start_fence_sha256', 'command', 'issued_at'
+        )
+    Assert-ExactTestJsonProperties -Value $completion `
+        -Label 'PostgreSQL start completion' -Expected @(
+            'format', 'session_id', 'owner_pid', 'owner_start_time_utc',
+            'start_attempt_path', 'start_attempt_sha256', 'outcome',
+            'completed_at', 'bounded_start'
+        )
+    Assert-ExactTestJsonProperties -Value $completion.bounded_start `
+        -Label 'bounded PostgreSQL start proof' -Expected @(
+            'command', 'docker_executable_path', 'docker_executable_sha256',
+            'process_timeout_milliseconds', 'stdout_maximum_bytes',
+            'stderr_maximum_bytes', 'requested_at', 'completed_at', 'exit_code',
+            'output_container_id', 'timed_out', 'output_exceeded',
+            'process_started', 'process_exited', 'process_id', 'kill_issued'
+        )
+    Assert-ExactTestJsonProperties `
+        -Value $Live.payload.transition_session.start_proof `
+        -Label 'Live PostgreSQL start proof' -Expected @(
+            'start_owned_by_transition_process', 'successor_started_at',
+            'docker_start_event_time_nano', 'start_fence_path',
+            'start_fence_sha256', 'start_attempt_path', 'start_attempt_sha256',
+            'start_completion_path', 'start_completion_sha256',
+            'start_revoke_absent', 'bounded_start'
         )
     Assert-ExactTestJsonProperties -Value $heartbeatAtLive `
         -Label 'Live watchdog heartbeat evidence' `
@@ -3024,12 +5268,95 @@ function Assert-PositiveWatchdogChain {
             'safety_control_start_permitted', 'live_transition_permitted',
             'binance_kill_switch_removal_permitted', 'migration_container_permitted'
         )
+    Assert-ExactTestJsonProperties -Value $parentAuthorization `
+        -Label 'parent API-stage authorization' -Expected @(
+            'format', 'status', 'authorized_at', 'publication_started_at',
+            'valid_until',
+            'docker_state_observed_through_time_nano',
+            'session_id', 'owner_pid',
+            'owner_start_time_utc', 'authorizer', 'parent_authorization_path',
+            'watchdog_program_path', 'watchdog_program_sha256',
+            'watchdog_process_id', 'watchdog_process_started_at',
+            'watchdog_exit_code', 'sealed_stdout_sha256',
+            'sealed_stdout_bytes', 'sealed_stderr_sha256',
+            'sealed_stderr_bytes', 'lease_path', 'lease_sha256',
+            'receipt_path', 'receipt_sha256', 'commit_path', 'commit_sha256',
+            'live_path', 'live_sha256', 'live_payload_sha256',
+            'start_fence_path', 'start_fence_sha256', 'start_attempt_path',
+            'start_attempt_sha256', 'start_completion_path',
+            'start_completion_sha256', 'docker_engine_contract_sha256',
+            'postgres_container_id', 'postgres_image_id',
+            'postgres_config_image', 'postgres_restart_count',
+            'postgres_started_at', 'authorization_witness', 'parent_stage', 'authorization'
+        )
+    Assert-ExactTestJsonProperties -Value $parentAuthorization.authorizer `
+        -Label 'parent authorization authorizer' -Expected @(
+            'gate_script_path', 'gate_script_sha256', 'gate_script_bytes',
+            'host_executable_path', 'host_executable_sha256',
+            'host_executable_bytes', 'process_id', 'process_started_at'
+        )
+    Assert-ExactTestJsonProperties -Value $parentAuthorization.parent_stage `
+        -Label 'shared parent-stage binding' -Expected @('format', 'session_id', 'contract_path', 'contract_sha256',
+            'lease_path', 'lease_sha256', 'ready_path', 'ready_sha256', 'heartbeat_path', 'mutation_fence_path',
+            'mutation_fence_sha256', 'watchdog', 'owner', 'deadline_utc', 'r1_anchor', 'source_manifest_sha256')
+    $parentStageBinding = $parentAuthorization.parent_stage
+    if ($parentStageBinding.format -cne 'stratus-parent-stage-binding-v1' -or
+        $parentStageBinding.owner.pid -ne $PID -or
+        $parentStageBinding.watchdog.pid -ne $Runtime.process.Id -or
+        $parentStageBinding.contract_sha256 -cne (Get-ParentFixtureFileHash $parentStageBinding.contract_path) -or
+        $parentStageBinding.lease_sha256 -cne (Get-ParentFixtureFileHash $parentStageBinding.lease_path) -or
+        $parentStageBinding.ready_sha256 -cne (Get-ParentFixtureFileHash $parentStageBinding.ready_path) -or
+        $parentStageBinding.mutation_fence_sha256 -cne (Get-ParentFixtureFileHash $parentStageBinding.mutation_fence_path)) {
+        throw 'Positive Transition did not preserve exact parent-stage lineage.'
+    }
+    Assert-ExactTestJsonProperties -Value $parentAuthorization.authorization_witness `
+        -Label 'parent authorization Docker witness' -Expected @(
+            'format', 'session_id', 'process_id', 'process_started_at',
+            'docker_executable_path', 'docker_executable_sha256',
+            'reconnect_count', 'eof_before_seal', 'truncated',
+            'journal_bytes', 'journal_sha256', 'event_count',
+            'initial_barrier_id', 'initial_barrier_destroy_time_nano',
+            'final_barrier_id', 'final_barrier_create_time_nano',
+            'final_barrier_destroy_time_nano', 'unexpected_event_count'
+        )
+    Assert-ExactTestJsonProperties -Value $parentAuthorization.authorization `
+        -Label 'parent composite authorization' -Expected @(
+            'api_stage_permitted', 'worker_start_permitted',
+            'safety_control_start_permitted', 'live_transition_permitted',
+            'binance_kill_switch_removal_permitted',
+            'migration_container_permitted'
+        )
+
+    $authorizationNano = $parentAuthorization.authorization_witness.
+        final_barrier_destroy_time_nano
+    $authorizationMilliseconds = [int64][Math]::Floor(
+        ([double][int64]$authorizationNano) / 1000000.0
+    )
+    $expectedAuthorizationAt = [DateTimeOffset]::FromUnixTimeMilliseconds(
+        $authorizationMilliseconds
+    ).AddTicks([int64][Math]::Floor(
+        ([double]([int64]$authorizationNano -
+            ($authorizationMilliseconds * 1000000))) / 100.0
+    ))
+    $authorizationAt = [DateTimeOffset]::Parse(
+        [string]$parentAuthorization.authorized_at
+    )
+    $publicationStartedAt = [DateTimeOffset]::Parse(
+        [string]$parentAuthorization.publication_started_at
+    )
+    $validUntil = [DateTimeOffset]::Parse(
+        [string]$parentAuthorization.valid_until
+    )
 
     if (
-        $handoff.format -cne 'stratus-successor-transition-watchdog-handoff-v1' -or
-        $binding.format -cne 'stratus-successor-transition-watchdog-binding-v1' -or
-        $lease.format -cne 'stratus-successor-transition-watchdog-lease-v1' -or
+        $handoff.format -cne 'stratus-successor-transition-watchdog-handoff-v3' -or
+        $binding.format -cne 'stratus-successor-transition-watchdog-binding-v3' -or
+        $lease.format -cne 'stratus-successor-transition-watchdog-lease-v3' -or
         -not $lease.armed -or
+        $attempt.format -cne 'stratus-successor-transition-start-attempt-v1' -or
+        $completion.format -cne 'stratus-successor-transition-start-complete-v1' -or
+        $completion.outcome -cne 'started' -or
+        -not $binding.start_revoke_absent -or
         $heartbeat.format -cne 'stratus-successor-transition-watchdog-heartbeat-v1' -or
         $heartbeat.sequence -lt 1 -or
         $commit.format -cne 'stratus-successor-transition-watchdog-commit-v1' -or
@@ -3037,18 +5364,64 @@ function Assert-PositiveWatchdogChain {
         $terminal.status -cne 'success' -or
         $terminal.trigger -cne 'accepted_live_commit' -or
         $null -ne $terminal.containment -or $null -ne $terminal.failure -or
-        -not $terminal.authorization.api_stage_permitted -or
+        $terminal.authorization.api_stage_permitted -or
         $terminal.authorization.worker_start_permitted -or
         $terminal.authorization.safety_control_start_permitted -or
         $terminal.authorization.live_transition_permitted -or
         $terminal.authorization.binance_kill_switch_removal_permitted -or
-        $terminal.authorization.migration_container_permitted
+        $terminal.authorization.migration_container_permitted -or
+        $parentAuthorization.format -cne
+            'stratus-successor-transition-parent-authorization-v1' -or
+        $parentAuthorization.status -cne 'authorized' -or
+        $parentAuthorization.authorization_witness.format -cne
+            'stratus-successor-transition-authorization-witness-v1' -or
+        $parentAuthorization.authorization_witness.reconnect_count -ne 0 -or
+        $parentAuthorization.authorization_witness.eof_before_seal -or
+        $parentAuthorization.authorization_witness.truncated -or
+        $parentAuthorization.authorization_witness.event_count -ne 4 -or
+        $parentAuthorization.authorization_witness.unexpected_event_count -ne 0 -or
+        $parentAuthorization.authorization_witness.initial_barrier_id -cne
+            ('4' * 64) -or
+        $parentAuthorization.authorization_witness.final_barrier_id -cne
+            ('5' * 64) -or
+        $parentAuthorization.authorization_witness.initial_barrier_destroy_time_nano -ge
+            $parentAuthorization.authorization_witness.final_barrier_create_time_nano -or
+        $parentAuthorization.authorization_witness.final_barrier_create_time_nano -ge
+            $parentAuthorization.authorization_witness.final_barrier_destroy_time_nano -or
+        $parentAuthorization.authorizer.process_id -ne
+            $parentAuthorization.owner_pid -or
+        $parentAuthorization.authorizer.process_started_at -cne
+            $parentAuthorization.owner_start_time_utc -or
+        [IO.Path]::GetFullPath($parentAuthorization.authorizer.gate_script_path) -cne
+            [IO.Path]::GetFullPath($Runtime.gate) -or
+        $parentAuthorization.authorizer.gate_script_sha256 -cne
+            (Get-TestFileSha256 -LiteralPath $Runtime.gate) -or
+        $parentAuthorization.authorizer.gate_script_bytes -ne
+            (Get-Item -LiteralPath $Runtime.gate).Length -or
+        $parentAuthorization.authorizer.host_executable_sha256 -notmatch
+            '^[0-9a-f]{64}$' -or
+        $parentAuthorization.authorizer.host_executable_bytes -le 0 -or
+        $parentAuthorization.docker_state_observed_through_time_nano -isnot [long] -or
+        [int64]$parentAuthorization.docker_state_observed_through_time_nano -ne
+            [int64]$authorizationNano -or
+        $authorizationAt.UtcTicks -ne $expectedAuthorizationAt.UtcTicks -or
+        $publicationStartedAt -lt $authorizationAt.AddSeconds(-5) -or
+        $publicationStartedAt -gt $authorizationAt.AddSeconds(5) -or
+        $publicationStartedAt -gt $validUntil -or
+        -not $parentAuthorization.authorization.api_stage_permitted -or
+        $parentAuthorization.authorization.worker_start_permitted -or
+        $parentAuthorization.authorization.safety_control_start_permitted -or
+        $parentAuthorization.authorization.live_transition_permitted -or
+        $parentAuthorization.authorization.binance_kill_switch_removal_permitted -or
+        $parentAuthorization.authorization.migration_container_permitted
     ) {
         throw 'Positive Transition watchdog chain is not armed, live, and terminal-success exact.'
     }
     foreach ($value in @(
         $handoff.session_id, $binding.session_id, $lease.session_id,
-        $heartbeat.session_id, $commit.session_id, $terminal.session_id
+        $heartbeat.session_id, $commit.session_id, $terminal.session_id,
+        $attempt.session_id, $completion.session_id,
+        $parentAuthorization.session_id
     )) {
         if ([string]$value -cne $sessionId) {
             throw 'Positive Transition watchdog artifacts do not share one exact session.'
@@ -3060,11 +5433,18 @@ function Assert-PositiveWatchdogChain {
         $handoff.owner_pid -ne $heartbeat.owner_pid -or
         $handoff.owner_pid -ne $commit.owner_pid -or
         $handoff.owner_pid -ne $terminal.owner_pid -or
+        $handoff.owner_pid -ne $attempt.owner_pid -or
+        $handoff.owner_pid -ne $completion.owner_pid -or
+        $handoff.owner_pid -ne $parentAuthorization.owner_pid -or
         $handoff.owner_start_time_utc -cne $binding.owner_start_time_utc -or
         $handoff.owner_start_time_utc -cne $lease.owner.process_started_at -or
         $handoff.owner_start_time_utc -cne $heartbeat.owner_start_time_utc -or
         $handoff.owner_start_time_utc -cne $commit.owner_start_time_utc -or
-        $handoff.owner_start_time_utc -cne $terminal.owner_start_time_utc
+        $handoff.owner_start_time_utc -cne $terminal.owner_start_time_utc -or
+        $handoff.owner_start_time_utc -cne $attempt.owner_start_time_utc -or
+        $handoff.owner_start_time_utc -cne $completion.owner_start_time_utc -or
+        $handoff.owner_start_time_utc -cne
+            $parentAuthorization.owner_start_time_utc
     ) {
         throw 'Positive Transition watchdog owner binding drifted across the chain.'
     }
@@ -3090,7 +5470,39 @@ function Assert-PositiveWatchdogChain {
         $commit.live_sha256 -cne $liveSha256 -or
         $terminal.commit.marker_sha256 -cne $commitSha256 -or
         $terminal.commit.live_sha256 -cne $liveSha256 -or
-        $terminal.commit.live_payload_sha256 -cne $Live.payload_sha256
+        $terminal.commit.live_payload_sha256 -cne $Live.payload_sha256 -or
+        $handoff.start_fence_sha256 -cne $fenceSha256 -or
+        $lease.artifacts.start_fence_sha256 -cne $fenceSha256 -or
+        $attempt.start_fence_sha256 -cne $fenceSha256 -or
+        $binding.start_fence_sha256 -cne $fenceSha256 -or
+        $completion.start_attempt_sha256 -cne $attemptSha256 -or
+        $binding.start_attempt_sha256 -cne $attemptSha256 -or
+        $binding.start_completion_sha256 -cne $completionSha256 -or
+        $Live.payload.transition_session.start_proof.start_fence_sha256 -cne
+            $fenceSha256 -or
+        $Live.payload.transition_session.start_proof.start_attempt_sha256 -cne
+            $attemptSha256 -or
+        $Live.payload.transition_session.start_proof.start_completion_sha256 -cne
+            $completionSha256 -or
+        $parentAuthorization.watchdog_program_sha256 -cne $watchdogSha256 -or
+        $parentAuthorization.lease_sha256 -cne $leaseSha256 -or
+        $parentAuthorization.receipt_sha256 -cne $terminalSha256 -or
+        $parentAuthorization.commit_sha256 -cne $commitSha256 -or
+        $parentAuthorization.live_sha256 -cne $liveSha256 -or
+        $parentAuthorization.live_payload_sha256 -cne $Live.payload_sha256 -or
+        $parentAuthorization.start_fence_sha256 -cne $fenceSha256 -or
+        $parentAuthorization.start_attempt_sha256 -cne $attemptSha256 -or
+        $parentAuthorization.start_completion_sha256 -cne $completionSha256 -or
+        $parentAuthorization.sealed_stdout_sha256 -cne (Get-TextSha256 -Value (
+            $terminalRaw.Replace("`r`n", "`n") + "`n"
+        )) -or
+        $parentAuthorization.sealed_stdout_bytes -ne
+            ([Text.UTF8Encoding]::new($false).GetByteCount(
+                $terminalRaw.Replace("`r`n", "`n") + "`n"
+            )) -or
+        $parentAuthorization.sealed_stderr_sha256 -cne
+            $emptyByteHash -or
+        $parentAuthorization.sealed_stderr_bytes -ne 0
     ) {
         throw 'Positive Transition watchdog raw-byte hash chain is not exact.'
     }
@@ -3100,10 +5512,51 @@ function Assert-PositiveWatchdogChain {
         @([string]$handoff.heartbeat_path, [string]$Case.watchdog_heartbeat),
         @([string]$handoff.commit_path, [string]$Case.watchdog_commit),
         @([string]$handoff.live_path, [string]$Case.live),
-        @([string]$handoff.prestart_path, [string]$Case.prestart)
+        @([string]$handoff.prestart_path, [string]$Case.prestart),
+        @([string]$handoff.start_fence_path, [string]$Case.watchdog_start_fence),
+        @([string]$handoff.start_revoke_path, [string]$Case.watchdog_start_revoke),
+        @([string]$handoff.start_attempt_path, [string]$Case.watchdog_start_attempt),
+        @([string]$handoff.start_completion_path, [string]$Case.watchdog_start_completion),
+        @([string]$parentAuthorization.parent_authorization_path,
+            [string]$Case.parent_authorization),
+        @([string]$parentAuthorization.watchdog_program_path,
+            [string]$Runtime.watchdog),
+        @([string]$parentAuthorization.lease_path, [string]$Case.watchdog_lease),
+        @([string]$parentAuthorization.receipt_path,
+            [string]$Case.watchdog_terminal),
+        @([string]$parentAuthorization.commit_path, [string]$Case.watchdog_commit),
+        @([string]$parentAuthorization.live_path, [string]$Case.live),
+        @([string]$parentAuthorization.start_fence_path,
+            [string]$Case.watchdog_start_fence),
+        @([string]$parentAuthorization.start_attempt_path,
+            [string]$Case.watchdog_start_attempt),
+        @([string]$parentAuthorization.start_completion_path,
+            [string]$Case.watchdog_start_completion)
     )) {
         if ([IO.Path]::GetFullPath($pair[0]) -cne [IO.Path]::GetFullPath($pair[1])) {
             throw 'Positive Transition watchdog artifact path binding drifted.'
+        }
+    }
+    foreach ($pair in @(
+        @([string]$binding.start_fence_path, [string]$Case.watchdog_start_fence),
+        @([string]$binding.start_revoke_path, [string]$Case.watchdog_start_revoke),
+        @([string]$binding.start_attempt_path, [string]$Case.watchdog_start_attempt),
+        @([string]$binding.start_completion_path, [string]$Case.watchdog_start_completion),
+        @([string]$lease.artifacts.start_fence_path, [string]$Case.watchdog_start_fence),
+        @([string]$lease.artifacts.start_revoke_path, [string]$Case.watchdog_start_revoke),
+        @([string]$lease.artifacts.start_attempt_path, [string]$Case.watchdog_start_attempt),
+        @([string]$lease.artifacts.start_completion_path, [string]$Case.watchdog_start_completion),
+        @([string]$attempt.start_fence_path, [string]$Case.watchdog_start_fence),
+        @([string]$completion.start_attempt_path, [string]$Case.watchdog_start_attempt),
+        @([string]$Live.payload.transition_session.start_proof.start_fence_path,
+            [string]$Case.watchdog_start_fence),
+        @([string]$Live.payload.transition_session.start_proof.start_attempt_path,
+            [string]$Case.watchdog_start_attempt),
+        @([string]$Live.payload.transition_session.start_proof.start_completion_path,
+            [string]$Case.watchdog_start_completion)
+    )) {
+        if ([IO.Path]::GetFullPath($pair[0]) -cne [IO.Path]::GetFullPath($pair[1])) {
+            throw 'Positive Transition start-protocol path binding drifted.'
         }
     }
     if (
@@ -3114,12 +5567,46 @@ function Assert-PositiveWatchdogChain {
         $lease.containment.stop_timeout_seconds -ne 15 -or
         $lease.containment.stop_wall_clock_timeout_seconds -ne 25 -or
         -not $lease.containment.exact_container_only -or
-        -not $lease.containment.ambiguous_start_requires_stop_attempt -or
+        -not $lease.containment.ambiguous_start_requires_causal_resolution -or
+        @($attempt.command).Count -ne 2 -or
+        $attempt.command[0] -cne 'start' -or
+        $attempt.command[1] -cne $postgresId -or
+        @($completion.bounded_start.command).Count -ne 2 -or
+        $completion.bounded_start.command[0] -cne 'start' -or
+        $completion.bounded_start.command[1] -cne $postgresId -or
+        $completion.bounded_start.docker_executable_sha256 -cne $dockerSha256 -or
+        $completion.bounded_start.process_timeout_milliseconds -ne 15000 -or
+        $completion.bounded_start.stdout_maximum_bytes -ne 4096 -or
+        $completion.bounded_start.stderr_maximum_bytes -ne 4096 -or
+        $completion.bounded_start.exit_code -ne 0 -or
+        $completion.bounded_start.output_container_id -cne $postgresId -or
+        $completion.bounded_start.timed_out -or
+        $completion.bounded_start.output_exceeded -or
+        -not $completion.bounded_start.process_started -or
+        -not $completion.bounded_start.process_exited -or
+        $completion.bounded_start.process_id -lt 1 -or
+        $completion.bounded_start.kill_issued -or
+        -not $Live.payload.transition_session.start_proof.start_revoke_absent -or
         $heartbeat.sequence -lt $heartbeatAtLive.sequence -or
         $terminal.commit.postgres_started_at -cne
             $Live.payload.postgres_transition.successor_started_at -or
         $terminal.commit.docker_engine_contract_sha256 -cne
-            $lease.docker_engine.contract_sha256
+            $lease.docker_engine.contract_sha256 -or
+        $parentAuthorization.watchdog_process_id -ne
+            $lease.watchdog.process_id -or
+        $parentAuthorization.watchdog_process_started_at -cne
+            $lease.watchdog.process_started_at -or
+        $parentAuthorization.watchdog_exit_code -ne 0 -or
+        $parentAuthorization.docker_engine_contract_sha256 -cne
+            $Live.payload.final_boundary.docker_engine.contract_sha256 -or
+        $parentAuthorization.postgres_container_id -cne $postgresId -or
+        $parentAuthorization.postgres_image_id -cne
+            $Live.payload.final_boundary.postgres.image_id -or
+        $parentAuthorization.postgres_config_image -cne
+            $Live.payload.final_boundary.postgres.config_image -or
+        $parentAuthorization.postgres_restart_count -ne 0 -or
+        $parentAuthorization.postgres_started_at -cne
+            $Live.payload.postgres_transition.successor_started_at
     ) {
         throw 'Positive Transition watchdog lifecycle or containment proof drifted.'
     }
@@ -3133,7 +5620,10 @@ function Assert-PositiveWatchdogChain {
     ) {
         throw 'Positive Transition Live was independently actionable before terminal authorization.'
     }
-    $allWatchdogRaw = @($leaseRaw, $heartbeatRaw, $commitRaw, $terminalRaw) -join "`n"
+    $allWatchdogRaw = @(
+        $leaseRaw, $heartbeatRaw, $commitRaw, $terminalRaw,
+        $attemptRaw, $completionRaw
+    ) -join "`n"
     if ($allWatchdogRaw -match [regex]::Escape($secretSentinel) -or
         $allWatchdogRaw -match '(?i)password|api[_-]?key|secret|database_url|dsn|token') {
         throw 'Positive Transition watchdog artifacts exposed secret-shaped evidence.'
@@ -3150,6 +5640,8 @@ function Assert-PositiveTransition {
     if (-not (Test-TransitionCaseSelected -Label $Label)) { return }
     Write-TransitionTestProgress -Label $Label
     $case = New-TransitionCasePaths -Fixture $Fixture -Label $Label
+    $primaryFailure = $null
+    try {
     Initialize-TransitionCase -Runtime $Runtime -Fixture $Fixture `
         -Case $case -Fault $Fault
     $repairRaw = Get-Content -LiteralPath $case.repair -Raw
@@ -3163,6 +5655,12 @@ function Assert-PositiveTransition {
     $pre = ConvertFrom-TestJsonText -Json (Get-Content $case.prestart -Raw)
     $liveRaw = Get-Content -LiteralPath $case.live -Raw
     $live = ConvertFrom-TestJsonText -Json $liveRaw
+    $parentAuthorizationRaw = Get-Content `
+        -LiteralPath $case.parent_authorization -Raw
+    if ($output.Count -ne 1 -or
+        [string]$output[0] -cne $parentAuthorizationRaw) {
+        throw 'Positive Transition stdout is not the exact parent authorization artifact.'
+    }
     if (
         $pre.format -cne 'stratus-post-migration-successor-transition-prestart-v2' -or
         $live.format -cne 'stratus-post-migration-successor-transition-live-v2' -or
@@ -3187,7 +5685,7 @@ function Assert-PositiveTransition {
         $pre.payload.authorization.external_postgres_start_permitted -or
         -not $pre.payload.authorization.transition_process_start_permitted
     ) {
-        throw 'Positive Transition did not bind repair-v1 and the fail-closed PreStart boundary.'
+        throw 'Positive Transition did not bind repair-v2 and the fail-closed PreStart boundary.'
     }
     $receipt = $live.payload.transition_session.event_witness
     $expectedNetworkIds = @($defaultNetworkId, $safetyNetworkId)
@@ -3251,7 +5749,243 @@ function Assert-PositiveTransition {
     ) {
         throw 'Positive Transition exposed a secret-shaped field or credential value.'
     }
-    Assert-TransitionWitnessStopped -Runtime $Runtime -Label 'positive Transition'
+    }
+    catch { $primaryFailure = $_ }
+    $cleanupFailures = [Collections.Generic.List[object]]::new()
+    try {
+        Assert-TransitionWitnessStopped -Runtime $Runtime `
+            -Label 'positive Transition'
+    }
+    catch { $cleanupFailures.Add($_) }
+    try { Reset-FakeEventWitnessRegistry -Runtime $Runtime }
+    catch { $cleanupFailures.Add($_) }
+    Complete-TestHarnessOutcome -PrimaryFailure $primaryFailure `
+        -CleanupFailures $cleanupFailures.ToArray() -Label $Label
+}
+
+function Assert-NonActionableSuccessReceiptSuspension {
+    param(
+        [Parameter(Mandatory = $true)][object] $Runtime,
+        [Parameter(Mandatory = $true)][object] $Fixture
+    )
+
+    $label = 'non-actionable success receipt watchdog suspension'
+    if (-not (Test-TransitionCaseSelected -Label $label)) { return }
+
+    $originalWatchdog = Get-Content -LiteralPath $Runtime.watchdog -Raw
+    $originalGate = Get-Content -LiteralPath $Runtime.gate -Raw
+    $originalWatchdogSha256 = Get-TestFileSha256 -LiteralPath $Runtime.watchdog
+    $successNeedle = @'
+                $terminal = Write-TerminalReceipt -Status success `
+                    -Trigger accepted_live_commit -Containment $null `
+                    -Commit $commitProof -Failure $null
+                $terminal.json
+'@
+    $successReplacement = @'
+                $terminal = Write-TerminalReceipt -Status success `
+                    -Trigger accepted_live_commit -Containment $null `
+                    -Commit $commitProof -Failure $null
+                Add-Type -MemberDefinition '[System.Runtime.InteropServices.DllImport("ntdll.dll", SetLastError = true)] public static extern uint NtSuspendProcess(System.IntPtr processHandle);' -Name ProcessControl -Namespace StratusInjected
+                $suspendStatus = [StratusInjected.ProcessControl]::NtSuspendProcess(
+                    [Diagnostics.Process]::GetCurrentProcess().Handle
+                )
+                throw "Injected self-suspension unexpectedly returned $suspendStatus."
+                $terminal.json
+'@
+    # PowerShell normalizes here-string line endings, while the physically
+    # pinned watchdog is deliberately CRLF-only. Match the pinned bytes.
+    $successNeedle = $successNeedle.TrimStart("`r", "`n").Replace(
+        "`r`n", "`n"
+    ).Replace("`n", "`r`n")
+    $successReplacement = $successReplacement.TrimStart(
+        "`r", "`n"
+    ).Replace("`r`n", "`n").Replace("`n", "`r`n")
+    $instrumentedWatchdog = $originalWatchdog.Replace(
+        $successNeedle,
+        $successReplacement
+    )
+    if ($instrumentedWatchdog -ceq $originalWatchdog) {
+        throw 'The durable-success test could not instrument the exact receipt boundary.'
+    }
+
+    try {
+        Write-Utf8NoBom -LiteralPath $Runtime.watchdog -Value $instrumentedWatchdog
+        $instrumentedWatchdogSha256 = Get-TestFileSha256 `
+            -LiteralPath $Runtime.watchdog
+        $instrumentedGate = $originalGate.Replace(
+            $originalWatchdogSha256, $instrumentedWatchdogSha256
+        ).Replace(
+            '$watchdogHeartbeatTimeoutSeconds = 15',
+            '$watchdogHeartbeatTimeoutSeconds = 1'
+        ).Replace(
+            '$waitDeadline = $HardDeadline.AddSeconds($watchdogProcessExitGraceSeconds)',
+            '$waitDeadline = [DateTimeOffset]::UtcNow.AddSeconds(2)'
+        )
+        if (
+            -not $instrumentedGate.Contains($instrumentedWatchdogSha256) -or
+            $instrumentedGate -ceq $originalGate
+        ) {
+            throw 'The durable-success test could not repin its isolated gate.'
+        }
+        Write-Utf8NoBom -LiteralPath $Runtime.gate -Value $instrumentedGate
+        Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+            -Label $label -Fault none `
+            -ExpectedMessage 'parent supervisor durably revoked' `
+            -Disposition AfterStartFailure
+    }
+    finally {
+        Write-Utf8NoBom -LiteralPath $Runtime.watchdog -Value $originalWatchdog
+        Write-Utf8NoBom -LiteralPath $Runtime.gate -Value $originalGate
+    }
+}
+
+function Assert-ParentAuthorizationPublicationFaults {
+    param(
+        [Parameter(Mandatory = $true)][object] $Runtime,
+        [Parameter(Mandatory = $true)][object] $Fixture
+    )
+
+    $originalGate = [IO.File]::ReadAllText($Runtime.gate)
+    try {
+        $deadlineNeedle =
+            '$durableFlushObservedAt = [DateTimeOffset]::UtcNow'
+        $deadlineReplacement =
+            '$durableFlushObservedAt = [DateTimeOffset]::UtcNow.AddSeconds(' +
+            '$parentAuthorizationPublishWindowSeconds + 10)'
+        $instrumented = $originalGate.Replace(
+            $deadlineNeedle, $deadlineReplacement
+        )
+        if ($instrumented -ceq $originalGate) {
+            throw 'Could not instrument the post-flush authorization deadline.'
+        }
+        Write-Utf8NoBom -LiteralPath $Runtime.gate -Value $instrumented
+        Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+            -Label 'parent authorization post-flush deadline' -Fault none `
+            -ExpectedMessage 'Parent authorization durable flush missed' `
+            -Disposition AfterStartFailure
+    }
+    finally {
+        Write-Utf8NoBom -LiteralPath $Runtime.gate -Value $originalGate
+    }
+
+    try {
+        $newLine = if ($originalGate.Contains("`r`n")) { "`r`n" } else { "`n" }
+        $readbackNeedle = '        $stream.Position = 0' + $newLine +
+            '        $readback = [byte[]]::new($bytes.Length)'
+        $readbackReplacement =
+            '        $stream.SetLength($bytes.Length - 1)' + $newLine +
+            '        $stream.Position = 0' + $newLine +
+            '        $readback = [byte[]]::new($bytes.Length)'
+        $instrumented = $originalGate.Replace(
+            $readbackNeedle, $readbackReplacement
+        )
+        $removeNeedle =
+            'Remove-Item -LiteralPath $resolvedPath -Force -ErrorAction Stop'
+        $removeReplacement =
+            "throw 'injected authorization removal cleanup failure'"
+        $instrumented = $instrumented.Replace(
+            $removeNeedle, $removeReplacement
+        )
+        if (
+            -not $instrumented.Contains(
+                'injected authorization removal cleanup failure'
+            ) -or
+            $instrumented -notmatch '\$stream\.SetLength\(\$bytes\.Length - 1\)'
+        ) {
+            throw 'Could not instrument authorization readback and cleanup faults.'
+        }
+        Write-Utf8NoBom -LiteralPath $Runtime.gate -Value $instrumented
+        Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+            -Label 'parent authorization readback plus cleanup ambiguity' `
+            -Fault none `
+            -ExpectedMessage (
+                'same-handle readback ended early. Cleanup: ' +
+                'authorization removal failed: injected authorization removal cleanup failure'
+            ) `
+            -Disposition AfterStartFailure -Restore {
+                param($case)
+                if (
+                    (Test-Path -LiteralPath $case.parent_authorization) -and
+                    (Get-Item -LiteralPath $case.parent_authorization).Length -ne 0
+                ) {
+                    throw 'Failed authorization reservation remained actionable.'
+                }
+            }
+    }
+    finally {
+        Write-Utf8NoBom -LiteralPath $Runtime.gate -Value $originalGate
+    }
+}
+
+function Assert-PostPublicationParentSupervisorLoss {
+    param([Parameter(Mandatory = $true)][object] $Runtime,
+        [Parameter(Mandatory = $true)][object] $Fixture)
+    $label = 'parent authorization post-publication supervisor loss'
+    if (-not (Test-TransitionCaseSelected -Label $label)) { return }
+    $originalGate = [IO.File]::ReadAllText($Runtime.gate)
+    $needle = "Assert-ParentStageBoundary -Boundary 'parent authorization post-publication'"
+    $newLine = if ($originalGate.Contains("`r`n")) { "`r`n" } else { "`n" }
+    # This deliberately drops the gate's real retained native process handle
+    # after the durable authorization, then exercises the production boundary.
+    # It proves hook recovery, not provenance of a real parent watchdog launch.
+    $replacement = @(
+        'Write-CreateNewJson -LiteralPath ($parentAuthorizationPath + ''.test-checkpoint.json'') -Value ([ordered]@{ sha256 = (Get-ByteArraySha256 -Bytes ([IO.File]::ReadAllBytes($parentAuthorizationPath))) })',
+        '$script:parentStage.watchdog_process.Dispose()', $needle
+    ) -join $newLine
+    if ([regex]::Matches($originalGate, [regex]::Escape($needle)).Count -ne 1) {
+        throw 'The exact post-publication parent-stage fault boundary is not unique.'
+    }
+    try {
+        Write-Utf8NoBom -LiteralPath $Runtime.gate -Value ($originalGate.Replace($needle, $replacement))
+        Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture -Label $label -Fault none `
+            -ExpectedMessage 'parent supervisor durably revoked this transition' `
+            -Disposition AfterStartFailure -Restore {
+                param($case)
+                $checkpoint = ConvertFrom-TestJsonText -Json (Get-Content -LiteralPath (
+                    $case.parent_authorization + '.test-checkpoint.json') -Raw)
+                if ($checkpoint.sha256 -cne (Get-ParentFixtureFileHash $case.parent_authorization)) {
+                    throw 'Post-publication containment rewrote the immutable authorization history.'
+                }
+                $parent = ConvertFrom-TestJsonText -Json (Get-Content -LiteralPath $case.parent_containment -Raw)
+                if ($parent.trigger -cne 'parent_authorization_postpublication_supervisor_loss' -or
+                    $parent.start_protocol_status -cne 'completed' -or
+                    $parent.causal_materialization_required -or -not $parent.attempted_stop -or
+                    -not $parent.docker_stop_succeeded -or $parent.stop_attempt_count -lt 1) {
+                    throw 'Post-publication supervision loss did not causally contain its completed PostgreSQL start.'
+                }
+            }
+    }
+    finally { Write-Utf8NoBom -LiteralPath $Runtime.gate -Value $originalGate }
+}
+
+function Assert-CollectorFailurePublication {
+    param(
+        [Parameter(Mandatory = $true)][object] $Runtime,
+        [Parameter(Mandatory = $true)][object] $Fixture
+    )
+
+    $originalGate = [IO.File]::ReadAllText($Runtime.gate)
+    try {
+        $newLine = if ($originalGate.Contains("`r`n")) { "`r`n" } else { "`n" }
+        $needle = '            target.Write(buffer, 0, accepted);' +
+            $newLine + '            target.Flush(true);'
+        $replacement = '            target.Write(buffer, 0, accepted);' +
+            $newLine +
+            '            if (DateTime.UtcNow.Ticks > 0)' + $newLine +
+            '                throw new IOException("injected collector flush failure");'
+        $instrumented = $originalGate.Replace($needle, $replacement)
+        if ($instrumented -ceq $originalGate) {
+            throw 'Could not instrument the collector flush failure.'
+        }
+        Write-Utf8NoBom -LiteralPath $Runtime.gate -Value $instrumented
+        Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+            -Label 'event collector flush failure publication' -Fault none `
+            -ExpectedMessage 'event witness output pump failed' `
+            -Disposition BeforeStartFailure
+    }
+    finally {
+        Write-Utf8NoBom -LiteralPath $Runtime.gate -Value $originalGate
+    }
 }
 
 function Invoke-ActiveTransitionSuite {
@@ -3259,13 +5993,53 @@ function Invoke-ActiveTransitionSuite {
         [Parameter(Mandatory = $true)][object] $Runtime,
         [Parameter(Mandatory = $true)][object] $Fixture
     )
+    foreach ($case in @(
+        @{ fault = 'direct-transition'; message = 'missing mandatory ParentStageContractPath' },
+        @{ fault = 'missing-fence'; message = 'ParentMutationFence' },
+        @{ fault = 'closed-fence'; message = 'live borrowed parent mutation FileStream' },
+        @{ fault = 'wrong-fence'; message = 'contract/lease/ready identity' },
+        @{ fault = 'shared-fence'; message = 'not exclusive' },
+        @{ fault = 'write-shared-fence'; message = 'not exclusive' },
+        @{ fault = 'delete-shared-fence'; message = 'not exclusive' },
+        @{ fault = 'expired-lease'; message = 'lifetime is stale or invalid' },
+        @{ fault = 'forged-lease'; message = 'contract/lease/ready identity' },
+        @{ fault = 'forged-ready'; message = 'Held file hash differs' },
+        @{ fault = 'wrong-provision-image'; message = 'retained PostgreSQL/candidate API/provision identities differ' },
+        @{ fault = 'swapped-reservation-session'; message = 'accepted fresh successor reservation/session' },
+        @{ fault = 'forged-reservation-hash'; message = 'reservation hash differs' },
+        @{ fault = 'r1-noncanonical-time'; message = 'canonical seven-fraction Z format' },
+        @{ fault = 'r1-source-count'; message = 'source manifest count differs' },
+        @{ fault = 'r1-missing-program'; message = 'source manifest does not uniquely bind' },
+        @{ fault = 'r1-lineage-topology'; message = 'evidence lineage hash differs' },
+        @{ fault = 'r1-lineage-ci'; message = 'evidence lineage hash differs' },
+        @{ fault = 'r1-lineage-history'; message = 'evidence lineage hash differs' },
+        @{ fault = 'dead-watchdog'; message = 'Open exact process lease' },
+        @{ fault = 'reused-watchdog'; message = 'Held process identity or executable bytes differ' },
+        @{ fault = 'stale-heartbeat'; message = 'heartbeat is stale or not exact' }
+    )) {
+        Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture -Fault none `
+            -ParentFault $case.fault -Label ('parent-stage ' + $case.fault) `
+            -ExpectedMessage $case.message -Disposition BeforeStartFailure
+    }
     Assert-PositiveTransition -Runtime $Runtime -Fixture $Fixture
+    Assert-PositiveTransition -Runtime $Runtime -Fixture $Fixture `
+        -Fault 'configured-pending' `
+        -Label 'configured-pending stopped endpoint materializes on Transition start'
+    Assert-PositiveTransition -Runtime $Runtime -Fixture $Fixture `
+        -Fault 'repair-connected' `
+        -Label 'newly connected repair at exact 30-second lag boundary authorizes Transition'
     Assert-PositiveTransition -Runtime $Runtime -Fixture $Fixture `
         -Fault 'watchdog-publisher-cleanup' `
         -Label 'accepted-terminal-publisher-cleanup-failure'
     Assert-PositiveTransition -Runtime $Runtime -Fixture $Fixture `
         -Fault 'git-detached-stderr' `
         -Label 'detached Git native stderr normalization'
+    Assert-NonActionableSuccessReceiptSuspension `
+        -Runtime $Runtime -Fixture $Fixture
+    Assert-ParentAuthorizationPublicationFaults `
+        -Runtime $Runtime -Fixture $Fixture
+    Assert-PostPublicationParentSupervisorLoss -Runtime $Runtime -Fixture $Fixture
+    Assert-CollectorFailurePublication -Runtime $Runtime -Fixture $Fixture
 
     foreach ($entry in @(
         @('tampered PreStart after creation', 'prestart-tamper',
@@ -3295,18 +6069,28 @@ function Invoke-ActiveTransitionSuite {
         @('drifted named-volume mount event', 'event-volume-drift',
             'data-volume mount event drifted', 'AfterStartFailure'),
         @('ambiguous Docker start return', 'start-return-wrong',
-            'emergency containment', 'AfterStartFailure'),
+            'completed causal containment', 'AfterStartFailure'),
+        @('completed-start watchdog hard death',
+            'watchdog-dies-completed-start',
+            'parent supervisor durably revoked', 'AfterStartFailure'),
+        @('delayed-start watchdog hard death',
+            'watchdog-dies-delayed-start',
+            'parent supervisor durably revoked', 'AfterStartFailure'),
+        @('live watchdog suspension', 'watchdog-hangs-after-start',
+            'parent supervisor durably revoked', 'AfterStartFailure'),
         @('accepted watchdog lease byte drift', 'watchdog-lease-drift',
             'watchdog lease changed before Live evidence creation',
             'AfterStartFailure'),
         @('malformed watchdog heartbeat', 'watchdog-heartbeat-lock',
             @(
+                'successor watchdog durably revoked PostgreSQL start authorization',
                 'Production Docker network identity/topology is not exact',
                 'Live successor proof permits only the exact production PostgreSQL container'
             ),
             'AfterStartFailure'),
         @('forged watchdog commit publication race', 'watchdog-commit-forged',
             @(
+                'successor watchdog durably revoked PostgreSQL start authorization',
                 'Production Docker network identity/topology is not exact',
                 'Live successor proof permits only the exact production PostgreSQL container',
                 'already exists'
@@ -3457,6 +6241,322 @@ function Invoke-ActiveTransitionSuite {
             Write-JsonFixture -LiteralPath $case.repair -Value $repair -Depth 30
         }
     Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair mutation command numeric token' -Fault none `
+        -ExpectedMessage 'mutation command token must be a native JSON string' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $repair.payload.mutation.command[0] = 0
+            $repair.payload_sha256 = Get-CanonicalFixtureHash `
+                -Value $repair.payload -Depth 30
+            Write-JsonFixture -LiteralPath $case.repair -Value $repair -Depth 30
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair missing continuous event witness' -Fault none `
+        -ExpectedMessage 'network repair payload does not have the exact required property set' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $repair.payload.PSObject.Properties.Remove('event_witness')
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair event witness native count type' -Fault none `
+        -ExpectedMessage 'event witness event_count must be a native JSON integer' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $repair.payload.event_witness.event_count = '2'
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair self-consistent collector template drift' -Fault none `
+        -ExpectedMessage 'event collector provenance is invalid' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $template = '4' * 64
+            $collector = $repair.payload.event_witness.collector
+            $collector.template_sha256 = $template
+            $collector.type_name =
+                'StratusRepairDockerCollector_' + $template.Substring(0, 16)
+            $collector.contract_identity = 'repair-v2:' + $template
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair collector source digest drift' -Fault none `
+        -ExpectedMessage 'event collector provenance is invalid' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $repair.payload.event_witness.collector.source_sha256 = '5' * 64
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair event command context drift' -Fault none `
+        -ExpectedMessage 'event command is not exact' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $repair.payload.event_witness.event_command[1] = 'default'
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair stale final event barrier' -Fault none `
+        -ExpectedMessage 'final event barrier is too old for its acceptance' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $witness = $repair.payload.event_witness
+            $acceptedAt = [DateTimeOffset]::Parse([string]$repair.payload.accepted_at)
+            Set-RepairEventWitnessLag -Witness $witness `
+                -AcceptedAt $acceptedAt -LagMilliseconds 30001
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair unexpected witnessed lifecycle event' -Fault none `
+        -ExpectedMessage 'event record 0 is not exact or timely' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $repair.payload.event_witness.events[0].action = 'start'
+            Set-RepairEventWitnessHashes -Witness $repair.payload.event_witness
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair event journal digest drift' -Fault none `
+        -ExpectedMessage 'event witness hashes are not reproducible' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $repair.payload.event_witness.journal_sha256 = '0' * 64
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair final event barrier binding drift' -Fault none `
+        -ExpectedMessage 'event barriers are not bound to their records' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $repair.payload.event_witness.final_barrier.time_nano =
+                [int64]$repair.payload.event_witness.final_barrier.time_nano + 1
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair attachment state singleton arrays' -Fault none `
+        -ExpectedMessage 'attachment_state must be a native JSON string' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            foreach ($name in @('pre', 'armed', 'post_first', 'post_second')) {
+                $snapshot = $repair.payload.snapshots.$name
+                $snapshot.postgres.attachment_state = @('configured_pending')
+                $snapshotBody = [ordered]@{
+                    docker_engine = $snapshot.docker_engine
+                    running_container_ids = @($snapshot.running_container_ids)
+                    lifecycle_inventory = @($snapshot.lifecycle_inventory)
+                    lifecycle_inventory_sha256 = $snapshot.lifecycle_inventory_sha256
+                    postgres = $snapshot.postgres
+                    production_networks = $snapshot.production_networks
+                    production_networks_sha256 = $snapshot.production_networks_sha256
+                }
+                $snapshot.canonical_sha256 = Get-CanonicalFixtureHash `
+                    -Value $snapshotBody -Depth 20
+            }
+            $repair.payload_sha256 = Get-CanonicalFixtureHash `
+                -Value $repair.payload -Depth 30
+            Write-JsonFixture -LiteralPath $case.repair -Value $repair -Depth 30
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair retained mount mode drift' -Fault none `
+        -ExpectedMessage 'retained PostgreSQL stable identity is not exact' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $snapshot = $repair.payload.snapshots.pre
+            $snapshot.postgres.stable_identity.hba_mode = 'rw'
+            $snapshot.postgres.stable_identity_sha256 =
+                Get-CanonicalFixtureHash `
+                    -Value $snapshot.postgres.stable_identity -Depth 10
+            Set-RepairSnapshotCanonicalSha256 -Snapshot $snapshot
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair lifecycle inventory digest mismatch' -Fault none `
+        -ExpectedMessage 'lifecycle inventory digest is invalid' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $snapshot = $repair.payload.snapshots.pre
+            $snapshot.lifecycle_inventory_sha256 = '0' * 64
+            Set-RepairSnapshotCanonicalSha256 -Snapshot $snapshot
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair same digest with different lifecycle body' -Fault none `
+        -ExpectedMessage 'lifecycle inventory digest is invalid' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $snapshot = $repair.payload.snapshots.post_second
+            $snapshot.lifecycle_inventory[0].name = '/forged-postgres'
+            Set-RepairSnapshotCanonicalSha256 -Snapshot $snapshot
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair empty lifecycle inventory' -Fault none `
+        -ExpectedMessage 'lifecycle inventory is empty' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $snapshot = $repair.payload.snapshots.pre
+            $snapshot.lifecycle_inventory = [object[]]@()
+            Set-RepairLifecycleInventorySha256 -Snapshot $snapshot
+            Set-RepairSnapshotCanonicalSha256 -Snapshot $snapshot
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair duplicate lifecycle container ID' -Fault none `
+        -ExpectedMessage 'duplicate container ID' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $snapshot = $repair.payload.snapshots.pre
+            $duplicate = Copy-JsonValue -Value $snapshot.lifecycle_inventory[0]
+            $snapshot.lifecycle_inventory = [object[]]@(
+                $snapshot.lifecycle_inventory[0], $duplicate
+            )
+            Set-RepairLifecycleInventorySha256 -Snapshot $snapshot
+            Set-RepairSnapshotCanonicalSha256 -Snapshot $snapshot
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair unsorted lifecycle inventory' -Fault none `
+        -ExpectedMessage 'lifecycle inventory is not sorted' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $snapshot = $repair.payload.snapshots.pre
+            $extra = Copy-JsonValue -Value $snapshot.lifecycle_inventory[0]
+            $extra.container_id = '0' * 64
+            $extra.name = '/earlier-container'
+            $snapshot.lifecycle_inventory = [object[]]@(
+                $snapshot.lifecycle_inventory[0], $extra
+            )
+            Set-RepairLifecycleInventorySha256 -Snapshot $snapshot
+            Set-RepairSnapshotCanonicalSha256 -Snapshot $snapshot
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair lifecycle native boolean type' -Fault none `
+        -ExpectedMessage 'must be a native JSON boolean' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $snapshot = $repair.payload.snapshots.pre
+            $snapshot.lifecycle_inventory[0].running = 'false'
+            Set-RepairLifecycleInventorySha256 -Snapshot $snapshot
+            Set-RepairSnapshotCanonicalSha256 -Snapshot $snapshot
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair lifecycle compose-label digest drift' -Fault none `
+        -ExpectedMessage 'compose-label digest is invalid' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $snapshot = $repair.payload.snapshots.pre
+            $snapshot.lifecycle_inventory[0].compose_labels_sha256 = '0' * 64
+            Set-RepairLifecycleInventorySha256 -Snapshot $snapshot
+            Set-RepairSnapshotCanonicalSha256 -Snapshot $snapshot
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair lifecycle missing retained PostgreSQL' -Fault none `
+        -ExpectedMessage 'lacks the retained PostgreSQL ID' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $snapshot = $repair.payload.snapshots.pre
+            $snapshot.lifecycle_inventory[0].container_id = 'f' * 64
+            Set-RepairLifecycleInventorySha256 -Snapshot $snapshot
+            Set-RepairSnapshotCanonicalSha256 -Snapshot $snapshot
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
+        -Label 'network repair retained lifecycle cross-binding drift' -Fault none `
+        -ExpectedMessage 'retained PostgreSQL lifecycle entry is not cross-bound' `
+        -Disposition BeforeStartFailure -Configure {
+            param($case)
+            $repair = ConvertFrom-TestJsonText -Json (
+                Get-Content -LiteralPath $case.repair -Raw
+            )
+            $snapshot = $repair.payload.snapshots.pre
+            $snapshot.lifecycle_inventory[0].name = '/forged-postgres'
+            Set-RepairLifecycleInventorySha256 -Snapshot $snapshot
+            Set-RepairSnapshotCanonicalSha256 -Snapshot $snapshot
+            Write-MutatedNetworkRepairFixture -LiteralPath $case.repair `
+                -Repair $repair
+        }
+    Assert-TransitionFailureCase -Runtime $Runtime -Fixture $Fixture `
         -Label 'network repair drift before Live evidence' -Fault repair-tamper `
         -ExpectedMessage 'Stopped PostgreSQL network repair evidence changed during transition' `
         -Disposition AfterStartFailure
@@ -3521,10 +6621,10 @@ function Invoke-ActiveTransitionSuite {
         }
 
     if (
-        $gateSource -notmatch 'Invoke-Docker\s+-Arguments\s+@\(''start'',\s*\$productionPostgresId\)' -or
+        $gateSource -notmatch 'Invoke-BoundedPinnedDockerStart\s+`?\s*-ContainerId\s+\$productionPostgresId' -or
         $gateSource -notmatch "'update',\s*'--restart=no'" -or
         $gateSource -match '(?is)\$composeArguments\s*\+\s*@\(\s*''(?:up|run|start|restart)''' -or
-        $gateSource -match '(?is)Invoke-Docker\s+-Arguments\s+@\(\s*''(?:restart|kill)'''
+        $gateSource -match '(?is)Invoke-Docker\s+-Arguments\s+@\(\s*''(?:start|restart|kill)'''
     ) {
         throw 'Static Transition lifecycle authority is broader than the reviewed boundary.'
     }
@@ -3559,7 +6659,10 @@ $environmentNames = @(
     'STRATUS_FAKE_PIPE', 'STRATUS_FAKE_CONFIG', 'STRATUS_FAKE_RESULT',
     'STRATUS_FAKE_EVENTS', 'STRATUS_FAKE_WITNESS_READY',
     'STRATUS_FAKE_WITNESS_EXIT', 'STRATUS_FAKE_WITNESS_EXITED',
-    'STRATUS_FAKE_SERVER_READY', 'STRATUS_SUCCESSOR_TEST_POSITIVE_ONLY',
+    'STRATUS_FAKE_WITNESS_REGISTRY', 'STRATUS_FAKE_DOCKER_PATH',
+    'STRATUS_FAKE_SCOPED_DOCKER_LOG',
+    'STRATUS_FAKE_WITNESS_READY_DELAY_MS', 'STRATUS_FAKE_SERVER_READY',
+    'STRATUS_SUCCESSOR_TEST_POSITIVE_ONLY',
     'STRATUS_SUCCESSOR_TEST_KEEP_TEMP', 'STRATUS_SUCCESSOR_TEST_FILTER',
     'STRATUS_SUCCESSOR_TEST_PROGRESS', 'STRATUS_SUCCESSOR_TEST_SKIP_THROUGH'
 )
@@ -3574,6 +6677,7 @@ foreach ($name in $environmentNames) {
         $name, [EnvironmentVariableTarget]::Process
     )
 }
+$activePrimaryFailure = $null
 try {
     [void](New-Item -ItemType Directory -Path $activeTempRoot)
     $activeFixture = New-SuccessorFixture -LiteralPath (
@@ -3591,6 +6695,9 @@ try {
     # the isolated runtime with its three approved executable hashes replaced
     # by the actual compiled fake hash; no production tool is invoked.
     $env:PATH = $activeRuntime.shim
+    Assert-FakeEventWitnessRegistryHarness -Runtime $activeRuntime
+    Assert-FakeLeaseWatchdogIdentityHarness -Runtime $activeRuntime
+    Assert-CollectorSplitCrLfCanonicalization -Runtime $activeRuntime
     $script:ActiveTransitionCaseFilter = [string]$activeCaseFilter
     $script:ShowTransitionProgress = $activeShowProgress -ceq '1'
     $script:SkipTransitionCasesThrough = [string]$activeSkipThrough
@@ -3601,37 +6708,54 @@ try {
     else {
         Invoke-ActiveTransitionSuite -Runtime $activeRuntime -Fixture $activeFixture
     }
+    Assert-ScopedDockerCommandLog -Runtime $activeRuntime
     'Post-migration successor Transition gate tests passed.'
 }
+catch { $activePrimaryFailure = $_ }
 finally {
-    Stop-FakeRuntime -Runtime $activeRuntime
+    $activeCleanupFailures = [Collections.Generic.List[object]]::new()
+    try { Stop-FakeRuntime -Runtime $activeRuntime }
+    catch { $activeCleanupFailures.Add($_) }
     foreach ($name in $activeEnvironment.Keys) {
-        if ($null -eq $activeEnvironment[$name]) {
-            Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+        try {
+            if ($null -eq $activeEnvironment[$name]) {
+                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+            }
+            else {
+                Set-Item -LiteralPath "Env:$name" `
+                    -Value ([string]$activeEnvironment[$name])
+            }
         }
-        else {
-            Set-Item -LiteralPath "Env:$name" -Value ([string]$activeEnvironment[$name])
-        }
+        catch { $activeCleanupFailures.Add($_) }
     }
     foreach ($functionName in @('Get-Item', 'Get-FileHash')) {
-        Remove-Item -LiteralPath "Function:\global:$functionName" `
-            -ErrorAction SilentlyContinue
+        try {
+            Remove-Item -LiteralPath "Function:\global:$functionName" `
+                -ErrorAction SilentlyContinue
+        }
+        catch { $activeCleanupFailures.Add($_) }
     }
-    $resolvedActiveTempRoot = [IO.Path]::GetFullPath($activeTempRoot)
-    $resolvedSystemTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-    if (
-        $resolvedActiveTempRoot.StartsWith(
-            $resolvedSystemTemp, [StringComparison]::OrdinalIgnoreCase
-        ) -and
-        (Split-Path -Leaf $resolvedActiveTempRoot) -like 'sgt-*' -and
-        (Test-Path -LiteralPath $resolvedActiveTempRoot) -and
-        $activeKeepTemp -cne '1'
-    ) {
-        Remove-Item -LiteralPath $resolvedActiveTempRoot -Recurse -Force
+    try {
+        $resolvedActiveTempRoot = [IO.Path]::GetFullPath($activeTempRoot)
+        $resolvedSystemTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+        if (
+            $resolvedActiveTempRoot.StartsWith(
+                $resolvedSystemTemp, [StringComparison]::OrdinalIgnoreCase
+            ) -and
+            (Split-Path -Leaf $resolvedActiveTempRoot) -like 'sgt-*' -and
+            (Test-Path -LiteralPath $resolvedActiveTempRoot) -and
+            $activeKeepTemp -cne '1'
+        ) {
+            Remove-Item -LiteralPath $resolvedActiveTempRoot -Recurse -Force
+        }
+        elseif ($activeKeepTemp -ceq '1') {
+            Write-Warning "Preserved isolated successor test root: $resolvedActiveTempRoot"
+        }
     }
-    elseif ($activeKeepTemp -ceq '1') {
-        Write-Warning "Preserved isolated successor test root: $resolvedActiveTempRoot"
-    }
+    catch { $activeCleanupFailures.Add($_) }
+    Complete-TestHarnessOutcome -PrimaryFailure $activePrimaryFailure `
+        -CleanupFailures $activeCleanupFailures.ToArray() `
+        -Label 'Top-level successor test harness'
 }
 return
 

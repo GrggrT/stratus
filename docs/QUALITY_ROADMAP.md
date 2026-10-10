@@ -1,14 +1,247 @@
 # STRATUS quality roadmap
 
+2026-09-23 completion of the 2026-09-15 context-delivery source checkpoint: exact bounded raw bytes now follow
+the actual P/W startup path via unnamed read-only section copies, independent
+private capture/hash and versioned HELLO/READY pin binding. Capture never blocks
+W's main owner-watch by map/copy/hash/join. All six source/BCL suites pass both
+PS hosts, 670 cases each. No C# or native execution occurred.
+Next: independently approved strict context schema/root and compiled P coordinator
+consuming these actual bytes before payload Open, then guarded continuation,
+compiler Job/root transfer/ACK, writer isolation and complete terminal. Corresponding
+bytes are not approval provenance; existing v2 records still cannot qualify all
+preloads/environment. Full R0–R9 and permissions are unchanged.
+[Evidence and scope](C:/Users/Administrator/Documents/weatherpoly/.stratus-cache/producer-context-delivery-20260915/RESULTS.md).
+
+2026-09-15 preparation-boundary checkpoint: metadata correspondence is shared by
+the full held-byte validator and actual owner preparation. Derived inventory is
+fresh data with fixed per-role and total bounds; no caller preflight projection
+substitutes for raw context. Next real dependency is a qualified compiled P
+coordinator and strict versioned raw-context delivery/pin binding to its private
+session and original deadline, not another approval-shaped JSON or opening in L.
+Existing v2 does not approve P/W/bootstrap preloads or environment/writer scope.
+Source/pure suites148/79/114 pass in both PS hosts; C#/native execution was not run.
+[Evidence and remaining integration](C:/Users/Administrator/Documents/weatherpoly/.stratus-cache/build-input-preflight-20260915/RESULTS.md).
+
+2026-09-15 private-control source checkpoint: exact P/W HELLO traffic is separated
+from stdio; real native creation/retirement outcomes stay retained and unresolved
+cleanup preserves original input ownership. Source190/128/50/98 pass on both PS
+hosts; target code was not compiled or executed. Next: independently approved
+preflight/context, guarded first P continuation, actual compiler Job transfer/ACK
+before compiler birth, root/Job ACK before compiler Resume, payload Open inside P,
+writer isolation and full terminal. HELLO alone authorizes none of these actions.
+[Evidence and topology correction](C:/Users/Administrator/Documents/weatherpoly/.stratus-cache/producer-control-transport-20260915/RESULTS.md).
+
+2026-09-15 continuation: source integration now carries the original P startup
+expiry into the actual W argv/READY and both launch admission paths. No renewed
+W-local 60-second budget is accepted. This is only the P/W startup segment:
+unopened-input ownership/approved context must extend the full build-wide scope,
+then actual compiler Job/root ACK and complete terminal precede qualification.
+No target/native execution or full acceptance follows. [Scope](C:/Users/Administrator/Documents/weatherpoly/.stratus-cache/build-startup-deadline-20260915/SCOPE.md).
+
+2026-09-15 code-only checkpoint: the first actual guardian launch/owner-watch source
+path is integrated. Running-from-birth W avoids the suspended-orphan startup gap;
+P stop-copy acquisition is serialized against P containment. Native outcome retries,
+capture draining and exclusive guardian input ownership are corrected. Source tests
+90/98/64 pass in both PS hosts; no target/native execution. Next: original global
+deadline, compiler Job/root ACK, guarded continuation and full terminal, then separately
+authorized qualification. [Evidence](C:/Users/Administrator/Documents/weatherpoly/.stratus-cache/guardian-owner-watch-20260915/RESULTS.md).
+
+2026-09-15 code-only checkpoint: a retained disposable producer owns an actual
+suspended birth through the existing command/Job, and only that original new child
+can supply the restricted local stop capability. No public Resume/adopt/raw export
+exists; actual W launch, READY, compiler handoff and full producer remain pending.
+Independent source review and new54 plus related92 source cases pass on both PS hosts.
+No compilation/native qualification; initial test-setup failures are preserved.
+[Startup ownership checkpoint](C:/Users/Administrator/Documents/weatherpoly/.stratus-cache/disposable-producer-startup-20260915/RESULTS.md).
+
+2026-09-15 code-only checkpoint: actual retained input-owner source is connected
+to the separate compiler command and the existing strict v2 byte validator. This
+is not an executed build or native acceptance. Current tasks now distinguish input
+ownership, disposable producer/independent watchdog, controlled output writers,
+and separately approved qualification. Independent source review and 92/92 source/BCL
+tests pass on both PS5/PS7; first selector-only failures are preserved. Full R0–R9
+and permissions are unchanged.
+[Current checkpoint](C:/Users/Administrator/Documents/weatherpoly/.stratus-cache/build-input-ownership-20260915/RESULTS.md).
+
+2026-09-15 code-only update: runtime suspend admission/abort ordering and NativeChild
+sticky-failure/actual-resume retries corrected. Final64/72/134/48 source tests pass
+on PS5/PS7 with independent review. No C# compile or native/full-protocol acceptance.
+Next: actual compiler coordinator, independent watchdog, input/output writer scope,
+bootstrap qualification and versioned R1/G/P/T integration. Full R0–R9 is unchanged.
+[Checkpoint](C:/Users/Administrator/Documents/weatherpoly/.stratus-cache/suspend-order-20260915/RESULTS.md).
+
 Status: roadmap for moving STRATUS from a working paper-trading prototype to a
 validated, operator-grade trading system.
 
-Last updated: 2026-07-29.
+Last updated: 2026-09-15.
+
+Latest P0 code-only checkpoint: v2 build-input/receipt binding separates the actual
+detached build source/private output from logical sealed R1 paths. Raw source manifest,
+independently pinned profile/plan, declared input inventory, compiler streams and exact
+build/sealed output snapshots are bound; aliases are rejected. This is pure byte/data
+correspondence, not compiler, metadata, dependency-resolution, publication or import proof.
+See `.stratus-cache/runtime-r1-integration-20260915/RESULTS.md`. Existing v1 stays
+nonauthorizing; actual bounded build producer, independent metadata/profile qualification,
+versioned R1/both anchors and a noncircular pre-import bootstrap remain required before
+G/P/T exact-byte import and the rest of the full protocol. Existing v3 seals, barriers,
+full active R0–R9 goal and separate operational permissions are unchanged.
+
+Previous P0 code-only checkpoint: actual parent Prepare/root/Start and exact-T C export
+are source-integrated. Raw creation/export/source-duplication ambiguity stays retained;
+partial release can be retried without querying already released creator handles.
+The actual T parent-mode guard stops before reservations/fences/Docker until qualified
+runtime import exists. Reviewed source/managed tests and native-source compile-only
+are not Windows lifecycle acceptance. See
+`.stratus-cache/transition-command-admission-20260915/RESULTS.md`.
+Next: versioned R1/DLL provenance, same-held-byte import and actual T wrapper/G start
+tree, then complete terminal/receiver/causal STOP and safe takeover. All barriers,
+full active R0–R9 goal and separately required operational permissions remain.
+
+Previous P0 code-only checkpoint: retained session C/per-command D APIs and a pure
+runtime byte/build-input contract are implemented but not wired to real T/G command
+paths. New 76/62/146 source/pure cases and nine earlier suites pass both shells
+(24 final successful runs); the whole native runtime is compile-only. Independent
+review found scalar/array ETS dispatch; its fix and all intermediate failures are
+preserved. See `.stratus-cache/command-session-20260915/RESULTS.md`. Next: versioned
+R1 DLL/build evidence, same-held-byte import, actual C export/T wrapper and G start
+tree, then full terminal/receiver/fence takeover. All barriers, full active R0–R9
+goal and production permissions remain unchanged; this is not native acceptance.
+
+Previous P0 code-only checkpoint: NativeChild requires creation-time own-Job assignment,
+with no post-create Assign fallback. New source-only contracts pass 56/56 per shell;
+eight related earlier suites also pass both shells (18 completed runs, nine suites).
+See `.stratus-cache/command-birth-20260915/RESULTS.md`. This is not the frozen native
+Sandbox experiment or new OS qualification. Retained session/per-command ownership,
+T runtime import before first command, G start-tree and complete terminal/takeover
+remain open, including the inherited NativeChild Dispose/Wait limitations. Full goal
+active; production, all barriers and R0–R9 permissions/criteria unchanged.
+
+Previous P0 code-only checkpoint: terminal-only directional CONTROL drain and stronger
+causal STOP admission pass 12/74/30/63 new scoped cases per shell; all 24 selected suites
+pass both shells (48 completed runs). See `.stratus-cache/parent-control-drain-20260915/RESULTS.md`.
+Managed memory streams/workers were exercised, not OS pipes or native lifecycle.
+The actual gate terminal seam, pre-READY failure drain, atomic ownership of both command
+trees and takeover/fence ordering remain open. Next work is code-only integration of
+those requirements. Production, WIP/pins/no-cache barriers and R0–R9 criteria are unchanged.
+
+Previous P0 code-only checkpoint: private parent CONTROL pilot and pure cross-party
+roundtrip pass 41/70/44/71/31 scoped cases per shell; non-authorizing root-death source
+contracts pass 48/48. All 20 scoped suites pass both shells, runtime compile-only.
+See `.stratus-cache/parent-transition-control-20260915/RESULTS.md`. Native transport,
+the proposed 1000ms bound, graceful EOF and causal descendant containment remain
+unqualified. Gate still stops before legacy heartbeat/fence/start; pins, entry/cache
+barriers, production permissions and all R0–R9 criteria remain unchanged. Next:
+code-only closure/takeover and full terminal/boundary integration; full goal active.
+
+Previous P0 code-only checkpoint: early gate intent → parent-owned independent
+Transition capture → READY/ACK wiring, with 38 wire, 60 native-source and 67
+parent-launch checks passing per shell. Existing continuation suite is 33/33
+(all original 29 plus 4 scoped-class regression controls); other regressions pass.
+See `.stratus-cache/parent-transition-launch-20260915/RESULTS.md`. No full protocol,
+native lifecycle, clean R0/R1 or R0–R9 acceptance is implied. Gate stops before the
+legacy lease/heartbeat/start-fence/start path; next code-only work is the fresh-live
+and versioned terminal/causal takeover ABI. Production/services and permissions
+remain unchanged, all blockers/pins retained, full goal active.
 
 Autonomous operating contract:
 `docs/AUTONOMOUS_PRODUCT_EXECUTION_PLAN.md` defines the product outcome,
 decision rights, non-negotiable safety invariants, operating cadence, and
 current execution queue.
+
+Current P0 goal and scoped user permissions:
+`docs/CURRENT_PAPER_RELEASE_GOAL.md` records the 2026-09-14 authorization for local
+P0 work and the isolated five-file Windows native-check branch/Actions run. It is
+not production-transition authority and does not relax the R0-R9 acceptance gates.
+
+Current checkpoint: the separately authorized Windows Sandbox R2 completed the
+unchanged frozen native suite **56/56 in PS5.1 and PS7.6.5**, exit 0, on 2026-09-14.
+Evidence was independently verified and the guest closed; see
+`.stratus-cache/windows-sandbox-native-check-20260914-r2/RESULTS.md`. The failures and
+host requirements in the following chronology are historical, not a request to
+repeat the completed experiment. One-shot window permissions are not renewed.
+
+Subsequent code-only checkpoint, 20:56 UTC: a lost mutation fence now stops heartbeat
+progress, retains the recovered exclusive handle and latches containment. A new
+managed-FS/AST regression passed 10/10 on each shell with independent review; see
+`.stratus-cache/parent-fence-loss-20260914/RESULTS.md`. It does not prove holder provenance
+or full bootstrap. The edited watchdog differs from frozen R2 and its old gate pin
+remains unchanged; integrated protocol acceptance and fresh R0/R1 remain pending.
+
+Further detached lineage checkpoint, 21:10 UTC: 70/70 schema/producer-order cases
+passed on each shell with independent review. All authority flags remain false;
+the leaf does not prove raw-byte integrity or provenance and is not wired into
+completion acceptance. See `.stratus-cache/parent-transition-lineage-20260914/RESULTS.md`.
+Gate-owned bootstrap wiring checkpoint, 21:48 UTC: external lease/ready/fence
+authority removed; own launch/fence/heartbeat and captured-ready checks wired
+behind unconditional WIP entry barriers. AST 17/17 and managed lease/cleanup
+models 63/63 passed both shells with independent review. See
+`.stratus-cache/parent-bootstrap-integration-20260914/RESULTS.md`. Native/full-protocol
+acceptance remains pending. Next implement same-process downstream continuation
+and terminal ownership, then full causal registration, watchdog-owned observer
+lifetime and nonterminal post-load protection. Preserve the old harness coverage
+when adapting it; no full CI or release acceptance is claimed by this checkpoint.
+
+Same-invocation continuation checkpoint, 22:09 UTC: internal Transition registration and
+strict owned-watchdog ACK checks are wired without intermediate JSON emission. Parent cleanup
+failure is fatal before local releases and preserves the primary error; this alone does not
+retain execution ownership after unwind. AST 17/17 + 29/29 and managed 94/94 passed both shells,
+with independent review. New native terminal exit/EOF observation compiles in both shells but
+has not been invoked, integrated or native-qualified. Evidence:
+`.stratus-cache/parent-continuation-integration-20260914/RESULTS.md`. Old pins/entry blockers
+remain; the runbook rejects standalone transfer and post-load protection release. Next close
+the full parent/Transition lineage, owned downstream/observer lifecycle and cooperative STOP
+before current-code native/fault-matrix qualification. This is not full protocol or R0-R9
+acceptance and does not renew a Sandbox or production window.
+
+Retained-evidence checkpoint, 22:42 UTC: registration plus ten linked documents are held and
+rechecked by the receiver; pure cross-document consistency is connected but always followed
+by a no-ACK/no-cache WIP barrier. New 53/53 and 66/66 suites, fence/heartbeat 12/12 and existing
+17/94/29/70 suites passed both shells with independent source review. Evidence:
+`.stratus-cache/parent-transition-evidence-20260914/RESULTS.md`. Selected repair subproofs,
+declared capture metadata and compile-only single-link checks are not full provenance. Resolve
+the external fence-upgrade alias liveness gap, full receiver/repair/raw-input closure and owned
+downstream/observer/terminal flow before current-code protocol and immutable R0/R1 qualification.
+The full goal stays active; production is unchanged and all entry blockers/pins remain.
+
+Fence-continuity/repair checkpoint, 23:08 UTC: the receiver takes the Transition fence
+exclusively first and never releases/reopens its captured handle for containment. Bad document
+bytes/metadata remain emergency diagnostics only after exact owner death and strict retained
+ownership; normal authority stays disabled. The available durable repair snapshot/event graph
+now has complete pure consistency checks. Final 73/73 and 151/151 suites and existing
+17/94/29/12/70 pass both shells; independent source review completed. See
+`.stratus-cache/parent-fence-continuity-repair-20260914/RESULTS.md`. Initial path substitution,
+native capture/ownership, full receiver/containment and downstream/observer/cooperative STOP
+are still open. Pins/barriers and all R0-R9 acceptance gates remain; no permissions renewed.
+
+Owned-observer checkpoint, 23:43 UTC: parent-owned fixed launch, private two-frame wire and
+held full-output/receipt binding are prepared in code; publication-time ACK guards and actual
+DB timestamp compatibility were corrected after independent review. Final paired suites are
+46/42/14/115 and 17/94/29/12/70/75/151, plus legacy ValidateOnly/managed sampler regressions.
+Failures are preserved; the 75-case suite strengthens the old 73-case AST layout. Runtime was
+compiled only. See `.stratus-cache/parent-owned-observer-20260914/RESULTS.md`.
+No native/full-protocol/R0-R9 acceptance follows. Upstream raw provenance/cache, gate observer
+sender, independent Transition capture, raw sample/composite and cooperative STOP remain.
+The next design separates early independent guard capture from late exclusive start-fence
+capture and explicitly rejects unqualified reuse of an observer owner-lifetime Job. All pins,
+entry/no-ACK/no-cache barriers and separate production/PAPER permissions remain unchanged.
+
+Historical external-run/native chronology:
+The isolated branch was published at `93f78f6164f1726d926f991025c83fc637c678f4`;
+The initial workflow was rejected before tests; a workflow-only shell correction at
+`38700391b2235d2340a696777c4e37f6b17c9e41` admitted run `34870507190`. Both complete
+Windows suites returned 45/56 PASS, exit 1 and verified cleanup. Native sources stayed
+frozen; the exact Windows error code was lost by the message-only test aggregator.
+Workflow-only diagnostics at `1f923934dde7c2673af4281cf74144a9aee249fb` yielded run
+`34871653269`: again 45/56 with cleanup verified in each shell, now with 11 retained
+CreateProcess Win32 code-5 errors per shell. This narrows the failure to access denial;
+its specific policy/access cause remains unproven. No protection was bypassed or relaxed.
+Subsequent run `34872372384` at `74e2fabdd63fe7f798703ee40e0ff364ee4724f6` resolved
+that diagnostic gap: in each shell, before/after current-Job queries succeeded with
+144-byte responses, in_any_job=true and LimitFlags=0 (both breakaway permissions false).
+Those runner Jobs could not support the required independent-launch path; their suites
+remained 45/56 and cleanup=true. A specifically agreed compatible isolated Windows context
+was then required for unchanged 56/56 admission; no Job-policy change or bypass was authorized.
+Publication/results: `.stratus-cache/native-host-check-20260914/PUBLICATION.md` and `RUNS.md`.
 
 Related detail plan: `docs/EDGE_VALIDATION_PLAN.md` expands the anti-luck
 workstream: skill/luck PnL decomposition, bootstrap confidence intervals,
@@ -28,6 +261,48 @@ Current P0 record: `docs/incidents/2026-07-29_EXECUTION_MARKOUT_STARVATION.md` r
 execution-cost scheduler starvation root cause and the evidence-preserving remediation boundary.
 `docs/PRODUCTION_READINESS_CHECKLIST.md` is the fail-closed release gate. Verification,
 deployment, successor-epoch activation, and PAPER canary remain pending.
+
+Parent-stage crash containment remains an open release blocker. The new blocked-entry
+`Invoke-StratusParentStageWatchdog.ps1` and `Stratus.ParentStage.Runtime.cs` are WIP;
+the companion tests cover only native primitives and the zero-side-effect entry barrier.
+No primitive PASS establishes full watchdog acceptance or permits Transition. Continuous
+shared-fence ownership, independent process/Job proof, accepted R1 binding, exact creation
+lineage, non-starving durable containment and continuous downstream supervision still require
+complete integration and the two-shell fault-injection matrix. Load acceptance alone cannot
+release the owner fence or watchdog; the same watchdog can continue only through explicit
+bounded phases, and a terminal requires an exact stopped boundary or reviewed active safety authority.
+The earlier 32-case primitive checkpoint passed both shells on 2026-09-13. The subsequent
+45-case independent-launch suite failed on both shells and in a terminal-mode rerun: 34
+scoped cases passed, but 11 positive/lifetime cases rejected the child before Resume because
+it remained in a Windows Job despite requested breakaway. This is an unaccepted native
+checkpoint, not a skipped-test PASS. A suitable native host was then required; the independence
+check and production entry blockers remain intact. Exact source hashes and scope are recorded
+in the readiness checklist. Two concrete trust gaps also remain in the unintegrated protocol:
+supplied live-process identity does not prove the approved watchdog launch, and
+combined pre-existing file handles can defeat probe-only fence-exclusivity validation. Neither
+gap is closed by self-declared JSON receipts; the final bootstrap needs trusted launch and
+exact fence-creation capabilities.
+
+The isolated `ExactFence.AcquireExisting` capability now fixes acquisition to an existing,
+hash-bound file opened read-only with `FileShare.None`, retains that handle privately and
+returns copied bytes. It is intended for the gate's own bootstrap, not as another externally
+supplied authority object. The current borrowed-handle gate hook has not been replaced;
+this primitive does not close either full bootstrap blocker. The runbook now explicitly
+orders lease publication, exact acquisition, owner arming/heartbeat and captured ready ack
+to avoid a ready-before-acquisition deadlock.
+All four new exact-fence cases passed both shells. The subsequent producer bridge accepts
+the launcher's nonce and emits its exact native-ready frame behind the unchanged entry
+blocker; seven additional compatibility cases passed both shells. At that checkpoint the full
+56-case suite failed: 45 scoped cases passed and the same 11 independent-launch cases were
+rejected. These helper/transport results do not establish full watchdog state-machine acceptance.
+
+Current gate qualification also remains incomplete. The original unfiltered active Transition
+matrix failed in both shells on 2026-09-14, before the intended fault checkpoints; those causes
+remain unresolved. A diagnostic-only disposable-gate harness subsequently passed all 133 active
+cases on both PowerShell 7 and Windows PowerShell 5.1 with native exit 0, normal cleanup and
+preserved console/evidence. Instrumentation may affect timing; this does not qualify the
+untouched source, run the historical inactive matrix, or accept native bootstrap and production.
+The readiness checklist records exact pins, failure provenance and current scoped results.
 
 ## Active autonomous delivery board — 2026-07-29
 
@@ -95,20 +370,26 @@ edge is positive. `P6 blocked` and `P7 blocked` are intentional fail-closed stat
 
 ### Active release sprint: successor PAPER candidate
 
-Current phase: code-only fail-closed hardening. Production PostgreSQL, API, worker, and
-`safety-control` are stopped; Polymarket PAPER is paused. An already-running backup sidecar may
-remain running, but it cannot start PostgreSQL and is not fresh-backup evidence while PostgreSQL
-is stopped. Apart from that sidecar, only disposable candidate/test infrastructure may run until
-R0 is accepted and the R1 immutable-image transition is recorded.
+Current implementation phase: code-only fail-closed hardening of replacement source. The
+historical Section-2 acceptance for revision `0547bf2a5a7a65c05ad99d3f33301af152462c8b` remains
+preserved; it cannot qualify the current edited worktree or reopen its expired bounded load
+window. The replacement source needs fresh R0/R1 evidence and an accepted parent-stage protocol.
+Outside that window, production PostgreSQL, API, worker, `safety-control`, Binance stream,
+Telegram, backup, and test PostgreSQL must remain stopped. Polymarket PAPER remains paused.
+On 2026-09-13 Docker Engine was initially unavailable, then reachable again at 21:03 UTC without
+this task starting it. Production API/PostgreSQL/worker stayed exited and no LIVE service ran.
+The only running container was backup, started at 20:22 UTC: this reported all-stopped-prerequisite
+deviation was not automatically changed and does not prove a fresh backup. The historical
+acceptance artifact hash still matched; no runtime gate was accepted.
 
 This is the executable order for the current P0 release. A later step may be prepared in
 parallel, but it cannot mutate production state until every preceding exit condition is recorded.
 
 | Order | Task | Current state | Exit condition |
 |---|---|---|---|
-| R0 | Qualify replacement source | local candidate green; SHA/remote CI pending | final SHA is clean/pushed; complete Linux CI, PostgreSQL integration, Compose validation, and Docker build pass |
-| R1 | Build immutable candidate | blocked by R0 | clean detached worktree; exact revision label; `linux/amd64`; recorded tag, image ID, and digest |
-| R2 | Prove backup/restore and apply the safety migration | blocked by R1 | only after the R1 transition is recorded, briefly start the retained exact production PostgreSQL container while every application writer remains stopped; a fresh hash-bound `0046` backup restores independently; the exact candidate migrates PostgreSQL to exactly `0047`; PAPER fence, roles, ACL/RLS, triggers, functions, and fail-closed controls pass |
+| R0 | Qualify replacement source | replacement hardening/tests in progress; clean SHA/remote CI pending | final SHA is clean/pushed; complete Linux CI, PostgreSQL integration, Compose validation, and Docker build pass; strict exact-SHA CI and source manifests validate |
+| R1 | Build and durably seal immutable candidate | blocked by R0 | after operator review of the externally collected exact-SHA CI job record, `New-StratusR1AcceptanceSeal.ps1` independently proves the live pushed branch SHA and atomically publishes the sole canonical per-revision create-new `stratus-r0-r1-seal-v3`: each source file matches its exact Git tree blob, the detached filesystem build context is exact with replace/index/config/attribute bypasses rejected, and Docker v4 inputs bind the executable/endpoint/ordered argv, revision label, `linux/amd64` tag/image ID/digest and fresh stopped topology; read-only already-`0047` history and a fresh empty successor evidence directory are pinned. Every decision/result remains `section3_authorized=false`, `requires_parent_stage_watchdog_acceptance=true`; R1 is a prerequisite, not PostgreSQL-start authority; migration/LIVE/Binance-kill removal remain forbidden |
+| R2 | Admit the retained already-`0047` PostgreSQL state | blocked by R1 and parent-stage protocol acceptance | only after the fresh R1 prerequisite and independently accepted parent-stage protocol are recorded, the single fenced Transition may briefly start the retained exact production PostgreSQL container while every application writer remains stopped; it revalidates the hash-bound pre-`0047` backup/restore and accepted `0046 -> 0047` lineage as read-only historical inputs, proves exactly one `0047` head plus every PAPER fence/role/ACL/RLS/trigger/function boundary, and never creates or starts a migrate container |
 | R3 | Re-run production-size read-only load gate | blocked by R2 | HTTP v3 + runtime v2 + composite artifacts share run/image/schema `0047`/overlap and all unrelaxed thresholds pass |
 | R4 | Close pre-activation evidence | blocked by R3 | P0-only scope attested; schema/indexes and controls re-proved; immediate reconciliation passes; retained predecessor API image identity and post-activation diagnostic procedure are recorded |
 | R5 | Activate successor continuity epoch and prove API-only rollback isolation | blocked by R4 | complete reviewed lane plan and zero-backfill execution-evidence fork activate on the exact image; while kills remain engaged and the worker remains stopped, the retained predecessor API reports continuity mismatch against that active successor without changing plans, epochs, lanes, or evidence; the exact candidate API is restored and reports continuity match |
@@ -160,25 +441,31 @@ must include bounded endpoint/load verification before PAPER resume.
 The Cockpit/API bounding work is implemented in source: core reads remain on the 10-second tier,
 evidence/execution reads move to 60 seconds, diagnostics move to 5 minutes, superseded refreshes
 are cancelled/coalesced, database statements and transaction lifetimes are bounded, and the
-accuracy overview has purpose-built indexes under source head `20260730_0046`. That index-only
-migration was applied while every application writer was stopped; the database is now at `0046`.
+accuracy overview has purpose-built indexes introduced by `20260730_0046`.
 
-The next candidate source head is `20260730_0047`, directly following that accepted operational
-head. It adds a short DB-clock Polymarket PAPER-canary lease, PostgreSQL runtime/venue/request
-fences, an independently supervised loopback-only safety-control service, a shared transaction
-advisory lock for empty-set and queued-resume races, and atomic terminal STOP semantics. Focused
-working-tree tests are green, but 0047 is not production-applied or release-accepted. A fresh
-0046 backup/restore, exact-candidate migration proof, full CI, image identity, successor epoch,
-and PAPER canary remain mandatory.
+Production was subsequently advanced once from `20260730_0046` to `20260730_0047` while every
+application writer was stopped and both venue kills remained engaged. The retained historical
+trust inputs are the pre-`0047` backup directory
+`backups/stratus_pre_0047_20260822T195653Z_d4c5ce2295714d439bf4f0fb21191547.backup`
+(archive SHA-256 `eabd66ff4e07560c00ff04deac18613497bddf3e355fddae6b688917a4e3b5fa`,
+accepted restore-attestation SHA-256
+`73939f689e3add8b92ba72cb4824a1c2243fa35228eaed25ffc5dab4144a3e4e`, and
+pre-migration-attestation SHA-256
+`a8717ba0656bc0f5abde739dd0352284f48f598f89597866c55bc7627d97d189`) plus the accepted
+lineage directory
+`.stratus-cache/cutovers/section3-6d093b49cd53-20260822T193939Z-c70786a5a00349ca93e9c1d53ca7f3d7.in-progress`.
+The successor gate pins and reads these artifacts; it does not recreate them and does not run a
+migration.
 
 Runtime acceptance remains pending. The first staged gate on revision `09945edfd492` failed with
 13 observed `idle in transaction` sessions and peak PostgreSQL CPU of `308.43%`; the candidate was
-stopped and not accepted. The immutable candidate must first prove a fresh isolated restore of
-`0046`. After the R1 immutable-image transition is recorded, the retained exact production
-PostgreSQL container may be started for the bounded R2/R3 cutover window while every application
-writer remains stopped; the candidate then applies its own `0047` migration. Only after the
-database is proven at exactly `0047` may the implemented remediation run a new exact-candidate
-load gate. Epoch activation and PAPER resume remain forbidden until that gate passes.
+stopped and not accepted. After the R1 immutable-image transition is recorded, the retained exact
+production PostgreSQL container may be started only by the bounded R2 Transition while every
+application writer remains stopped. R2 must re-prove the already-`0047` state against the immutable
+historical backup/restore and lineage above. No new `0046` backup and no migrate invocation belong
+to this path. Only after the database is freshly proven at exactly `0047` may the implemented
+remediation run a new exact-candidate load gate. Epoch activation and PAPER resume remain forbidden
+until that gate passes.
 
 ## Definition of quality
 

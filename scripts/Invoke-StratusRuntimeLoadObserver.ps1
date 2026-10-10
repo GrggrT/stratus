@@ -36,11 +36,18 @@ param(
 
     [string] $OutputPath = '.stratus-cache\load-gates\candidate-runtime.json',
 
+    [ValidatePattern('\A[0-9a-f]{64}\z')]
+    [string] $ParentStageNonce,
+
     [switch] $ValidateOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:ParentStageObserverMode = $PSBoundParameters.ContainsKey('ParentStageNonce')
+if ($script:ParentStageObserverMode -and -not [regex]::IsMatch($ParentStageNonce, '\A[0-9a-f]{64}\z')) {
+    throw 'Parent observer mode requires an explicit lowercase 64-hex nonce.'
+}
 $ExpectedApiMemoryLimitBytes = 1073741824L
 
 $validation = [pscustomobject]@{
@@ -656,15 +663,122 @@ function Receive-ObserverSamplerMessages {
     }
 }
 
+function Get-ObserverBytesSha256 {
+    param([Parameter(Mandatory = $true)][byte[]] $Bytes)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($algorithm.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant() }
+    finally { $algorithm.Dispose() }
+}
+
+function ConvertTo-ParentObserverSampleUtc {
+    # Convert the actual database timestamp, never the observer's current time.
+    # PS5 retains JSON date strings; PS7 may return a native DateTime instead.
+    param([object] $Value)
+    if ($Value -is [DateTimeOffset]) { return $Value.ToUniversalTime().ToString('o') }
+    if ($Value -is [DateTime]) {
+        if ($Value.Kind -eq [DateTimeKind]::Unspecified) { throw 'Parent observer database timestamp has unspecified timezone.' }
+        return [DateTimeOffset]::new($Value.ToUniversalTime()).ToString('o')
+    }
+    if ($Value -isnot [string]) { throw 'Parent observer database timestamp requires an actual date or ISO timestamp string.' }
+    $match = [regex]::Match($Value, '\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?<fraction>\.[0-9]{1,7})?(?<zone>Z|[+-][0-9]{2}:[0-9]{2})\z')
+    if (-not $match.Success) { throw 'Parent observer database timestamp is not an unambiguous ISO timestamp.' }
+    $format = 'yyyy-MM-dd\THH:mm:ss'
+    if ($match.Groups['fraction'].Success) { $format += '.' + ('f' * ($match.Groups['fraction'].Length - 1)) }
+    $text = if ($match.Groups['zone'].Value -ceq 'Z') { $Value.Substring(0, $Value.Length - 1) + '+00:00' } else { $Value }
+    $parsed = [DateTimeOffset]::ParseExact($text, $format + 'zzz', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None)
+    return $parsed.ToUniversalTime().ToString('o')
+}
+
+function New-ParentObserverReadyFrameBytes {
+    # Pure framing only. The call site supplies the independently obtained own
+    # process identity and the digest of bytes actually atomically published.
+    param([object] $RunId, [object] $Nonce, [object] $ProcessId,
+        [object] $StartedAt, [object] $ReadyPath, [object] $ReadySha256)
+    foreach ($pair in @(@($RunId, 32), @($Nonce, 64), @($ReadySha256, 64))) {
+        if ($pair[0] -isnot [string] -or -not [regex]::IsMatch($pair[0], ('\A[0-9a-f]{' + $pair[1] + '}\z'))) {
+            throw 'Parent observer ready frame has an invalid native hex string.'
+        }
+    }
+    if (($ProcessId -isnot [int] -and $ProcessId -isnot [long]) -or $ProcessId -le 0 -or $ProcessId -gt [int]::MaxValue) {
+        throw 'Parent observer ready frame requires a native positive process ID.'
+    }
+    if ($StartedAt -isnot [string]) { throw 'Parent observer process birth must be a canonical UTC string.' }
+    $birth = [DateTimeOffset]::ParseExact($StartedAt, 'o', [Globalization.CultureInfo]::InvariantCulture)
+    if ($birth.Offset -ne [TimeSpan]::Zero -or $birth.ToString('o') -cne $StartedAt) {
+        throw 'Parent observer process birth must be canonical UTC.'
+    }
+    if ($ReadyPath -isnot [string] -or -not [IO.Path]::IsPathRooted($ReadyPath) -or
+        [IO.Path]::GetFullPath($ReadyPath) -cne $ReadyPath -or
+        $ReadyPath.IndexOf([char]0) -ge 0 -or $ReadyPath.Contains("`r") -or $ReadyPath.Contains("`n")) {
+        throw 'Parent observer ready path must be a canonical absolute path.'
+    }
+    $frame = [ordered]@{
+        format = 'stratus-parent-observer-ready-v1'; session_id = $RunId; nonce = $Nonce
+        pid = [int]$ProcessId; started_at = $StartedAt; ready_path = $ReadyPath; ready_sha256 = $ReadySha256
+    }
+    $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes(($frame | ConvertTo-Json -Depth 4 -Compress) + "`n")
+    if ($bytes.Length -gt 8192) { throw 'Parent observer ready frame exceeds its fixed byte bound.' }
+    return ,$bytes
+}
+
+function New-ParentObserverCompleteFrameBytes {
+    param([object] $RunId, [object] $Nonce, [object] $ProcessId, [object] $StartedAt,
+        [object] $OutputPath, [object] $OutputSha256, [object] $OutputBytes, [object] $Summary)
+    # Reuse exact native identity/path/hash checks, not its ready-frame output.
+    [void](New-ParentObserverReadyFrameBytes -RunId $RunId -Nonce $Nonce -ProcessId $ProcessId `
+        -StartedAt $StartedAt -ReadyPath $OutputPath -ReadySha256 $OutputSha256)
+    if (($OutputBytes -isnot [int] -and $OutputBytes -isnot [long]) -or $OutputBytes -lt 1 -or $OutputBytes -gt 67108864) {
+        throw 'Parent observer output size must be a native integer within 1..64MiB.'
+    }
+    $fields = @('database_sample_count', 'resource_sample_count', 'topology_sample_count',
+        'minimum_database_samples', 'minimum_resource_samples', 'sample_errors', 'max_api_sessions', 'max_api_active',
+        'max_runtime_writer_sessions', 'max_api_idle_in_tx', 'max_global_idle_in_tx', 'max_api_idle_tx_seconds',
+        'max_lock_waiters', 'max_oldest_api_query_seconds', 'max_api_cpu_percent', 'max_api_memory_percent',
+        'max_postgres_cpu_percent', 'rolling_30s_postgres_cpu_max', 'consecutive_postgres_cpu_150', 'identity_changed',
+        'restart_changed', 'oom_observed', 'containers_healthy', 'candidate_identity_held', 'application_writers_stopped',
+        'exact_project_topology_held', 'invariants_changed', 'drain_passed', 'runtime_passed')
+    if ($null -eq $Summary -or $Summary.GetType().FullName -cne 'System.Management.Automation.PSCustomObject') {
+        throw 'Parent observer completion summary must be the native summary object.'
+    }
+    $actualFields = @($Summary.PSObject.Properties.Name)
+    if ($actualFields.Count -ne $fields.Count -or @($actualFields | Where-Object { $_ -cnotin $fields }).Count -ne 0) {
+        throw 'Parent observer completion summary fields differ.'
+    }
+    $frame = [ordered]@{
+        format = 'stratus-parent-observer-complete-v1'; session_id = $RunId; nonce = $Nonce
+        pid = [int]$ProcessId; started_at = $StartedAt; output_path = $OutputPath
+        output_sha256 = $OutputSha256; output_bytes = [int]$OutputBytes; summary = $Summary
+    }
+    $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes(($frame | ConvertTo-Json -Depth 8 -Compress) + "`n")
+    if ($bytes.Length -gt 57344) { throw 'Parent observer completion frame exceeds its fixed byte bound.' }
+    return ,$bytes
+}
+
 function Write-ObserverArtifact {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
-        [Parameter(Mandatory = $true)][object] $Artifact
+        [Parameter(Mandatory = $true)][object] $Artifact,
+        [switch] $PassThru
     )
 
     $directory = [IO.Path]::GetDirectoryName($Path)
     [void][IO.Directory]::CreateDirectory($directory)
     $temporaryOutput = "$Path.tmp"
+    if ($script:ParentStageObserverMode) {
+        if ((Test-Path -LiteralPath $Path) -or (Test-Path -LiteralPath $temporaryOutput)) {
+            throw 'Parent observer evidence destinations must be create-new.'
+        }
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($Artifact | ConvertTo-Json -Depth 8))
+        if ($bytes.Length -gt 67108864) { throw 'Parent observer artifact exceeds its fixed 64MiB byte bound.' }
+        $stream = [IO.FileStream]::new($temporaryOutput, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
+        finally { $stream.Dispose() }
+        # The two-argument Move never overwrites an existing destination. On
+        # failure leave our temporary evidence in place for containment review.
+        [IO.File]::Move($temporaryOutput, $Path)
+        if ($PassThru) { return [pscustomobject]@{ path = $Path; sha256 = Get-ObserverBytesSha256 $bytes; bytes = [long]$bytes.Length } }
+        return
+    }
     [IO.File]::WriteAllText(
         $temporaryOutput,
         ($Artifact | ConvertTo-Json -Depth 8),
@@ -762,10 +876,21 @@ $absoluteReady = if ([IO.Path]::IsPathRooted($ReadyPath)) {
 else {
     [IO.Path]::GetFullPath((Join-Path $absoluteRoot $ReadyPath))
 }
-Remove-Item -LiteralPath $absoluteOutput -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath "$absoluteOutput.tmp" -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $absoluteReady -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath "$absoluteReady.tmp" -Force -ErrorAction SilentlyContinue
+if ($script:ParentStageObserverMode) {
+    $parentDestinations = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($path in @($absoluteOutput, "$absoluteOutput.tmp", $absoluteReady, "$absoluteReady.tmp")) {
+        if (-not $path.StartsWith($absoluteRoot.TrimEnd('\', '/') + '\', [StringComparison]::OrdinalIgnoreCase) -or
+            -not $parentDestinations.Add($path) -or (Test-Path -LiteralPath $path)) {
+            throw 'Parent observer paths must be absent, distinct and inside the approved root.'
+        }
+    }
+}
+else {
+    Remove-Item -LiteralPath $absoluteOutput -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$absoluteOutput.tmp" -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $absoluteReady -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$absoluteReady.tmp" -Force -ErrorAction SilentlyContinue
+}
 if (
     [string]::IsNullOrWhiteSpace($LoadGateRunId) -or
     [string]::IsNullOrWhiteSpace($ReadyPath) -or
@@ -1094,7 +1219,9 @@ while ([DateTimeOffset]::UtcNow -lt $deadline) {
             gate = 'stratus_dashboard_runtime_observation_ready'
             load_gate_run_id = $runId
             ready_at = [DateTimeOffset]::UtcNow.ToString('O')
-            first_database_sample_at = [string]$firstDatabaseSample.at
+            first_database_sample_at = if ($script:ParentStageObserverMode) {
+                ConvertTo-ParentObserverSampleUtc $firstDatabaseSample.at
+            } else { [string]$firstDatabaseSample.at }
             first_resource_sample_at = [string]$resourceSamples[0].at
             first_dynamic_topology_sample_at = [string]$topologySamples[1].at
             preflight_database_sample_count = $databaseSamples.Count
@@ -1117,7 +1244,17 @@ while ([DateTimeOffset]::UtcNow -lt $deadline) {
                 postgres_cpu_percent = [double]$firstResourceSample.postgres_cpu_percent
             }
         }
-        Write-ObserverArtifact -Path $absoluteReady -Artifact $readyMarker
+        $readyPublication = Write-ObserverArtifact -Path $absoluteReady -Artifact $readyMarker -PassThru:$script:ParentStageObserverMode
+        if ($script:ParentStageObserverMode) {
+            $ownProcess = [Diagnostics.Process]::GetCurrentProcess()
+            try { $ownBirth = [DateTimeOffset]::new($ownProcess.StartTime.ToUniversalTime(), [TimeSpan]::Zero).ToString('o') }
+            finally { $ownProcess.Dispose() }
+            $readyFrameBytes = New-ParentObserverReadyFrameBytes -RunId $runId -Nonce $ParentStageNonce -ProcessId $PID `
+                -StartedAt $ownBirth -ReadyPath $absoluteReady -ReadySha256 $readyPublication.sha256
+            $parentStdout = [Console]::OpenStandardOutput()
+            $parentStdout.Write($readyFrameBytes, 0, $readyFrameBytes.Length)
+            $parentStdout.Flush()
+        }
         $readyWritten = $true
     }
 }
@@ -1361,8 +1498,16 @@ $result = [pscustomobject]@{
     resource_samples = $resourceRows
     topology_samples = $topologyRows
 }
-Write-ObserverArtifact -Path $absoluteOutput -Artifact $result
-$summary | ConvertTo-Json -Compress
+$resultPublication = Write-ObserverArtifact -Path $absoluteOutput -Artifact $result -PassThru:$script:ParentStageObserverMode
+if ($script:ParentStageObserverMode) {
+    $completeFrameBytes = New-ParentObserverCompleteFrameBytes -RunId $runId -Nonce $ParentStageNonce -ProcessId $PID `
+        -StartedAt $ownBirth -OutputPath $absoluteOutput -OutputSha256 $resultPublication.sha256 `
+        -OutputBytes $resultPublication.bytes -Summary $summary
+    $parentStdout = [Console]::OpenStandardOutput()
+    $parentStdout.Write($completeFrameBytes, 0, $completeFrameBytes.Length)
+    $parentStdout.Flush()
+}
+else { $summary | ConvertTo-Json -Compress }
 if (-not $summary.runtime_passed) {
     exit 1
 }

@@ -16,19 +16,28 @@ if ($parseErrors.Count -ne 0) {
     throw "Watchdog script does not parse: $($parseErrors[0].Message)"
 }
 foreach ($required in @(
-    'stratus-successor-transition-watchdog-lease-v1',
+    'stratus-successor-transition-watchdog-lease-v3',
+    'stratus-successor-transition-start-fence-v1',
+    'stratus-successor-transition-start-revoked-v1',
+    'stratus-successor-transition-start-attempt-v1',
+    'stratus-successor-transition-start-complete-v1',
     'stratus-successor-transition-watchdog-heartbeat-v1',
     'stratus-successor-transition-watchdog-commit-v1',
     'stratus-successor-transition-watchdog-terminal-v1',
+    'verified_configured_pending_existing',
+    'configured-pending',
     '388f231898cff8674a2aa341e306b77fd1f93a5954dd33ff556575a69227824d',
-    "'stop', '--time'", 'FileMode]::CreateNew', 'WaitForExit($milliseconds)'
+    "'stop', '--timeout'", 'FileMode]::CreateNew', 'WaitForExit($milliseconds)',
+    "@('--context', `$expectedDockerContext)",
+    'Watchdog failed without masking earlier state.',
+    'exact child remained live after the bounded kill wait'
 )) {
     if (-not $source.Contains($required)) {
         throw "Watchdog source is missing required fail-closed marker: $required"
     }
 }
 foreach ($forbidden in @(
-    "'start',", "'restart',", "'rm',", "'network', 'connect'",
+    "-Arguments @('start'", "'restart',", "'rm',", "'network', 'connect'",
     "'network', 'disconnect'", 'Start-Process', 'Invoke-Expression'
 )) {
     if ($source.Contains($forbidden)) {
@@ -160,7 +169,12 @@ function New-NetworkInspect {
         IPAM = [ordered]@{
             Driver = 'default'
             Options = $null
-            Config = @([ordered]@{ Subnet = $Subnet; Gateway = $Gateway })
+            Config = @([ordered]@{
+                Subnet = $Subnet
+                Gateway = $Gateway
+                IPRange = ''
+                AuxiliaryAddresses = $null
+            })
         }
         Internal = $false
         Attachable = $false
@@ -182,13 +196,18 @@ function New-NetworkInspect {
 }
 
 function New-Attachment {
-    param([string] $NetworkId, [string] $Network, [switch] $Running)
+    param(
+        [string] $NetworkId,
+        [string] $Network,
+        [switch] $Running,
+        [switch] $ConfiguredPending
+    )
     $prefix = if ($Network -ceq 'default') { '20' } else { '22' }
     return [ordered]@{
-        IPAMConfig = $null
+        IPAMConfig = if ($ConfiguredPending) { [ordered]@{} } else { $null }
         Links = $null
         Aliases = @('postgres', 'weatherpoly-postgres-1')
-        NetworkID = $NetworkId
+        NetworkID = if ($ConfiguredPending) { '' } else { $NetworkId }
         EndpointID = if ($Running) { $prefix * 32 } else { '' }
         Gateway = if ($Running) { "172.$prefix.0.1" } else { '' }
         IPAddress = if ($Running) { "172.$prefix.0.2" } else { '' }
@@ -197,13 +216,20 @@ function New-Attachment {
         GlobalIPv6Address = ''
         GlobalIPv6PrefixLen = 0
         MacAddress = if ($Running) { "02:42:ac:$prefix`:00:02" } else { '' }
-        DriverOpts = $null
+        DriverOpts = if ($ConfiguredPending) { [ordered]@{} } else { $null }
         GwPriority = 0
+        DNSNames = @(
+            $postgresId.Substring(0, 12), 'postgres', 'weatherpoly-postgres-1'
+        )
     }
 }
 
 function New-PostgresInspect {
-    param([Parameter(Mandatory = $true)][string] $Root, [switch] $Running)
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [switch] $Running,
+        [switch] $ConfiguredPending
+    )
     $hbaSource = (Join-Path $Root 'ops\postgres\stratus-pg_hba.conf').Replace('\', '/')
     $ports = if ($Running) {
         [ordered]@{ '5432/tcp' = @([ordered]@{ HostIp = '127.0.0.1'; HostPort = '5432' }) }
@@ -262,7 +288,8 @@ function New-PostgresInspect {
                 weatherpoly_default = New-Attachment -NetworkId $defaultNetworkId `
                     -Network default -Running:$Running
                 'weatherpoly_safety-plane' = New-Attachment -NetworkId $safetyNetworkId `
-                    -Network safety -Running:$Running
+                    -Network safety -Running:$Running `
+                    -ConfiguredPending:$ConfiguredPending
             }
         }
     }
@@ -322,6 +349,12 @@ public static class $mockTypeName
     }
     public static int Main(string[] args)
     {
+        File.AppendAllText(P("scoped-commands.log"), String.Join("\u001f", args) + Environment.NewLine);
+        if (args.Length < 3 || args[0] != "--context" || args[1] != "desktop-linux")
+            return 96;
+        string[] semantic = new string[args.Length - 2];
+        Array.Copy(args, 2, semantic, 0, semantic.Length);
+        args = semantic;
         File.AppendAllText(P("commands.log"), String.Join("\u001f", args) + Environment.NewLine);
         if (Exact(args, "context", "show")) { Console.WriteLine("desktop-linux"); return 0; }
         if (Exact(args, "context", "inspect", "desktop-linux", "--format", "{{json .Endpoints.docker}}"))
@@ -360,9 +393,10 @@ public static class $mockTypeName
             if (File.ReadAllText(P("state.txt")).Trim() == "running") Console.WriteLine("$postgresId");
             return 0;
         }
-        if (Exact(args, "stop", "--time", "15", "$postgresId"))
+        if (Exact(args, "stop", "--timeout", "15", "$postgresId"))
         {
             if (File.Exists(P("hang-stop.flag"))) { Thread.Sleep(60000); return 91; }
+            if (File.ReadAllText(P("state.txt")).Trim() != "running") return 34;
             if (File.Exists(P("ambiguous.flag"))) File.Delete(P("ambiguous.flag"));
             File.WriteAllText(P("state.txt"), "stopped");
             Console.WriteLine("$postgresId");
@@ -398,6 +432,9 @@ $patched = $source.Replace(
     '$dockerStopWallClockTimeoutSeconds = 25',
     '$dockerStopWallClockTimeoutSeconds = 1'
 ).Replace(
+    '$startFenceAcquireAdvisorySeconds = 20',
+    '$startFenceAcquireAdvisorySeconds = 2'
+).Replace(
     '$pollMilliseconds = 200',
     '$pollMilliseconds = 50'
 )
@@ -416,14 +453,15 @@ $currentOwnerStart = ([DateTimeOffset]::new(
 
 function New-Case {
     param([string] $Name, [int] $Owner = $PID, [string] $OwnerStart = $currentOwnerStart,
-        [int] $HeartbeatTimeout = 5, [int] $DeadlineSeconds = 30)
+        [int] $HeartbeatTimeout = 5, [int] $DeadlineSeconds = 30,
+        [switch] $ConfiguredPending)
     $root = Join-Path $temporaryRoot $Name
     $evidence = Join-Path $root 'evidence'
     $hbaParent = Join-Path $root 'ops\postgres'
     [void](New-Item -ItemType Directory -Path $evidence, $hbaParent -Force)
     [IO.File]::WriteAllText((Join-Path $hbaParent 'stratus-pg_hba.conf'), 'fixture', $utf8)
     Write-FixtureJson -Name 'postgres-stopped.json' -Value (
-        New-PostgresInspect -Root $root
+        New-PostgresInspect -Root $root -ConfiguredPending:$ConfiguredPending
     )
     Write-FixtureJson -Name 'postgres-running.json' -Value (
         New-PostgresInspect -Root $root -Running
@@ -437,10 +475,22 @@ function New-Case {
     $heartbeatPath = Join-Path $evidence 'heartbeat.json'
     $commitPath = Join-Path $evidence 'commit.json'
     $livePath = Join-Path $evidence 'live.json'
+    $startFencePath = Join-Path $evidence 'start-fence.lock'
+    $startRevokePath = Join-Path $evidence 'start-revoked.json'
+    $startAttemptPath = Join-Path $evidence 'start-attempt.json'
+    $startCompletionPath = Join-Path $evidence 'start-complete.json'
     $repairPath = Join-Path $evidence 'network-repair.json'
+    Write-JsonCreateNew -Path $startFencePath -Value ([ordered]@{
+        format = 'stratus-successor-transition-start-fence-v1'
+        session_id = $session
+        owner_pid = [int]$Owner
+        owner_start_time_utc = $OwnerStart
+        created_at = $acceptedAt.ToString('o')
+    })
+    $startFenceSha = Get-FileSha256 -Path $startFencePath
     [IO.File]::WriteAllText(
         $repairPath,
-        '{"format":"stratus-stopped-postgres-safety-plane-repair-v1","accepted":true}',
+        '{"format":"stratus-stopped-postgres-safety-plane-repair-v2","accepted":true}',
         $utf8
     )
     $repairSha = Get-FileSha256 -Path $repairPath
@@ -450,7 +500,12 @@ function New-Case {
         payload_sha256 = '1' * 64
         accepted_at = $acceptedAt.ToString('o')
         expires_at = $acceptedAt.AddSeconds(600).ToString('o')
-        disposition = 'connected_by_this_invocation'
+        disposition = if ($ConfiguredPending) {
+            'verified_configured_pending_existing'
+        }
+        else {
+            'connected_by_this_invocation'
+        }
         post_first_sha256 = '2' * 64
         post_second_sha256 = '2' * 64
         final_attachment_sha256 = '3' * 64
@@ -484,7 +539,7 @@ function New-Case {
                 start_command_issued = $false; start_completed = $false
             }
             watchdog_handoff = [ordered]@{
-                format = 'stratus-successor-transition-watchdog-handoff-v1'
+                format = 'stratus-successor-transition-watchdog-handoff-v3'
                 session_id = $session
                 owner_pid = [int]$Owner
                 owner_start_time_utc = $OwnerStart
@@ -496,6 +551,11 @@ function New-Case {
                 commit_path = $commitPath
                 live_path = $livePath
                 prestart_path = $preStartPath
+                start_fence_path = $startFencePath
+                start_fence_sha256 = $startFenceSha
+                start_revoke_path = $startRevokePath
+                start_attempt_path = $startAttemptPath
+                start_completion_path = $startCompletionPath
             }
         }
         authorization = [ordered]@{
@@ -528,6 +588,11 @@ function New-Case {
         heartbeat = $heartbeatPath
         commit = $commitPath
         live = $livePath
+        start_fence = $startFencePath
+        start_fence_sha = $startFenceSha
+        start_revoke = $startRevokePath
+        start_attempt = $startAttemptPath
+        start_completion = $startCompletionPath
         control = Join-Path $evidence 'control'
     }
 }
@@ -552,6 +617,11 @@ function Start-Watchdog {
         '-LiveAcceptancePath', $Case.live,
         '-PreStartAttestationPath', $Case.prestart,
         '-ExpectedPreStartSha256', $Case.prestart_sha,
+        '-StartFencePath', $Case.start_fence,
+        '-ExpectedStartFenceSha256', $Case.start_fence_sha,
+        '-StartRevokePath', $Case.start_revoke,
+        '-StartAttemptPath', $Case.start_attempt,
+        '-StartCompletionPath', $Case.start_completion,
         '-PostgresContainer', $postgresId
     )
     $info = [Diagnostics.ProcessStartInfo]::new()
@@ -613,7 +683,7 @@ function Wait-Watchdog {
     param([object] $Case, [object] $Run, [int] $ExpectedExit, [string] $ExpectedStatus)
     if (-not $Run.process.WaitForExit(20000)) {
         try { $Run.process.Kill() } catch { }
-        throw 'Watchdog fixture did not terminate.'
+        throw "Watchdog fixture did not terminate: $($Case.root)"
     }
     $stdout = $Run.stdout.GetAwaiter().GetResult()
     $stderr = $Run.stderr.GetAwaiter().GetResult()
@@ -638,7 +708,7 @@ function Wait-Watchdog {
     $actualAuthorizationNames = @($receipt.authorization.PSObject.Properties.Name)
     [Array]::Sort($authorizationNames, [StringComparer]::Ordinal)
     [Array]::Sort($actualAuthorizationNames, [StringComparer]::Ordinal)
-    $expectedApiAuthorization = ($ExpectedStatus -ceq 'success')
+    $expectedApiAuthorization = $false
     if (
         ($actualAuthorizationNames -join "`n") -cne
             ($authorizationNames -join "`n") -or
@@ -654,6 +724,20 @@ function Wait-Watchdog {
     }
     if ($ExpectedStatus -ceq 'success' -and $null -ne $receipt.failure) {
         throw 'Successful watchdog receipt failure must be native JSON null.'
+    }
+    if ($ExpectedStatus -ceq 'success') {
+        if (Test-Path -LiteralPath $Case.start_revoke) {
+            throw 'Successful watchdog unexpectedly published a start revoke marker.'
+        }
+    }
+    elseif (
+        -not (Test-Path -LiteralPath $Case.start_revoke -PathType Leaf) -or
+        (Get-Item -LiteralPath $Case.start_revoke).Length -le 0 -or
+        -not $receipt.containment.start_revoke_present -or
+        -not $receipt.containment.start_fence_lock_acquired -or
+        -not $receipt.containment.final_after_fence
+    ) {
+        throw 'Contained watchdog exit lacks durable revoke and final fenced containment.'
     }
     $Run.process.Dispose()
     return $receipt
@@ -673,6 +757,74 @@ function Wait-ControlMarker {
     throw "Timed out waiting for watchdog test marker $Name."
 }
 
+function Write-StartProtocol {
+    param(
+        [Parameter(Mandatory = $true)][object] $Case,
+        [switch] $Complete
+    )
+
+    $fence = [IO.FileStream]::new(
+        $Case.start_fence, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+        [IO.FileShare]::None
+    )
+    try {
+        $issuedAt = [DateTimeOffset]::UtcNow
+        Write-JsonCreateNew -Path $Case.start_attempt -Value ([ordered]@{
+            format = 'stratus-successor-transition-start-attempt-v1'
+            session_id = $Case.session
+            owner_pid = [int]$Case.owner_pid
+            owner_start_time_utc = $Case.owner_start
+            start_fence_path = $Case.start_fence
+            start_fence_sha256 = $Case.start_fence_sha
+            command = @('start', $postgresId)
+            issued_at = $issuedAt.ToString('o')
+        })
+        $attemptSha = Get-FileSha256 -Path $Case.start_attempt
+        $completionSha = $null
+        if ($Complete) {
+            $requestedAt = [DateTimeOffset]::UtcNow
+            $completedAt = [DateTimeOffset]::UtcNow
+            $boundedStart = [ordered]@{
+                command = @('start', $postgresId)
+                docker_executable_path = $dockerPath
+                docker_executable_sha256 = $fakeDockerSha
+                process_timeout_milliseconds = 15000
+                stdout_maximum_bytes = 4096
+                stderr_maximum_bytes = 4096
+                requested_at = $requestedAt.ToString('o')
+                completed_at = $completedAt.ToString('o')
+                exit_code = 0
+                output_container_id = $postgresId
+                timed_out = $false
+                output_exceeded = $false
+                process_started = $true
+                process_exited = $true
+                process_id = [int]$PID
+                kill_issued = $false
+            }
+            Write-JsonCreateNew -Path $Case.start_completion -Value ([ordered]@{
+                format = 'stratus-successor-transition-start-complete-v1'
+                session_id = $Case.session
+                owner_pid = [int]$Case.owner_pid
+                owner_start_time_utc = $Case.owner_start
+                start_attempt_path = $Case.start_attempt
+                start_attempt_sha256 = $attemptSha
+                outcome = 'started'
+                completed_at = $completedAt.ToString('o')
+                bounded_start = $boundedStart
+            })
+            $completionSha = Get-FileSha256 -Path $Case.start_completion
+        }
+        return [pscustomobject]@{
+            attempt_sha256 = $attemptSha
+            completion_sha256 = $completionSha
+        }
+    }
+    finally {
+        $fence.Dispose()
+    }
+}
+
 function New-LiveAndCommit {
     param(
         [object] $Case,
@@ -682,6 +834,7 @@ function New-LiveAndCommit {
         [ValidateRange(0, 5000)][int] $HeartbeatHoldOpenMilliseconds = 0,
         [ValidateRange(0, 5000)][int] $CommitHoldOpenMilliseconds = 0
     )
+    $startProtocol = Write-StartProtocol -Case $Case -Complete
     [IO.File]::WriteAllText((Join-Path $Case.control 'state.txt'), 'running', $utf8)
     Write-JsonCreateNew -Path $Case.heartbeat -Value ([ordered]@{
         format = 'stratus-successor-transition-watchdog-heartbeat-v1'
@@ -732,7 +885,7 @@ function New-LiveAndCommit {
                     start_command_issued = $true; start_completed = $true
                 }
                 watchdog = [ordered]@{
-                    format = 'stratus-successor-transition-watchdog-binding-v1'
+                    format = 'stratus-successor-transition-watchdog-binding-v3'
                     session_id = $Case.session
                     owner_pid = [int]$Case.owner_pid
                     owner_start_time_utc = $Case.owner_start
@@ -743,6 +896,14 @@ function New-LiveAndCommit {
                     receipt_path = $Case.receipt
                     heartbeat_path = $Case.heartbeat
                     commit_path = $Case.commit
+                    start_fence_path = $Case.start_fence
+                    start_fence_sha256 = $Case.start_fence_sha
+                    start_revoke_path = $Case.start_revoke
+                    start_attempt_path = $Case.start_attempt
+                    start_attempt_sha256 = $startProtocol.attempt_sha256
+                    start_completion_path = $Case.start_completion
+                    start_completion_sha256 = $startProtocol.completion_sha256
+                    start_revoke_absent = $true
                 }
                 rollback = [ordered]@{
                     on_failure = $true; stop_timeout_seconds = 15; executed = $false
@@ -815,10 +976,68 @@ function New-Sleeper {
     return [pscustomobject]@{ process = $process; started = $started }
 }
 
+function New-FenceHoldingOwner {
+    param([Parameter(Mandatory = $true)][string] $Name)
+
+    $holderRoot = Join-Path $temporaryRoot ("$Name-owner")
+    [void](New-Item -ItemType Directory -Path $holderRoot -Force)
+    $commandPath = Join-Path $holderRoot 'fence-path.txt'
+    $readyPath = Join-Path $holderRoot 'fence-held.flag'
+    $scriptPath = Join-Path $holderRoot 'hold-fence.ps1'
+    $holderSource = @'
+param([string] $CommandPath, [string] $ReadyPath)
+$ErrorActionPreference = 'Stop'
+while (-not (Test-Path -LiteralPath $CommandPath -PathType Leaf)) {
+    Start-Sleep -Milliseconds 20
+}
+$fencePath = [IO.File]::ReadAllText($CommandPath).Trim()
+$stream = [IO.FileStream]::new(
+    $fencePath, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+    [IO.FileShare]::None
+)
+try {
+    [IO.File]::WriteAllText($ReadyPath, 'held', [Text.UTF8Encoding]::new($false))
+    while ($true) { Start-Sleep -Seconds 1 }
+}
+finally {
+    $stream.Dispose()
+}
+'@
+    [IO.File]::WriteAllText($scriptPath, $holderSource, $utf8)
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $shellPath
+    $info.Arguments = @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
+        (ConvertTo-ArgumentToken -Value $scriptPath),
+        '-CommandPath', (ConvertTo-ArgumentToken -Value $commandPath),
+        '-ReadyPath', (ConvertTo-ArgumentToken -Value $readyPath)
+    ) -join ' '
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $process = [Diagnostics.Process]::Start($info)
+    $process.Refresh()
+    $started = ([DateTimeOffset]::new(
+        $process.StartTime.ToUniversalTime(), [TimeSpan]::Zero
+    )).ToString('o')
+    return [pscustomobject]@{
+        process = $process
+        started = $started
+        command = $commandPath
+        ready = $readyPath
+    }
+}
+
 $active = [Collections.Generic.List[Diagnostics.Process]]::new()
 try {
     # A valid, hash-bound Live commit is the only path that leaves PostgreSQL running.
     $case = New-Case -Name 'valid-commit'
+    # Represents a concurrent change to Docker's process-global current
+    # context. The fake accepts only an explicit immutable context prefix, so
+    # this transition remains bound to desktop-linux.
+    [void](New-Item -ItemType Directory -Path $case.control -Force)
+    [IO.File]::WriteAllText(
+        (Join-Path $case.control 'current-context-swapped.flag'), '1', $utf8
+    )
     $run = Start-Watchdog -Case $case
     $active.Add($run.process)
     $lease = Wait-Lease -Case $case -Run $run
@@ -830,6 +1049,95 @@ try {
     }
     if ($receipt.trigger -cne 'accepted_live_commit') {
         throw 'Valid commit receipt has wrong trigger.'
+    }
+
+    # The observed Docker Desktop 28.3.2 stopped safety-plane placeholder is
+    # admissible only before start; the running proof must materialize it.
+    $case = New-Case -Name 'valid-configured-pending-commit' -ConfiguredPending
+    $run = Start-Watchdog -Case $case
+    $active.Add($run.process)
+    $lease = Wait-Lease -Case $case -Run $run
+    New-LiveAndCommit -Case $case -Lease $lease
+    $receipt = Wait-Watchdog -Case $case -Run $run -ExpectedExit 0 `
+        -ExpectedStatus success
+    if (
+        (Get-Content -Raw (Join-Path $case.control 'state.txt')).Trim() -cne 'running' -or
+        $receipt.trigger -cne 'accepted_live_commit'
+    ) {
+        throw 'Configured-pending stopped attachment did not materialize into exact Live proof.'
+    }
+
+    # Before any durable start attempt, winning the fence and publishing the
+    # revoke proves that no start crossed the boundary; exact stopped proof is
+    # sufficient and an already-stopped Docker stop must not be misclassified.
+    $owner = New-Sleeper
+    $active.Add($owner.process)
+    $case = New-Case -Name 'configured-pending-before-start-containment' `
+        -Owner $owner.process.Id -OwnerStart $owner.started -HeartbeatTimeout 10 `
+        -ConfiguredPending
+    $run = Start-Watchdog -Case $case
+    $active.Add($run.process)
+    [void](Wait-Lease -Case $case -Run $run)
+    $owner.process.Kill(); [void]$owner.process.WaitForExit(5000)
+    $receipt = Wait-Watchdog -Case $case -Run $run -ExpectedExit 2 `
+        -ExpectedStatus contained
+    $commands = @(Get-Content -LiteralPath (Join-Path $case.control 'commands.log'))
+    if (
+        $receipt.trigger -cne 'owner_process_lost' -or
+        $receipt.containment.attempted_stop -or
+        -not $receipt.containment.verified_stopped -or
+        @($commands | Where-Object { $_ -like "stop*${postgresId}" }).Count -ne 0
+    ) {
+        throw 'Pre-attempt stopped containment issued an unnecessary Docker stop.'
+    }
+
+    # A placeholder is never admissible after start, even if all endpoint fields
+    # otherwise look live; commit validation must stop the exact retained ID.
+    $case = New-Case -Name 'running-configured-pending-rejected' -ConfiguredPending
+    $run = Start-Watchdog -Case $case
+    $active.Add($run.process)
+    $lease = Wait-Lease -Case $case -Run $run
+    Write-FixtureJson -Name 'postgres-running.json' -Value (
+        New-PostgresInspect -Root $case.root -Running -ConfiguredPending
+    )
+    New-LiveAndCommit -Case $case -Lease $lease
+    $receipt = Wait-Watchdog -Case $case -Run $run -ExpectedExit 2 `
+        -ExpectedStatus contained
+    $commands = @(Get-Content -LiteralPath (Join-Path $case.control 'commands.log'))
+    if (
+        $receipt.trigger -cne 'invalid_or_forged_commit' -or
+        -not $receipt.containment.attempted_stop -or
+        -not $receipt.containment.verified_stopped -or
+        @($commands | Where-Object { $_ -like "stop*${postgresId}" }).Count -ne 1
+    ) {
+        throw 'Running configured-pending near miss was not contained exactly once.'
+    }
+    Write-FixtureJson -Name 'postgres-running.json' -Value (
+        New-PostgresInspect -Root $case.root -Running
+    )
+
+    # A real start followed by failure can materialize exact live endpoints and
+    # return to the original configured-pending stopped representation.
+    $owner = New-Sleeper
+    $active.Add($owner.process)
+    $case = New-Case -Name 'configured-pending-after-start-containment' `
+        -Owner $owner.process.Id -OwnerStart $owner.started -HeartbeatTimeout 10 `
+        -ConfiguredPending
+    $run = Start-Watchdog -Case $case
+    $active.Add($run.process)
+    [void](Wait-Lease -Case $case -Run $run)
+    [IO.File]::WriteAllText((Join-Path $case.control 'state.txt'), 'running', $utf8)
+    $owner.process.Kill(); [void]$owner.process.WaitForExit(5000)
+    $receipt = Wait-Watchdog -Case $case -Run $run -ExpectedExit 2 `
+        -ExpectedStatus contained
+    $commands = @(Get-Content -LiteralPath (Join-Path $case.control 'commands.log'))
+    if (
+        $receipt.trigger -cne 'owner_process_lost' -or
+        -not $receipt.containment.attempted_stop -or
+        -not $receipt.containment.verified_stopped -or
+        @($commands | Where-Object { $_ -like "stop*${postgresId}" }).Count -ne 1
+    ) {
+        throw 'Post-start containment did not accept the exact stopped pending result.'
     }
 
     # A commit cannot outrun owner continuity. Hold the watchdog inside its
@@ -927,6 +1235,76 @@ try {
         throw 'Stale heartbeat did not cause containment.'
     }
 
+    # A suspended parent may hold the start fence indefinitely after its final
+    # local checks.  The watchdog must remain live and non-terminal until it
+    # wins that fence; only then may it durably revoke and claim containment.
+    $heldFenceOwner = New-FenceHoldingOwner -Name 'held-start-fence'
+    $active.Add($heldFenceOwner.process)
+    $case = New-Case -Name 'held-start-fence' `
+        -Owner $heldFenceOwner.process.Id -OwnerStart $heldFenceOwner.started `
+        -HeartbeatTimeout 3 -DeadlineSeconds 30
+    $run = Start-Watchdog -Case $case
+    $active.Add($run.process)
+    [void](Wait-Lease -Case $case -Run $run)
+    [IO.File]::WriteAllText(
+        $heldFenceOwner.command, $case.start_fence, $utf8
+    )
+    $holderReadyDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while (-not (Test-Path -LiteralPath $heldFenceOwner.ready -PathType Leaf)) {
+        if ($heldFenceOwner.process.HasExited -or
+            [DateTimeOffset]::UtcNow -ge $holderReadyDeadline) {
+            throw 'Exact owner did not acquire the start fence for takeover testing.'
+        }
+        Start-Sleep -Milliseconds 20
+    }
+    [IO.File]::WriteAllText((Join-Path $case.control 'state.txt'), 'running', $utf8)
+    $receipt = Wait-Watchdog -Case $case -Run $run -ExpectedExit 2 `
+        -ExpectedStatus contained
+    if (
+        $receipt.trigger -cne 'heartbeat_stale' -or
+        -not $receipt.containment.fence_acquire_advisory_exceeded -or
+        -not $receipt.containment.owner_terminated_for_fence_recovery -or
+        $receipt.containment.owner_termination_attempt_count -lt 1 -or
+        -not $heldFenceOwner.process.HasExited
+    ) {
+        throw 'Watchdog did not terminate the exact stale owner and then contain under the fence.'
+    }
+
+    # A killed start client can leave a daemon request queued while every
+    # stopped snapshot still looks exact.  The durable attempt without a
+    # completion must remain nonterminal for longer than the former quiet
+    # window, then stop only after the delayed start becomes observable.
+    $case = New-Case -Name 'late-daemon-start-after-client-timeout' `
+        -HeartbeatTimeout 10 -DeadlineSeconds 30
+    $run = Start-Watchdog -Case $case
+    $active.Add($run.process)
+    [void](Wait-Lease -Case $case -Run $run)
+    [void](Write-StartProtocol -Case $case)
+    Start-Sleep -Seconds 3
+    if (
+        $run.process.HasExited -or
+        (Get-Item -LiteralPath $case.receipt).Length -ne 0 -or
+        -not (Test-Path -LiteralPath $case.start_revoke -PathType Leaf)
+    ) {
+        throw 'Unresolved daemon start was terminalized before materialization.'
+    }
+    [IO.File]::WriteAllText(
+        (Join-Path $case.control 'state.txt'), 'running', $utf8
+    )
+    $receipt = Wait-Watchdog -Case $case -Run $run -ExpectedExit 2 `
+        -ExpectedStatus contained
+    $commands = @(Get-Content -LiteralPath (Join-Path $case.control 'commands.log'))
+    if (
+        $receipt.trigger -cne 'ambiguous_start_attempt' -or
+        $receipt.containment.start_protocol_status -cne 'unresolved' -or
+        -not $receipt.containment.causal_materialization_required -or
+        -not $receipt.containment.materialization_observed -or
+        -not $receipt.containment.docker_stop_succeeded -or
+        @($commands | Where-Object { $_ -like "stop*${postgresId}" }).Count -ne 1
+    ) {
+        throw 'Delayed daemon start did not receive causal post-materialization containment.'
+    }
+
     # Malformed and forged commits fail closed.
     foreach ($variant in @('malformed-marker', 'forged-live-hash', 'malformed-live')) {
         $case = New-Case -Name $variant
@@ -975,7 +1353,8 @@ try {
         throw 'Ambiguous start did not attempt and verify exact containment.'
     }
 
-    # A hung Docker stop is killed by wall clock and cannot yield accepted containment.
+    # A hung Docker stop is killed by wall clock, but the recovery authority
+    # stays live and retries instead of publishing an unsafe terminal failure.
     $owner = New-Sleeper
     $active.Add($owner.process)
     $case = New-Case -Name 'hung-stop' -Owner $owner.process.Id `
@@ -986,12 +1365,19 @@ try {
     [IO.File]::WriteAllText((Join-Path $case.control 'state.txt'), 'running', $utf8)
     [IO.File]::WriteAllText((Join-Path $case.control 'hang-stop.flag'), '1', $utf8)
     $owner.process.Kill(); [void]$owner.process.WaitForExit(5000)
-    $receipt = Wait-Watchdog -Case $case -Run $run -ExpectedExit 3 -ExpectedStatus failure
-    if ($receipt.containment.verified_stopped) {
-        throw 'Hung stop incorrectly claimed verified containment.'
+    Start-Sleep -Seconds 3
+    if ($run.process.HasExited -or (Get-Item -LiteralPath $case.receipt).Length -ne 0) {
+        throw 'Hung stop incorrectly produced a terminal watchdog result.'
+    }
+    Remove-Item -LiteralPath (Join-Path $case.control 'hang-stop.flag') -Force
+    $receipt = Wait-Watchdog -Case $case -Run $run -ExpectedExit 2 `
+        -ExpectedStatus contained
+    if (-not $receipt.containment.verified_stopped) {
+        throw 'Watchdog did not recover and contain after the hung stop cleared.'
     }
 
-    # Engine drift is terminal failure, but still attempts exact-ID containment.
+    # Engine drift is nonterminal: the watchdog must not mutate an unapproved
+    # engine or exit.  Once the exact engine returns, containment may finish.
     $owner = New-Sleeper
     $active.Add($owner.process)
     $case = New-Case -Name 'engine-drift' -Owner $owner.process.Id `
@@ -1002,14 +1388,79 @@ try {
     [IO.File]::WriteAllText((Join-Path $case.control 'state.txt'), 'running', $utf8)
     [IO.File]::WriteAllText((Join-Path $case.control 'engine-drift.flag'), '1', $utf8)
     $owner.process.Kill(); [void]$owner.process.WaitForExit(5000)
-    $receipt = Wait-Watchdog -Case $case -Run $run -ExpectedExit 3 -ExpectedStatus failure
+    Start-Sleep -Seconds 2
+    if ($run.process.HasExited -or (Get-Item -LiteralPath $case.receipt).Length -ne 0) {
+        throw 'Engine drift incorrectly produced a terminal watchdog result.'
+    }
     $commands = Get-Content -LiteralPath (Join-Path $case.control 'commands.log')
-    if (@($commands | Where-Object { $_ -like "stop*${postgresId}" }).Count -ne 1) {
-        throw 'Engine drift did not attempt one exact-ID Docker stop.'
+    if (@($commands | Where-Object { $_ -like "stop*${postgresId}" }).Count -ne 0) {
+        throw 'Engine drift attempted mutation against an unapproved engine.'
+    }
+    Remove-Item -LiteralPath (Join-Path $case.control 'engine-drift.flag') -Force
+    $receipt = Wait-Watchdog -Case $case -Run $run -ExpectedExit 2 `
+        -ExpectedStatus contained
+    if (-not $receipt.containment.verified_stopped) {
+        throw 'Watchdog did not contain after the approved engine returned.'
+    }
+
+    # Cleanup failure must not erase the primary watchdog failure or the
+    # durable containment record.
+    $patchedNewLine = if ($patched.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $cleanupInjected = $patched.Replace(
+        '        $script:leaseArmed = $true',
+        '        $script:leaseArmed = $true' + $patchedNewLine +
+            "        throw 'synthetic watchdog primary failure'"
+    ).Replace(
+        'try { $script:dockerExecutableLock.Dispose() }',
+        "try { throw 'synthetic watchdog cleanup failure' }"
+    )
+    if (
+        -not $cleanupInjected.Contains('synthetic watchdog primary failure') -or
+        -not $cleanupInjected.Contains('synthetic watchdog cleanup failure')
+    ) {
+        throw 'Could not instrument watchdog cleanup aggregation.'
+    }
+    try {
+        [IO.File]::WriteAllText($patchedWatchdog, $cleanupInjected, $utf8)
+        $case = New-Case -Name 'cleanup-aggregation'
+        $run = Start-Watchdog -Case $case
+        $active.Add($run.process)
+        if (-not $run.process.WaitForExit(15000)) {
+            $run.process.Kill()
+            throw 'Cleanup aggregation watchdog did not terminate.'
+        }
+        $cleanupStdout = $run.stdout.GetAwaiter().GetResult()
+        $cleanupStderr = $run.stderr.GetAwaiter().GetResult()
+        if (
+            $run.process.ExitCode -ne 3 -or
+            $cleanupStderr -notlike '*synthetic watchdog primary failure*' -or
+            $cleanupStderr -notlike '*synthetic watchdog cleanup failure*' -or
+            -not (Test-Path -LiteralPath $case.start_revoke) -or
+            -not (Test-Path -LiteralPath $case.receipt)
+        ) {
+            throw (
+                'Watchdog cleanup aggregation lost the primary, cleanup, ' +
+                'revoke, or terminal receipt. stdout=' + $cleanupStdout +
+                ' stderr=' + $cleanupStderr
+            )
+        }
+        $cleanupReceipt = ConvertFrom-TestJsonPreservingDates -Json (
+            Get-Content -LiteralPath $case.receipt -Raw
+        )
+        if ($cleanupReceipt.status -notin @('contained', 'failure')) {
+            throw 'Cleanup aggregation weakened the watchdog containment receipt.'
+        }
+        $run.process.Dispose()
+    }
+    finally {
+        [IO.File]::WriteAllText($patchedWatchdog, $patched, $utf8)
     }
 
     # Every pre-existing output/control path blocks before the first Docker call.
-    foreach ($leaf in @('lease', 'receipt', 'heartbeat', 'commit', 'live')) {
+    foreach ($leaf in @(
+        'lease', 'receipt', 'heartbeat', 'commit', 'live', 'start_revoke',
+        'start_attempt', 'start_completion'
+    )) {
         $case = New-Case -Name "existing-$leaf"
         [void](New-Item -ItemType Directory -Path $case.control -Force)
         [IO.File]::WriteAllText((Join-Path $case.control 'state.txt'), 'stopped', $utf8)
@@ -1029,6 +1480,25 @@ try {
         [void]$run.stdout.GetAwaiter().GetResult()
         [void]$run.stderr.GetAwaiter().GetResult()
         $run.process.Dispose()
+    }
+
+    $scopedLogs = @(Get-ChildItem -LiteralPath $temporaryRoot -Recurse `
+        -Filter 'scoped-commands.log' -File)
+    if ($scopedLogs.Count -eq 0) {
+        throw 'Watchdog tests observed no scoped Docker commands.'
+    }
+    $separator = [string][char]31
+    foreach ($log in $scopedLogs) {
+        foreach ($line in @(Get-Content -LiteralPath $log.FullName)) {
+            $parts = @([string]$line -split $separator)
+            if (
+                $parts.Count -lt 3 -or
+                $parts[0] -cne '--context' -or
+                $parts[1] -cne 'desktop-linux'
+            ) {
+                throw 'Watchdog issued a Docker child without the immutable context prefix.'
+            }
+        }
     }
 
     'Stratus successor transition watchdog regression checks passed.'

@@ -10,6 +10,172 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Validate non-authorizing parent bootstrap wiring on Windows PowerShell 5.1
+        shell: powershell
+        run: .\scripts\tests\Test-StratusParentStageBootstrap.ps1
+
+      - name: Validate non-authorizing parent bootstrap wiring on PowerShell 7
+        shell: pwsh
+        run: .\scripts\tests\Test-StratusParentStageBootstrap.ps1
+
+      - name: Validate parent prepared-lease, transition-ACK and cleanup models on Windows PowerShell 5.1
+        shell: powershell
+        run: .\scripts\tests\Test-StratusParentStageBootstrapContracts.ps1
+
+      - name: Validate parent prepared-lease, transition-ACK and cleanup models on PowerShell 7
+        shell: pwsh
+        run: .\scripts\tests\Test-StratusParentStageBootstrapContracts.ps1
+
+      - name: Validate non-authorizing parent continuation wiring on Windows PowerShell 5.1
+        shell: powershell
+        run: .\scripts\tests\Test-StratusParentStageContinuation.ps1
+
+      - name: Validate non-authorizing parent continuation wiring on PowerShell 7
+        shell: pwsh
+        run: .\scripts\tests\Test-StratusParentStageContinuation.ps1
+
+      - name: Validate parent fence-loss regression on Windows PowerShell 5.1
+        shell: powershell
+        run: .\scripts\tests\Test-StratusParentMutationFence.ps1
+
+      - name: Validate parent fence-loss regression on PowerShell 7
+        shell: pwsh
+        run: .\scripts\tests\Test-StratusParentMutationFence.ps1
+
+      - name: Validate parent transition lineage leaf on Windows PowerShell 5.1
+        shell: powershell
+        run: .\scripts\tests\Test-StratusParentTransitionLineage.ps1
+
+      - name: Validate parent transition lineage leaf on PowerShell 7
+        shell: pwsh
+        run: .\scripts\tests\Test-StratusParentTransitionLineage.ps1
+
+      - name: Validate parent retained transition evidence on Windows PowerShell 5.1
+        shell: powershell
+        run: .\scripts\tests\Test-StratusParentTransitionEvidence.ps1
+
+      - name: Validate parent retained transition evidence on PowerShell 7
+        shell: pwsh
+        run: .\scripts\tests\Test-StratusParentTransitionEvidence.ps1
+
+      - name: Validate non-authorizing parent transition closure on Windows PowerShell 5.1
+        shell: powershell
+        run: .\scripts\tests\Test-StratusParentTransitionClosure.ps1
+
+      - name: Validate non-authorizing parent transition closure on PowerShell 7
+        shell: pwsh
+        run: .\scripts\tests\Test-StratusParentTransitionClosure.ps1
+
+      - name: Validate owned observer wire and static contracts on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          .\scripts\tests\Test-StratusNativeChildBirthContracts.ps1
+          .\scripts\tests\Test-StratusParentObserverWire.ps1
+          .\scripts\tests\Test-StratusParentObserverNativeContracts.ps1
+          .\scripts\tests\Test-StratusParentObserverJson.ps1
+          .\scripts\tests\Test-StratusParentOwnedObserver.ps1
+
+      - name: Validate owned observer wire and static contracts on PowerShell 7
+        shell: pwsh
+        run: |
+          .\scripts\tests\Test-StratusNativeChildBirthContracts.ps1
+          .\scripts\tests\Test-StratusParentObserverWire.ps1
+          .\scripts\tests\Test-StratusParentObserverNativeContracts.ps1
+          .\scripts\tests\Test-StratusParentObserverJson.ps1
+          .\scripts\tests\Test-StratusParentOwnedObserver.ps1
+
+      - name: Validate command ownership source and pure import contracts on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          .\scripts\tests\Test-StratusCommandSessionContracts.ps1
+          .\scripts\tests\Test-StratusNativeCommandContracts.ps1
+          .\scripts\tests\Test-StratusParentCommandRuntimeContract.ps1
+          .\scripts\tests\Test-StratusParentCommandBuildInputs.ps1
+          .\scripts\tests\Test-StratusParentCommandBuildReceipt.ps1
+          .\scripts\tests\Test-StratusRuntimeBuildBootstrap.ps1
+          .\scripts\tests\Test-StratusSuspendAdmissionContracts.ps1
+          .\scripts\tests\Test-StratusBuildInputOwnershipContracts.ps1
+          .\scripts\tests\Test-StratusDisposableProducerContracts.ps1
+          .\scripts\tests\Test-StratusGuardianOwnerWatchContracts.ps1
+          .\scripts\tests\Test-StratusProducerControlEntryContracts.ps1
+          .\scripts\tests\Test-StratusContextSectionContracts.ps1
+          .\scripts\tests\Test-StratusContextCaptureContracts.ps1
+          .\scripts\tests\Test-StratusCompiledContextContracts.ps1
+          .\scripts\tests\Test-StratusProducerInputsContracts.ps1
+          .\scripts\tests\Test-StratusStartupPreloadContracts.ps1
+          .\scripts\tests\Test-StratusProducerContinuationContracts.ps1
+          .\scripts\tests\Test-StratusBirthJobPreparationContracts.ps1
+          .\scripts\tests\Test-StratusProducerCompilerContracts.ps1
+
+      - name: Validate command ownership source and pure import contracts on PowerShell 7
+        shell: pwsh
+        run: |
+          .\scripts\tests\Test-StratusCommandSessionContracts.ps1
+          .\scripts\tests\Test-StratusNativeCommandContracts.ps1
+          .\scripts\tests\Test-StratusParentCommandRuntimeContract.ps1
+          .\scripts\tests\Test-StratusParentCommandBuildInputs.ps1
+          .\scripts\tests\Test-StratusParentCommandBuildReceipt.ps1
+          .\scripts\tests\Test-StratusRuntimeBuildBootstrap.ps1
+          .\scripts\tests\Test-StratusSuspendAdmissionContracts.ps1
+          .\scripts\tests\Test-StratusBuildInputOwnershipContracts.ps1
+          .\scripts\tests\Test-StratusDisposableProducerContracts.ps1
+          .\scripts\tests\Test-StratusGuardianOwnerWatchContracts.ps1
+          .\scripts\tests\Test-StratusProducerControlEntryContracts.ps1
+          .\scripts\tests\Test-StratusContextSectionContracts.ps1
+          .\scripts\tests\Test-StratusContextCaptureContracts.ps1
+          .\scripts\tests\Test-StratusCompiledContextContracts.ps1
+          .\scripts\tests\Test-StratusProducerInputsContracts.ps1
+          .\scripts\tests\Test-StratusStartupPreloadContracts.ps1
+          .\scripts\tests\Test-StratusProducerContinuationContracts.ps1
+          .\scripts\tests\Test-StratusBirthJobPreparationContracts.ps1
+          .\scripts\tests\Test-StratusProducerCompilerContracts.ps1
+
+      - name: Validate non-authorizing Transition launch and wire on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          .\scripts\tests\Test-StratusTransitionWire.ps1
+          .\scripts\tests\Test-StratusTransitionNativeContracts.ps1
+          .\scripts\tests\Test-StratusParentTransitionLaunch.ps1
+          .\scripts\tests\Test-StratusParentTransitionAdmission.ps1
+          .\scripts\tests\Test-StratusTransitionCommandAdmission.ps1
+
+      - name: Validate non-authorizing Transition launch and wire on PowerShell 7
+        shell: pwsh
+        run: |
+          .\scripts\tests\Test-StratusTransitionWire.ps1
+          .\scripts\tests\Test-StratusTransitionNativeContracts.ps1
+          .\scripts\tests\Test-StratusParentTransitionLaunch.ps1
+          .\scripts\tests\Test-StratusParentTransitionAdmission.ps1
+          .\scripts\tests\Test-StratusTransitionCommandAdmission.ps1
+
+      - name: Validate private parent control contracts without native execution on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          .\scripts\tests\Test-StratusParentControlWire.ps1
+          .\scripts\tests\Test-StratusParentControlNativeContracts.ps1
+          .\scripts\tests\Test-StratusParentControlClient.ps1
+          .\scripts\tests\Test-StratusParentControlResponder.ps1
+          .\scripts\tests\Test-StratusParentControlInterop.ps1
+          .\scripts\tests\Test-StratusTransitionTerminationObservation.ps1
+          .\scripts\tests\Test-StratusParentControlDrainManaged.ps1
+          .\scripts\tests\Test-StratusParentControlDrainContracts.ps1
+          .\scripts\tests\Test-StratusParentControlDrainWiring.ps1
+          .\scripts\tests\Test-StratusParentCausalStop.ps1
+
+      - name: Validate private parent control contracts without native execution on PowerShell 7
+        shell: pwsh
+        run: |
+          .\scripts\tests\Test-StratusParentControlWire.ps1
+          .\scripts\tests\Test-StratusParentControlNativeContracts.ps1
+          .\scripts\tests\Test-StratusParentControlClient.ps1
+          .\scripts\tests\Test-StratusParentControlResponder.ps1
+          .\scripts\tests\Test-StratusParentControlInterop.ps1
+          .\scripts\tests\Test-StratusTransitionTerminationObservation.ps1
+          .\scripts\tests\Test-StratusParentControlDrainManaged.ps1
+          .\scripts\tests\Test-StratusParentControlDrainContracts.ps1
+          .\scripts\tests\Test-StratusParentControlDrainWiring.ps1
+          .\scripts\tests\Test-StratusParentCausalStop.ps1
+
       - name: Validate release contracts on Windows PowerShell 5.1
         shell: powershell
         run: |
@@ -17,12 +183,15 @@ jobs:
           .\scripts\tests\Test-StratusRuntimeLoadObserver.ps1
           .\scripts\tests\Test-StratusLoadGateArtifacts.ps1
           .\scripts\tests\Test-StratusReleaseImage.ps1
+          .\scripts\tests\Test-StratusR1AcceptanceSeal.ps1
           .\scripts\tests\Test-StratusPreStartTopology.ps1
           .\scripts\tests\Test-StratusReleaseRunbook.ps1
           .\scripts\tests\Test-StratusPreMigrationBackupGate.ps1
           .\scripts\tests\Test-StratusPostMigrationSuccessorGate.ps1
           .\scripts\tests\Test-StratusStoppedPostgresNetworkRepair.ps1
           .\scripts\tests\Test-StratusSuccessorTransitionWatchdog.ps1
+          # Primitive tests only; parent-stage protocol acceptance remains blocked.
+          .\scripts\tests\Test-StratusParentStageWatchdog.ps1
           .\scripts\tests\Test-StratusPaperCanary.ps1
           .\scripts\tests\Test-StratusPaperCanaryArtifacts.ps1
           .\scripts\tests\Test-StratusPaperCanaryStopBarrier.ps1
@@ -30,9 +199,14 @@ jobs:
       - name: Validate Windows-only successor contracts on PowerShell 7
         shell: pwsh
         run: |
+          .\scripts\tests\Test-StratusR1AcceptanceSeal.ps1
           .\scripts\tests\Test-StratusPostMigrationSuccessorGate.ps1
           .\scripts\tests\Test-StratusStoppedPostgresNetworkRepair.ps1
           .\scripts\tests\Test-StratusSuccessorTransitionWatchdog.ps1
+
+      - name: Validate blocked parent-stage native primitives on PowerShell 7
+        shell: pwsh
+        run: .\scripts\tests\Test-StratusParentStageWatchdog.ps1
 
   checks:
     runs-on: ubuntu-latest
