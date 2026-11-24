@@ -1,5 +1,12 @@
 # STRATUS
 
+> **Direction, 2026-11-24.** The trading thesis and the validation plan described
+> below are superseded by
+> [`docs/STRATEGY_REVIEW_2026-11.md`](docs/STRATEGY_REVIEW_2026-11.md). Polymarket
+> changed the resolution rules on 2026-08-23 and again on 2026-10-23; since then
+> market discovery blocks every new market as `station_missing`. Do not patch
+> that in isolation — follow the directives in the review.
+
 Phase 0 foundation for the Polymarket weather system. The current scope contains the
 PostgreSQL schema, the initial Alembic migration, and the deterministic Open-Meteo forecast
 collector and weather-market discovery for three active stations: KLGA, EGLC, and LFPB.

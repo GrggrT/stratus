@@ -1,0 +1,100 @@
+resolution regimes by first/last date:
+               min         max  count
+rsrc                                 
+metar   2026-10-23  2026-11-23    192
+nws_ts  2026-08-23  2026-10-22    362
+wu      2026-07-01  2026-08-23    322
+
+METAR-max reconstruction vs Polymarket winner, by regime:
+                       mean  count
+rsrc   city   kind                
+metar  london highest  1.00     32
+              lowest   1.00     32
+       nyc    highest  1.00     32
+              lowest   1.00     32
+       paris  highest  1.00     32
+              lowest   1.00     32
+nws_ts london highest  1.00     52
+              lowest   1.00     52
+       nyc    highest  0.98     52
+              lowest   1.00     52
+       paris  highest  0.98     52
+              lowest   1.00     52
+
+local hour when the final extreme was first reported (quantiles):
+                count  mean  std  min   10%   25%   50%   75%   90%   max
+city   kind                                                              
+london highest  84.00 12.35 4.39 0.33  5.53 12.33 13.33 14.83 15.33 21.33
+       lowest   84.00  8.15 7.84 0.33  0.48  3.33  4.83  7.83 23.33 23.83
+nyc    highest  84.00 13.25 4.71 0.85  3.25 12.85 14.85 15.85 15.85 21.85
+       lowest   84.00  7.36 6.83 0.85  0.85  3.85  5.85  6.85 21.85 23.85
+paris  highest  84.00 14.02 4.25 0.00 11.50 13.50 15.00 16.00 16.50 23.50
+       lowest   84.00  8.11 7.06 0.00  1.00  4.38  6.00  8.00 22.50 24.00
+
+== trades in already-impossible buckets after the killing METAR obs time (events where METAR reconstruction matches) ==
+trades: 28017 | events: 496 | value transferred to the informed side ($): 22891
+                                    trades     shares  transfer  avg_yes_price
+taker_short_yes lagb                                                          
+False           (0.0, 2.0]            1423  88,754.67  1,592.21           0.05
+                (2.0, 4.0]            1462 110,823.86    886.82           0.01
+                (4.0, 6.0]            1566 122,888.46  1,019.15           0.01
+                (6.0, 10.0]           1421 171,229.87    276.70           0.00
+                (10.0, 15.0]           834  86,680.13    131.23           0.00
+                (15.0, 30.0]          1178 100,147.33    230.47           0.00
+                (30.0, 60.0]          1250  97,499.67    349.95           0.00
+                (60.0, 180.0]         1971 202,724.03  1,050.13           0.01
+                (180.0, 1000000.0]    2878 523,119.18  1,450.90           0.00
+True            (0.0, 2.0]            2177 272,682.89 10,297.76           0.04
+                (2.0, 4.0]            1952 175,386.97  1,367.57           0.01
+                (4.0, 6.0]            1964 246,741.56  2,364.73           0.01
+                (6.0, 10.0]            585  60,997.04     80.37           0.00
+                (10.0, 15.0]           393  16,018.41     42.71           0.00
+                (15.0, 30.0]           657  31,873.98    114.55           0.00
+                (30.0, 60.0]           913  47,947.89    185.81           0.01
+                (60.0, 180.0]         1474  73,547.24    647.89           0.01
+                (180.0, 1000000.0]    3919 215,829.39    801.60           0.00
+
+only trades with dead-bucket YES price >= 3c: trades 1639 | transfer $ 15088 | by informed takers $ 12120 | by uninformed takers buying dead YES $ 2968
+                                    trades  transfer  avg_yes_price
+taker_short_yes lagb                                               
+False           (0.0, 2.0]             218    931.88           0.29
+                (2.0, 4.0]              81    387.68           0.12
+                (4.0, 6.0]              51    429.31           0.21
+                (6.0, 10.0]             10      1.04           0.03
+                (10.0, 15.0]             8      2.29           0.04
+                (15.0, 30.0]             8     43.32           0.05
+                (30.0, 60.0]            28     93.65           0.05
+                (60.0, 180.0]           70    715.52           0.10
+                (180.0, 1000000.0]      41    363.61           0.07
+True            (0.0, 2.0]             516  8,836.27           0.15
+                (2.0, 4.0]             143    885.52           0.08
+                (4.0, 6.0]             124  1,730.06           0.16
+                (10.0, 15.0]             6      2.62           0.05
+                (15.0, 30.0]            28     37.37           0.05
+                (30.0, 60.0]            36     17.31           0.04
+                (60.0, 180.0]          166    379.37           0.10
+                (180.0, 1000000.0]     105    231.46           0.05
+
+per-kind/city transfer for yes>=3c:
+                transfer  trades  events
+kind    city                            
+highest london  6,648.88     608      62
+        nyc     2,859.64     405      49
+        paris   3,734.86     412      51
+lowest  london  1,135.49     103      48
+        nyc       294.30      49      31
+        paris     415.11      62      34
+
+top informed takers of dead buckets:
+                                            transfer  trades  med_lag  events
+wallet                                                                       
+0x2d0fbf69…  2,787.46      60     1.17      57
+0x6011655c…  2,632.54      88     1.65      79
+0xb89bfe9b…    829.46      16     1.53      14
+0xf2164d15…    532.26      22     1.35      10
+0x9980c046…    484.87      15     1.33      14
+0x376a5fd4…    365.78      13     1.53       9
+0xf7625327…    317.68      22     1.45      21
+0x5fe79a73…    296.74      17     0.90       8
+0x5e50d999…    284.22       7     1.08       6
+0xec3ab7f7…    218.78      22     2.68       6

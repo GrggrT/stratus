@@ -1,0 +1,7 @@
+ghest-temperature-in-nyc-on-july-10-2026 city='New York City'  event candidates=['KLGA'] market-level candidates(first)=['KLGA'] unparseable_markets=0 | rsrc='https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA'
+est-temperature-in-nyc-on-august-20-2026 city='New York City'  event candidates=['KLGA'] market-level candidates(first)=['KLGA'] unparseable_markets=0 | rsrc='https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA'
+est-temperature-in-nyc-on-august-25-2026 city='New York City'  event candidates=[] market-level candidates(first)=[] unparseable_markets=0 | rsrc='https://www.weather.gov/wrh/timeseries?site=klga'
+mperature-in-london-on-september-15-2026 city='London'         event candidates=[] market-level candidates(first)=[] unparseable_markets=0 | rsrc='https://www.weather.gov/wrh/timeseries?site=eglc'
+-temperature-in-paris-on-october-15-2026 city='Paris'          event candidates=[] market-level candidates(first)=[] unparseable_markets=0 | rsrc='https://www.weather.gov/wrh/timeseries?site=lfpb'
+st-temperature-in-nyc-on-october-25-2026 city='New York City'  event candidates=[] market-level candidates(first)=[] unparseable_markets=0 | rsrc='https://aviationweather.gov/api/data/metar?ids=KLGA&format=raw&date=2026-10-26T
+temperature-in-paris-on-november-10-2026 city='Paris'          event candidates=[] market-level candidates(first)=[] unparseable_markets=0 | rsrc='https://aviationweather.gov/api/data/metar?ids=LFPB&format=raw&date=2026-11-11T

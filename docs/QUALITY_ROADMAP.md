@@ -1,5 +1,11 @@
 # STRATUS quality roadmap
 
+> **Superseded, 2026-11-24.** The live gate, the model-validation phase and the
+> signal-engine phase below rest on assumptions that no longer hold (resolution
+> source, closing-line value, three-city universe). The current direction is
+> `docs/STRATEGY_REVIEW_2026-11.md`. The data-quality and fail-closed principles
+> in this document remain valid.
+
 Status: roadmap for moving STRATUS from a working paper-trading prototype to a
 validated, operator-grade trading system.
 

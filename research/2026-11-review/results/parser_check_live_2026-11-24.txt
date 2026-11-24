@@ -1,0 +1,6 @@
+3 London|high|cands=[]
+3 London|low|cands=[]
+3 New York City|high|cands=[]
+3 New York City|low|cands=[]
+3 Paris|high|cands=[]
+3 Paris|low|cands=[]

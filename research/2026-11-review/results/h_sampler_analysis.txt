@@ -1,0 +1,51 @@
+samples: 11 from 20261124T210343 to 20261124T213344 | market-samples: 5380
+                 markets    rate  no_mid  zeroQ  rate_noQ  est_c2  est_u2  est_c2_mid_only  est_u2_mid_only
+ts                                                                                                         
+20261124T210343    495.0 6,667.8   124.0  211.0   2,252.5 3,918.8 3,480.9          3,177.6          2,739.6
+20261124T210644    489.0 6,649.8   115.0  206.0   2,283.8 3,890.6 3,486.4          3,201.4          2,797.1
+20261124T210944    482.0 6,512.8   113.0  201.0   2,091.2 3,521.6 3,116.8          2,842.4          2,437.5
+20261124T211244    491.0 6,725.8   116.0  213.0   2,250.8 3,842.1 3,397.8          3,120.8          2,676.5
+20261124T211544    486.0 6,665.8   114.0  209.0   2,366.2 3,795.9 3,375.8          3,090.6          2,670.5
+20261124T211848    490.0 6,665.8   117.0  207.0   2,152.5 3,982.9 3,553.6          3,266.6          2,837.3
+20261124T212146    487.0 6,569.8   112.0  207.0   2,192.2 3,807.8 3,401.1          3,113.5          2,706.9
+20261124T212446    495.0 6,672.8   119.0  219.0   2,426.2 3,934.9 3,513.5          3,203.6          2,782.3
+20261124T212746    490.0 6,727.8   117.0  208.0   2,266.2 3,914.1 3,510.4          3,197.8          2,794.1
+20261124T213045    490.0 6,726.8   115.0  213.0   2,423.0 3,999.5 3,576.9          3,284.2          2,861.7
+20261124T213344    485.0 6,727.8   115.0  212.0   2,619.0 4,102.0 3,707.3          3,367.8          2,973.0
+
+mean over samples: pool $/day 6665 | markets 489 | with no qualifying order at all 210 (43%) | $/day sitting in those 2302
+hypothetical 20-share two-sided quoter at 2c from mid in EVERY rewarded market: central 3883 $/day-rate; conservative 3465 | restricted to markets that already have a two-sided mid: central 3170 conservative 2752
+top 25 markets by conservative expected reward: capital $480 | conservative $1,029/day | central $1,074/day | of which in markets w/o existing mid: $0
+top 50 markets by conservative expected reward: capital $960 | conservative $1,579/day | central $1,663/day | of which in markets w/o existing mid: $63
+top 100 markets by conservative expected reward: capital $1,920 | conservative $2,287/day | central $2,418/day | of which in markets w/o existing mid: $303
+[only markets with an existing two-sided mid] top 25: capital $480 | conservative $1,029/day | central $1,074/day
+[only markets with an existing two-sided mid] top 50: capital $960 | conservative $1,566/day | central $1,654/day
+[only markets with an existing two-sided mid] top 100: capital $1,920 | conservative $2,156/day | central $2,303/day
+
+by kind/day (mean per sample): pool, zero-Q share, conservative est for min-size quoter
+               pool  markets  zeroQ_share   est_u  est_u_mid
+kind    day                                                 
+highest 24    313.5      8.5          0.6   278.8      278.8
+        25  2,428.2    146.4          0.0   854.1      853.6
+        26  3,289.9    232.7          0.5 1,815.6    1,250.3
+lowest  24     31.5      6.0          0.7    21.4       21.4
+        25    252.2     34.5          0.7   204.5      169.3
+        26    349.5     60.9          0.8   291.0      178.9
+
+per-event pool distribution ($/day): {'count': 109.0, 'mean': 61.1, 'std': 34.9, 'min': 3.8, '10%': 31.1, '50%': 45.0, '90%': 122.9, 'max': 140.4}
+examples for the three STRATUS cities:
+                                                   pool  est_u    n
+event                                                              
+highest-temperature-in-london-on-november-25-2026  45.0    2.5  3.0
+highest-temperature-in-london-on-november-26-2026  45.0    3.7  3.0
+highest-temperature-in-nyc-on-november-25-2026     45.0    8.9  3.0
+highest-temperature-in-nyc-on-november-26-2026    140.4  115.0  7.0
+highest-temperature-in-paris-on-november-25-2026   45.0    5.3  4.0
+highest-temperature-in-paris-on-november-26-2026   45.0    2.5  3.0
+lowest-temperature-in-london-on-november-25-2026   25.9   13.6  3.0
+lowest-temperature-in-london-on-november-26-2026   29.5    1.5  4.0
+lowest-temperature-in-nyc-on-november-24-2026      31.5   21.4  6.0
+lowest-temperature-in-nyc-on-november-25-2026      36.0   35.4 10.0
+lowest-temperature-in-nyc-on-november-26-2026      50.0   48.5 11.0
+lowest-temperature-in-paris-on-november-25-2026    25.5   21.3  5.0
+lowest-temperature-in-paris-on-november-26-2026    35.0   21.8  7.0
