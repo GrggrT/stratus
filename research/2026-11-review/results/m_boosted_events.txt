@@ -1,0 +1,45 @@
+samples: 13 20261125T121112 → 20261125T124712 | pool mean $/day: 15880 | markets: 655 | markets with no order inside the band: 376
+
+per-event pool: {'count': 130.0, 'mean': 123.0, 'std': 148.0, 'min': 15.0, '10%': 15.0, '50%': 56.0, '90%': 500.0, 'max': 500.0}
+
+by event-pool tier:
+                  markets  events    pool  with_two_sided_book  median_in_band_score  p90_in_band_score  markets_score_gt_1000  min_size_quote_formula_usd  share_pct
+tier                                                                                                                                                                 
+event pool ≤ $60    269.0    65.0 2,459.6                  0.8                  26.1              181.2                   10.0                       729.7       29.7
+$60–110             143.0    21.0 1,568.1                  0.5                   0.0               47.0                    1.0                       758.5       48.4
+$110–200            195.0    27.0 3,830.6                  0.5                   0.0                3.0                    1.0                     2,472.4       64.5
+$400–500             74.0    17.0 8,370.0                  0.9                 117.8            2,164.1                   18.0                     1,897.0       22.7
+
+boosted events, per rewarded market (score = formula score of all resting orders inside the band):
+                                                                                   event  rate    qtot  share_cons  exp_cons
+slug                                                                                                                        
+highest-temperature-in-tokyo-on-november-26-2026-14c                tokyo-on-november-26 284.5 1,846.6         0.0       5.9
+highest-temperature-in-seoul-on-november-26-2026-15c                seoul-on-november-26 283.6 2,531.9         0.0       5.0
+highest-temperature-in-munich-on-november-26-2026-0c               munich-on-november-26 274.9 3,402.2         0.0       5.7
+highest-temperature-in-munich-on-november-25-2026-1c               munich-on-november-25 270.2     0.2         1.0     263.5
+highest-temperature-in-seoul-on-november-27-2026-15c                seoul-on-november-27 269.2 1,470.6         0.0       5.7
+highest-temperature-in-munich-on-november-27-2026-0c               munich-on-november-27 269.2 2,308.8         0.1      23.6
+highest-temperature-in-busan-on-november-27-2026-19c                busan-on-november-27 264.8    94.1         0.2      59.3
+highest-temperature-in-paris-on-november-26-2026-6c                 paris-on-november-26 264.5   426.2         0.1      13.5
+highest-temperature-in-seoul-on-november-25-2026-11c                seoul-on-november-25 258.6    20.4         0.4     109.7
+highest-temperature-in-paris-on-november-25-2026-5c                 paris-on-november-25 251.8     8.7         0.6     158.3
+highest-temperature-in-buenos-aires-on-november-26-2026-27c  buenos-aires-on-november-26 241.7 1,685.1         0.0       4.1
+highest-temperature-in-seoul-on-november-25-2026-12c                seoul-on-november-25 241.4    19.3         0.7     175.1
+highest-temperature-in-busan-on-november-26-2026-15c                busan-on-november-26 238.7 2,166.2         0.0       7.8
+highest-temperature-in-buenos-aires-on-november-25-2026-30c  buenos-aires-on-november-25 226.5     4.7         0.7     161.1
+highest-temperature-in-paris-on-november-27-2026-3c                 paris-on-november-27 223.2 1,825.0         0.1      20.9
+highest-temperature-in-paris-on-november-25-2026-6c                 paris-on-november-25 221.3    17.9         0.4      86.2
+highest-temperature-in-tokyo-on-november-27-2026-17c                tokyo-on-november-27 202.3 1,788.8         0.0       2.6
+highest-temperature-in-busan-on-november-26-2026-16c                busan-on-november-26 197.6    57.3         0.1      25.2
+highest-temperature-in-busan-on-november-27-2026-20c                busan-on-november-27 193.4    55.3         0.3      67.0
+highest-temperature-in-munich-on-november-27-2026-1c               munich-on-november-27 193.3   628.2         0.0       9.1
+highest-temperature-in-tokyo-on-november-27-2026-18c                tokyo-on-november-27 190.0 2,020.8         0.0       4.4
+highest-temperature-in-tokyo-on-november-26-2026-15c                tokyo-on-november-26 187.6 2,987.5         0.0       4.2
+highest-temperature-in-munich-on-november-25-2026-0c               munich-on-november-25 182.8     1.3         0.9     157.5
+highest-temperature-in-munich-on-november-26-2026-neg-1c           munich-on-november-26 177.6 2,159.1         0.0       3.4
+highest-temperature-in-paris-on-november-26-2026-7c                 paris-on-november-26 167.8    82.2         0.1      16.9
+highest-temperature-in-seoul-on-november-27-2026-16c                seoul-on-november-27 166.1 2,205.4         0.0       8.1
+highest-temperature-in-seoul-on-november-26-2026-14c                seoul-on-november-26 146.9   630.4         0.0       4.5
+highest-temperature-in-buenos-aires-on-november-25-2026-31c  buenos-aires-on-november-25 146.5    47.2         0.2      24.2
+highest-temperature-in-buenos-aires-on-november-26-2026-28c  buenos-aires-on-november-26 142.2 1,068.4         0.0       1.7
+highest-temperature-in-paris-on-november-27-2026-4c                 paris-on-november-27 135.8 2,104.7         0.0       5.8

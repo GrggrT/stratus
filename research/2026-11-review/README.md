@@ -92,6 +92,37 @@ uv run python research/2026-11-review/scripts/parser_history.py
 | `g_mm_replay.py` | Adverse selection of a naive min-size market-following quoter (tape replay) | `g_mm_replay.txt` |
 | `rewards_scan.py`, `comp_check.py`, `reward_sampler.py`, `h_sampler_analysis.py` | Size of the liquidity-reward pool and how contested it is | `h_sampler_analysis.txt` |
 | `fetch_events_all.py`, `i_all_cities.py` | Do the taker/maker anatomy and the naive-quoter cost carry over to all 49 cities? | `i_all_cities.txt` |
+| `j_rewards_platform.py`, `k_platform_analysis.py` | How large is the liquidity-reward programme across the whole platform, by category, horizon and rate? | `k_platform_rewards.txt` |
+| `l_book_share.py` | Which category is least supplied: reward pool per dollar of resting in-band liquidity, from live books | `l_book_share_by_category.txt` |
+| `reward_sampler2.py`, `m_boosted_events.py` | Who already sits in the boosted temperature pools (2026-11-25 sample)? | `m_boosted_events.txt` |
+| `predico_fetch_elia.py`, `predico_benchmark.py` | How accurate is the grid operator's own Belgian solar forecast, the bar a Predico entrant must match? | `predico_benchmark.txt` |
+
+## Second study, 2026-11-25
+
+```bash
+.venv/bin/python scripts/j_rewards_platform.py
+```
+
+```bash
+.venv/bin/python scripts/k_platform_analysis.py
+```
+
+```bash
+.venv/bin/python scripts/l_book_share.py
+```
+
+```bash
+.venv/bin/python scripts/predico_fetch_elia.py
+```
+
+```bash
+.venv/bin/python scripts/predico_benchmark.py
+```
+
+`k` and `l` are single live snapshots; reward rates changed by more than a factor of two
+between the evening of 24 November and midday on the 25th, so rerun them rather than reuse the
+saved numbers. The Predico day-ahead backtest itself is not in this pack: the forecast-archive
+quota on the shared address used for this study was exhausted.
 
 ## Known limitations
 
@@ -103,5 +134,7 @@ uv run python research/2026-11-review/scripts/parser_history.py
 - There is no public historical order book. The maker replay and the reward-share estimate
   therefore rest on the trade tape and on live book samples; both are stated as bounds in the
   review, not as forecasts of income.
+- Gamma's `volume` field counts shares, not dollars. Every dollar figure in the result files is
+  price × size from the trade tape.
 - `d_nowcast.py` is a deliberately simple baseline (analog days, no NWP). It answers "is a
   trivial model enough?", not "what is the best possible nowcast?".
