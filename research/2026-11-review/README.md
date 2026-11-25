@@ -1,8 +1,8 @@
 # Review evidence pack — 2026-11-24
 
 Reproducible measurements behind `docs/STRATEGY_REVIEW_2026-11.md`. Everything here reads
-public endpoints only (Polymarket Gamma / CLOB / Data API v2, aviationweather.gov, IEM); no
-wallet, no credentials, no orders.
+public endpoints only (Polymarket Gamma / CLOB / Data API v2, aviationweather.gov, IEM, Elia
+Open Data, the Kalshi public API); no wallet, no credentials, no orders.
 
 This directory is research tooling, not part of the `stratus` package: it is outside the
 `ruff` / `mypy` / `pytest` scope on purpose and must never be imported by `src/`.
@@ -96,6 +96,8 @@ uv run python research/2026-11-review/scripts/parser_history.py
 | `l_book_share.py` | Which category is least supplied: reward pool per dollar of resting in-band liquidity, from live books | `l_book_share_by_category.txt` |
 | `reward_sampler2.py`, `m_boosted_events.py` | Who already sits in the boosted temperature pools (2026-11-25 sample)? | `m_boosted_events.txt` |
 | `predico_fetch_elia.py`, `predico_benchmark.py` | How accurate is the grid operator's own Belgian solar forecast, the bar a Predico entrant must match? | `predico_benchmark.txt` |
+| `kalshi_facts.py` | Do resting orders pay a fee on Kalshi temperature series, is any incentive programme active on them, is Austria a restricted jurisdiction? | `kalshi_facts.txt` |
+| `kalshi_fetch_trades.py`, `kalshi_maker_pnl.py` | Do makers earn anything on Kalshi's daily high-temperature markets (New York, Chicago)? | `kalshi_maker_pnl.txt` |
 
 ## Second study, 2026-11-25
 
@@ -119,10 +121,35 @@ uv run python research/2026-11-review/scripts/parser_history.py
 .venv/bin/python scripts/predico_benchmark.py
 ```
 
+```bash
+.venv/bin/python scripts/kalshi_facts.py
+```
+
+```bash
+.venv/bin/python scripts/kalshi_fetch_trades.py KXHIGHNY 2026-06-15 2026-11-24
+```
+
+```bash
+.venv/bin/python scripts/kalshi_fetch_trades.py KXHIGHCHI 2026-06-15 2026-11-24
+```
+
+```bash
+.venv/bin/python scripts/kalshi_maker_pnl.py data/kalshi/trades_KXHIGHNY.jsonl.gz
+```
+
+```bash
+.venv/bin/python scripts/kalshi_maker_pnl.py data/kalshi/trades_KXHIGHCHI.jsonl.gz
+```
+
 `k` and `l` are single live snapshots; reward rates changed by more than a factor of two
 between the evening of 24 November and midday on the 25th, so rerun them rather than reuse the
 saved numbers. The Predico day-ahead backtest itself is not in this pack: the forecast-archive
 quota on the shared address used for this study was exhausted.
+
+Each Kalshi trade download takes about 15 minutes per series (roughly 1,000 markets). The
+third check in `kalshi_facts.py` needs the `pdftotext` binary and is skipped without it. The
+dates passed to `kalshi_fetch_trades.py` are market close dates in UTC; a daily event closes on
+the morning after its event date.
 
 ## Known limitations
 
@@ -138,3 +165,6 @@ quota on the shared address used for this study was exhausted.
   price × size from the trade tape.
 - `d_nowcast.py` is a deliberately simple baseline (analog days, no NWP). It answers "is a
   trivial model enough?", not "what is the best possible nowcast?".
+- The Kalshi maker figures cover two cities (New York and Chicago highs) and assume every
+  maker holds to settlement. In New York about a fifth of the post-switch total comes from one
+  event with a contested settlement (13 November).

@@ -1,0 +1,50 @@
+# Kalshi daily high temperature: maker P&L from the public trade tape, events 2026-06-14 .. 2026-11-23
+# held to settlement, gross of fees (resting orders pay none on these series); split at the 2026-08-14 settlement-source switch
+
+trades_KXHIGHNY.jsonl.gz: markets 978, trades 1466878, events 163
+pre all                            contracts     12791751  trades   623541  events   60  maker P&L $    136676 = +1.07c/contract (se 0.23, t +4.6)
+pre maker pays 10-90c              contracts      5662030  trades   432151  events   60  maker P&L $     56249 = +0.99c/contract (se 0.41, t +2.4)
+pre maker pays >=90c               contracts      5174304  trades    99674  events   60  maker P&L $     80511 = +1.56c/contract (se 0.28, t +5.5)
+pre maker pays <=10c               contracts      1955416  trades    91716  events   60  maker P&L $       -84 = -0.00c/contract (se 1.05, t -0.0)
+pre taker size <10                 contracts      1445935  trades   423504  events   60  maker P&L $     13742 = +0.95c/contract (se 0.30, t +3.1)
+pre taker size 10-100              contracts      5038849  trades   179981  events   60  maker P&L $     51592 = +1.02c/contract (se 0.22, t +4.7)
+pre taker size 100-1000            contracts      4423853  trades    19321  events   60  maker P&L $     47806 = +1.08c/contract (se 0.32, t +3.4)
+pre taker size >=1000              contracts      1883115  trades      735  events   59  maker P&L $     23536 = +1.25c/contract (se 0.57, t +2.2)
+post all                           contracts     18959012  trades   843337  events  103  maker P&L $    199138 = +1.05c/contract (se 0.24, t +4.4)
+post maker pays 10-90c             contracts      7045157  trades   585032  events  103  maker P&L $     38400 = +0.55c/contract (se 0.62, t +0.9)
+post maker pays >=90c              contracts      8843432  trades   148269  events  103  maker P&L $   -121334 = -1.37c/contract (se 1.87, t -0.7)
+post maker pays <=10c              contracts      3070423  trades   110036  events  103  maker P&L $    282072 = +9.19c/contract (se 6.69, t +1.4)
+post taker size <10                contracts      1639353  trades   540473  events  103  maker P&L $     13650 = +0.83c/contract (se 0.28, t +3.0)
+post taker size 10-100             contracts      7522983  trades   277231  events  103  maker P&L $     29744 = +0.40c/contract (se 0.43, t +0.9)
+post taker size 100-1000           contracts      6121381  trades    24254  events  103  maker P&L $      9903 = +0.16c/contract (se 0.84, t +0.2)
+post taker size >=1000             contracts      3675295  trades     1379  events  102  maker P&L $    145841 = +3.97c/contract (se 2.85, t +1.4)
+post: total maker P&L $199138; events with positive maker P&L 70/103; five largest single-event contributions:
+   KXHIGHNY-26NOV13: $+38750 on 934752 contracts
+   KXHIGHNY-26AUG28: $+19727 on 144992 contracts
+   KXHIGHNY-26SEP21: $+13497 on 197626 contracts
+   KXHIGHNY-26OCT13: $+12739 on 329194 contracts
+   KXHIGHNY-26NOV05: $+9476 on 381827 contracts
+
+trades_KXHIGHCHI.jsonl.gz: markets 978, trades 935216, events 163
+pre all                            contracts      7847019  trades   414650  events   60  maker P&L $    -28147 = -0.36c/contract (se 0.27, t -1.4)
+pre maker pays 10-90c              contracts      3401299  trades   285381  events   60  maker P&L $    -52644 = -1.55c/contract (se 0.49, t -3.1)
+pre maker pays >=90c               contracts      3068727  trades    62189  events   60  maker P&L $     15902 = +0.52c/contract (se 0.59, t +0.9)
+pre maker pays <=10c               contracts      1376993  trades    67080  events   60  maker P&L $      8595 = +0.62c/contract (se 1.15, t +0.5)
+pre taker size <10                 contracts       893472  trades   286534  events   60  maker P&L $      3777 = +0.42c/contract (se 0.25, t +1.7)
+pre taker size 10-100              contracts      3202706  trades   116176  events   60  maker P&L $     -6582 = -0.21c/contract (se 0.32, t -0.6)
+pre taker size 100-1000            contracts      2487835  trades    11447  events   60  maker P&L $    -20702 = -0.83c/contract (se 0.43, t -1.9)
+pre taker size >=1000              contracts      1263006  trades      493  events   56  maker P&L $     -4639 = -0.37c/contract (se 0.63, t -0.6)
+post all                           contracts      9575451  trades   520566  events  103  maker P&L $      2675 = +0.03c/contract (se 0.19, t +0.1)
+post maker pays 10-90c             contracts      3501938  trades   345960  events  103  maker P&L $    -29907 = -0.85c/contract (se 0.46, t -1.8)
+post maker pays >=90c              contracts      4638424  trades   102534  events  103  maker P&L $     45179 = +0.97c/contract (se 0.31, t +3.2)
+post maker pays <=10c              contracts      1435089  trades    72072  events  103  maker P&L $    -12597 = -0.88c/contract (se 0.77, t -1.1)
+post taker size <10                contracts      1028317  trades   345934  events  103  maker P&L $       900 = +0.09c/contract (se 0.38, t +0.2)
+post taker size 10-100             contracts      4062595  trades   161840  events  103  maker P&L $     -7407 = -0.18c/contract (se 0.27, t -0.7)
+post taker size 100-1000           contracts      3018904  trades    12150  events  103  maker P&L $     -4475 = -0.15c/contract (se 0.24, t -0.6)
+post taker size >=1000             contracts      1465636  trades      642  events   95  maker P&L $     13657 = +0.93c/contract (se 0.17, t +5.6)
+post: total maker P&L $2675; events with positive maker P&L 55/103; five largest single-event contributions:
+   KXHIGHCHI-26OCT15: $-10351 on 184111 contracts
+   KXHIGHCHI-26SEP12: $+4288 on 75799 contracts
+   KXHIGHCHI-26SEP08: $+4247 on 92957 contracts
+   KXHIGHCHI-26AUG13: $-4048 on 132164 contracts
+   KXHIGHCHI-26OCT11: $+3935 on 127526 contracts

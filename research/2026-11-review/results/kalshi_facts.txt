@@ -1,0 +1,13 @@
+1. Series
+   KXHIGHNY   fee_type=quadratic fee_multiplier=1 settlement=The Weather Company
+   KXHIGHCHI  fee_type=quadratic fee_multiplier=1 settlement=The Weather Company
+   KXLOWTNYC  fee_type=quadratic fee_multiplier=1 settlement=The Weather Company
+   fee_type 'quadratic' = taker-only fee; maker fees exist only on 'quadratic_with_maker_fees' series
+2. Active incentive programmes
+   programmes 5882, total period reward $594,198, more pages: False
+   on daily temperature series (KXHIGH*/KXLOW*): 0
+   by type: {'liquidity': 5882}
+3. Member Agreement, restricted jurisdictions
+   listed: 55
+   EU member states listed: Belgium, Bulgaria, France, Hungary, Ireland, Italy, Poland, Portugal
+   Austria listed: False
