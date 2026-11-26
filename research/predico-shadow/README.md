@@ -50,6 +50,15 @@ index differs from the API's hourly value by 0.05 on average. Forecasts made fro
 and from API inputs differ by 0.4% of capacity (RMSE over nine days) against a forecast error
 of about 1.6%.
 
+The daily run starts at 09:17 Brussels time and takes about two minutes. It uses whatever run
+of each model is in the bucket at that moment, and `forecasts/<day>.json` records which. In
+practice that is the 06Z run of ICON-D2, the 03Z run of ICON-EU and AROME, the 00Z run of
+ARPEGE and GFS. The 00Z run of IFS reaches the bucket between about 07:50 and 08:30 UTC or
+later: on 2026-11-26 it had not arrived by 08:27 UTC, so that day's forecast used the IFS run
+of 18Z the evening before. The backtest and the hindcast assumed the 00Z run of IFS every day,
+which a live entry cannot always have; the final comparison should split the live days by the
+IFS run they used.
+
 ## Files
 
 - `forecasts/<day>.csv` — `datetime_utc` (interval start), `q10_mw`, `q50_mw`, `q90_mw`, and
