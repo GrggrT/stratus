@@ -132,13 +132,18 @@ def features(hourly, models):
     return f
 
 
+def make_model(loss="squared_error", quantile=None, light=False):
+    """The one model definition used by the backtest and by the live shadow run."""
+    return HistGradientBoostingRegressor(loss=loss, quantile=quantile, learning_rate=0.05, random_state=0, l2_regularization=1.0,
+                                         max_iter=300 if light else 600, max_leaf_nodes=15 if light else 31,
+                                         min_samples_leaf=100 if light else 40)
+
+
 def fit_predict(train, test_x, cs_test, target="lf", loss="squared_error", quantile=None, light=False):
     """Fit on daylight training rows and predict the load factor for the given test rows."""
     tr = train[(train.cs > 5) & train.lf.notna()]
     x = tr[feature_cols(train)]
-    model = HistGradientBoostingRegressor(loss=loss, quantile=quantile, learning_rate=0.05, random_state=0, l2_regularization=1.0,
-                                          max_iter=300 if light else 600, max_leaf_nodes=15 if light else 31,
-                                          min_samples_leaf=100 if light else 40)
+    model = make_model(loss, quantile, light)
     if target == "lf":
         model.fit(x, tr.lf)
         pred = model.predict(test_x)

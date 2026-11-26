@@ -1,0 +1,22 @@
+{
+  "trained_on": [
+    "2025-01-01 08:00:00+00:00",
+    "2026-10-25 16:00:00+00:00"
+  ],
+  "rows": 31923,
+  "models": [
+    "ifs",
+    "iconeu",
+    "arpege",
+    "gfs",
+    "icond2",
+    "arome"
+  ],
+  "point_forecast": "mean of load-factor and clear-sky-ratio gradient boosting, trailing bias correction",
+  "band_widening_per_kw_clear_sky": 0.02185,
+  "band_calibrated_on": [
+    "2026-06-02",
+    "2026-10-25"
+  ],
+  "last_known_capacity_mw": 12128.284
+}
