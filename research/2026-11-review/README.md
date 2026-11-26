@@ -96,6 +96,7 @@ uv run python research/2026-11-review/scripts/parser_history.py
 | `l_book_share.py` | Which category is least supplied: reward pool per dollar of resting in-band liquidity, from live books | `l_book_share_by_category.txt` |
 | `reward_sampler2.py`, `m_boosted_events.py` | Who already sits in the boosted temperature pools (2026-11-25 sample)? | `m_boosted_events.txt` |
 | `predico_fetch_elia.py`, `predico_benchmark.py` | How accurate is the grid operator's own Belgian solar forecast, the bar a Predico entrant must match? | `predico_benchmark.txt` |
+| `predico_fetch_nwp.py`, `predico_backtest.py` | Can a forecast built only from public weather models match Elia's own day-ahead solar forecast, the entry bar of the Predico forecast market? | `predico_backtest.txt` |
 | `kalshi_facts.py` | Do resting orders pay a fee on Kalshi temperature series, is any incentive programme active on them, is Austria a restricted jurisdiction? | `kalshi_facts.txt` |
 | `kalshi_fetch_trades.py`, `kalshi_maker_pnl.py` | Do makers earn anything on Kalshi's daily high-temperature markets (New York, Chicago)? | `kalshi_maker_pnl.txt` |
 
@@ -143,8 +144,37 @@ uv run python research/2026-11-review/scripts/parser_history.py
 
 `k` and `l` are single live snapshots; reward rates changed by more than a factor of two
 between the evening of 24 November and midday on the 25th, so rerun them rather than reuse the
-saved numbers. The Predico day-ahead backtest itself is not in this pack: the forecast-archive
-quota on the shared address used for this study was exhausted.
+saved numbers.
+
+## Predico backtest, 2026-11-26
+
+```bash
+.venv/bin/pip install scikit-learn
+```
+
+```bash
+.venv/bin/python scripts/predico_fetch_nwp.py lagged 2025-01-01 2026-10-25
+```
+
+```bash
+.venv/bin/python scripts/predico_fetch_nwp.py runs 2026-06-02 2026-10-25
+```
+
+```bash
+.venv/bin/python scripts/predico_fetch_nwp.py runs03 2026-06-02 2026-10-25
+```
+
+```bash
+.venv/bin/python scripts/predico_backtest.py
+```
+
+The three downloads use the free Open-Meteo archive APIs, about 4,000 weighted calls in total
+against a shared daily allowance of 10,000 per address, and take roughly an hour because the
+single-run endpoint is slow. They stop cleanly at the daily limit and resume where they left
+off. The single-run archive only reaches back about six months, so the test window cannot be
+moved earlier than June 2026; rerun later and the window has to move with it. The free tier is
+for non-commercial use: a production entry needs its own ingestion of the national weather
+services' open data or a paid plan.
 
 Each Kalshi trade download takes about 15 minutes per series (roughly 1,000 markets). The
 third check in `kalshi_facts.py` needs the `pdftotext` binary and is skipped without it. The
@@ -165,6 +195,11 @@ the morning after its event date.
   price × size from the trade tape.
 - `d_nowcast.py` is a deliberately simple baseline (analog days, no NWP). It answers "is a
   trivial model enough?", not "what is the best possible nowcast?".
+- The Predico backtest covers one target (Belgian solar) and one season (June to October
+  2026). It uses archived forecasts as an aggregator stored them, not a live pipeline, and
+  compares against Elia's 11:00 day-ahead forecast; the reference inside a Predico round may be
+  a different vintage. The trailing bias correction uses consolidated measurements, which are
+  slightly better than the preliminary values available on the day.
 - The Kalshi maker figures cover two cities (New York and Chicago highs) and assume every
   maker holds to settlement. In New York about a fifth of the post-switch total comes from one
   event with a contested settlement (13 November).
