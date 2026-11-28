@@ -1,0 +1,53 @@
+events: 1150 | cities: 49 | trades: 705677 | notional $ 12559459 | taker wallets: 7069
+
+== taker P&L by tier and kind (maker gross = -taker gross) ==
+               events    trades     notional    gross     fees      net  net_bps  se_bps    t  gross_per_event
+tier  kind                                                                                                    
+other highest   643.0 602,143.0 10,741,527.1 56,227.6 13,494.4 42,733.2     39.8    15.5  2.6             87.4
+      lowest    423.0  32,229.0    616,724.9   -846.4    553.4 -1,399.9    -22.7    81.1 -0.3             -2.0
+top3  highest    42.0  60,749.0  1,049,140.9   -721.0  1,575.9 -2,296.9    -21.9    35.5 -0.6            -17.2
+      lowest     42.0  10,556.0    152,066.0  2,999.4    188.5  2,811.0    184.9    74.5  2.5             71.4
+
+== by tier, kind, phase ==
+                     events    trades    notional    gross    fees      net  net_bps  se_bps    t  gross_per_event
+tier  kind    phase                                                                                               
+other highest D-2     643.0  53,818.0   821,781.4 19,908.8 1,708.8 18,200.0    221.5    68.2  3.2             31.0
+              D-1     643.0 161,835.0 2,399,434.1 22,509.4 5,183.3 17,326.1     72.2    52.8  1.4             35.0
+              D       643.0 385,652.0 7,468,207.5 13,932.1 6,600.4  7,331.7      9.8    15.1  0.6             21.7
+              after   266.0     838.0    52,104.0   -122.7     1.9   -124.6    -23.9    11.2 -2.1             -0.5
+      lowest  D-2     213.0   5,244.0    82,656.2  3,998.1   121.7  3,876.4    469.0   347.9  1.3             18.8
+              D-1     328.0   9,037.0   149,387.9 -4,982.8   258.5 -5,241.3   -350.9   204.1 -1.7            -15.2
+              D       423.0  16,882.0   361,342.1    163.1   172.1     -9.0     -0.2    46.9 -0.0              0.4
+              after   330.0   1,066.0    23,338.8    -24.9     1.1    -26.0    -11.1    19.2 -0.6             -0.1
+top3  highest D-2      42.0   7,382.0    99,717.2  2,084.9   249.1  1,835.8    184.1   181.8  1.0             49.6
+              D-1      42.0  16,257.0   228,255.7  1,006.3   556.7    449.6     19.7   130.3  0.2             24.0
+              D        42.0  37,032.0   715,372.0 -3,806.7   770.0 -4,576.7    -64.0    36.7 -1.7            -90.6
+              after    26.0      78.0     5,796.0     -5.5     0.1     -5.6     -9.7     4.7 -2.1             -0.2
+      lowest  D-2      41.0   1,021.0    13,562.5    791.8    34.7    757.1    558.2   392.4  1.4             19.3
+              D-1      42.0   4,066.0    38,970.5    929.3    94.2    835.1    214.3   177.8  1.2             22.1
+              D        42.0   5,207.0    90,815.8  1,263.3    59.2  1,204.1    132.6    59.7  2.2             30.1
+              after    36.0     262.0     8,717.2     15.1     0.4     14.7     16.9    11.0  1.5              0.4
+
+median event volume by tier/kind:
+               count     mean      std      min      50%       max
+tier  kind                                                        
+other highest  643.0 27,340.2 14,148.5  4,094.2 24,427.7  93,011.1
+      lowest   423.0  2,224.6  4,156.5     75.0    806.1  50,299.5
+top3  highest   42.0 41,308.4 17,229.9 20,682.0 37,733.0 127,341.5
+      lowest    42.0  5,249.0  2,558.7  1,867.2  4,911.1  15,323.7
+
+== naive follower replay, pre-event-day only, delta=0.02, 20 shares: per-event adverse selection by tier/kind ==
+               events  pnl_per_event   se  fills_per_event  shares_per_event
+tier  kind                                                                  
+other highest     643         -10.25 1.61            40.47            479.08
+      lowest      423          -2.26 0.71             4.37             55.27
+top3  highest      42         -10.17 6.92            67.26            813.55
+      lowest       42          -8.85 3.30            19.76            222.52
+
+== naive follower replay, pre-event-day only, delta=0.03, 20 shares: per-event adverse selection by tier/kind ==
+               events  pnl_per_event   se  fills_per_event  shares_per_event
+tier  kind                                                                  
+other highest     643          -6.41 1.31            26.94            317.73
+      lowest      423          -1.98 0.66             3.67             46.03
+top3  highest      42          -5.30 4.72            42.17            508.85
+      lowest       42          -8.54 2.93            15.55            173.45

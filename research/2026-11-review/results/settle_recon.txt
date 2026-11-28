@@ -1,0 +1,6 @@
+events: 96 rule reconstruction matches Polymarket: 96 | mismatches: 0
+events where including SPECI would change the winning bucket: 2
+   {'slug': 'highest-temperature-in-nyc-on-november-12-2026', 'n_routine': 24, 'n_all': 37, 'v': 61, 'c': '16.1', 'winner': ['60-61°F'], 'mine': ['60-61°F'], 'ok': True, 'speci_changes': True, 'tsrc': ['T']}
+   {'slug': 'lowest-temperature-in-nyc-on-november-14-2026', 'n_routine': 24, 'n_all': 30, 'v': 40, 'c': '4.4', 'winner': ['40-41°F'], 'mine': ['40-41°F'], 'ok': True, 'speci_changes': True, 'tsrc': ['T']}
+obs counts per day (routine/all): [(('london', 48, 48), 32), (('paris', 48, 48), 28), (('nyc', 24, 24), 18), (('paris', 47, 47), 4), (('nyc', 24, 38), 4), (('nyc', 24, 25), 4), (('nyc', 24, 37), 2), (('nyc', 24, 30), 2), (('nyc', 24, 26), 2)]
+temp source by city: Counter({('nyc', ('T',)): 32, ('london', ('body',)): 32, ('paris', ('body',)): 32})

@@ -1,0 +1,21 @@
+{
+  "delivery_day": "2026-11-07",
+  "kind": "hindcast",
+  "created_at_utc": "2026-11-26T06:01:29Z",
+  "gate_utc": "2026-11-06T09:00:00Z",
+  "before_gate": null,
+  "model_runs": {
+    "ifs": "2026-11-06T00:00Z",
+    "iconeu": "2026-11-06T00:00Z",
+    "arpege": "2026-11-06T00:00Z",
+    "gfs": "2026-11-06T00:00Z",
+    "icond2": "2026-11-06T03:00Z",
+    "arome": "2026-11-06T03:00Z"
+  },
+  "models_missing": [],
+  "bias_factor": 0.9,
+  "bias_days": 8,
+  "capacity_mw": 12596.983,
+  "energy_mwh": 6575.0,
+  "peak_mw": 1390.9
+}
