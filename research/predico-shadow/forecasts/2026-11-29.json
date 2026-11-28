@@ -1,0 +1,21 @@
+{
+  "delivery_day": "2026-11-29",
+  "kind": "live",
+  "created_at_utc": "2026-11-28T08:19:31Z",
+  "gate_utc": "2026-11-28T09:00:00Z",
+  "before_gate": true,
+  "model_runs": {
+    "ifs": "2026-11-28T00:00Z",
+    "iconeu": "2026-11-28T03:00Z",
+    "arpege": "2026-11-28T00:00Z",
+    "gfs": "2026-11-28T00:00Z",
+    "icond2": "2026-11-28T06:00Z",
+    "arome": "2026-11-28T03:00Z"
+  },
+  "models_missing": [],
+  "bias_factor": 1.0563,
+  "bias_days": 8,
+  "capacity_mw": 12639.019,
+  "energy_mwh": 2581.0,
+  "peak_mw": 480.8
+}

@@ -31,3 +31,4 @@ delivery_day,kind,before_gate,quarter_hours,measured_mwh,rmse_ours_mw,rmse_elia_
 2026-11-24,hindcast,,96,25706,268.4,224.8,597.4,478.9,0.6
 2026-11-25,hindcast,,96,5684,247.5,154.4,318.5,411.7,0.8
 2026-11-26,hindcast,,96,19601,223.2,510.2,574.7,817.7,0.9
+2026-11-27,live,True,96,23220,117.3,597.8,376.5,1175.6,0.9
